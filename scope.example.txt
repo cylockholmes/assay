@@ -1,0 +1,19 @@
+# assay scope file.
+#
+# One entry per line. Plain hostnames match themselves and all subdomains.
+# Wildcards ('*.target.tld'), CIDRs and 're:' regexes are supported.
+# A leading '!' or '-' excludes - exclusions always win over inclusions.
+#
+# Every outbound request is checked against this file. Anything not matched is
+# refused before a packet leaves the box, so paste the program's scope here
+# verbatim before you start.
+
+*.target.tld
+target.tld
+10.20.0.0/16
+192.168.50.0/24
+
+# Out of scope - carve-outs from the program brief
+!vpn.target.tld
+!prod-payments.target.tld
+-10.20.99.0/24

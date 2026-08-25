@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="assay">
+  <title>assay</title>
+  <!-- Hallmark cartouche: an assay office stamps a mark on metal it has
+       tested. Inside, three ascending bars - signal pulled out of the ore -
+       with the tallest capped by the assay mark itself.
+
+       Colours are declared inline so the file works standalone: as a favicon,
+       in an <img>, or inlined in a page. currentColor is deliberately not used
+       here, because an SVG referenced by <img> is an isolated document and
+       would resolve it to black. -->
+  <style>
+    .ink { stroke: #151a1d; }
+    .acc { stroke: #0d6b74; }
+    .accf { fill: #0d6b74; }
+    @media (prefers-color-scheme: dark) {
+      .ink { stroke: #e9eef0; }
+      .acc { stroke: #4fb3bd; }
+      .accf { fill: #4fb3bd; }
+    }
+  </style>
+  <g fill="none" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
+    <path class="ink" d="M32 4 56.25 18 56.25 46 32 60 7.75 46 7.75 18 Z"/>
+    <path class="ink" d="M22 42 V34"/>
+    <path class="ink" d="M32 42 V27"/>
+    <path class="acc" d="M42 42 V21"/>
+  </g>
+  <path class="accf" d="M42 12 46 16.5 42 21 38 16.5 Z"/>
+</svg>

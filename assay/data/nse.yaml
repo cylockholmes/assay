@@ -1,0 +1,228 @@
+# Host-service checks driven by nmap's NSE library.
+#
+# Each rule fires only when the script output contains `match` - the presence
+# of the script alone never produces a finding, because nmap runs a script
+# against every candidate port whether or not the condition holds.
+#
+# `impact` describes what the tester gains, and `step` is the next command.
+
+rules:
+
+- script: ftp-anon
+  ports: [21, 2121]
+  name: Anonymous FTP login permitted
+  severity: high
+  cwe: CWE-306
+  match: 'Anonymous FTP login allowed'
+  impact: >
+    The FTP service accepts the anonymous account. Everything the service
+    exposes is readable without credentials, and if any directory is writable
+    it becomes a file-upload primitive - check for a writable web root.
+  step: "ftp {host}   # log in as 'anonymous' with any password"
+
+- script: nfs-showmount
+  ports: [2049, 111]
+  name: NFS exports readable without authentication
+  severity: high
+  cwe: CWE-306
+  match: '/\S+'
+  impact: >
+    The NFS server lists its exports to any host that asks. Exports shared to
+    '*' can usually be mounted directly, and with no_root_squash the contents
+    are writable as root - a direct path to credential theft or code execution.
+  step: "showmount -e {host}  &&  mount -t nfs {host}:/EXPORT /mnt"
+
+- script: rsync-list-modules
+  ports: [873]
+  name: rsync modules listable without authentication
+  severity: high
+  cwe: CWE-306
+  match: '^\s*\S+\s'
+  impact: >
+    The rsync daemon advertises its modules to anonymous clients. Modules that
+    do not require a secret are readable in full, which frequently means entire
+    application or backup trees.
+  step: "rsync rsync://{host}/  &&  rsync -av rsync://{host}/MODULE/ ./loot/"
+
+- script: smb2-security-mode
+  ports: [445, 139]
+  name: SMB message signing not required
+  severity: medium
+  cwe: CWE-757
+  match: 'Message signing enabled but not required|signing.{0,20}not required'
+  impact: >
+    Without enforced signing, an attacker on the path can relay authentication
+    to this host. Paired with any coercion primitive this is the standard route
+    to authenticated access, and on a domain it often reaches administrative
+    rights on the relayed target.
+  step: "ntlmrelayx.py -t smb://{host} -smb2support   # authorized engagements only"
+
+- script: smb-enum-shares
+  ports: [445, 139]
+  name: SMB shares enumerable via null session
+  severity: high
+  cwe: CWE-306
+  match: 'Anonymous access: READ|access: READ/WRITE'
+  impact: >
+    Shares are listable and readable without credentials. File shares routinely
+    hold configuration with plaintext passwords, backups and private keys -
+    enumerate the contents before deciding severity.
+  step: "smbclient -N -L //{host}/  &&  smbclient -N //{host}/SHARE"
+
+- script: smb-os-discovery
+  ports: [445, 139]
+  name: SMB discloses host and domain details
+  severity: info
+  cwe: CWE-200
+  match: 'OS:|Computer name:|Domain name:'
+  impact: >
+    Not a finding on its own. Records the OS build, hostname and domain, which
+    determine whether known SMB CVEs apply and give you the naming convention
+    for the rest of the estate.
+  step: "nmap --script smb-os-discovery -p445 {host}"
+
+- script: ldap-rootdse
+  ports: [389, 3268]
+  name: LDAP anonymous bind permitted
+  severity: high
+  cwe: CWE-306
+  match: 'namingContexts|defaultNamingContext|rootDomainNamingContext'
+  impact: >
+    The directory answers unauthenticated queries. The root DSE alone reveals
+    the domain structure, and anonymous bind commonly extends to reading user
+    objects - a full username roster, and sometimes credentials left in the
+    description field.
+  step: "ldapsearch -x -H ldap://{host} -b '' -s base namingcontexts"
+
+- script: snmp-info
+  ports: [161]
+  udp: true
+  name: SNMP readable with a default community string
+  severity: high
+  cwe: CWE-1392
+  match: 'enterprise|engineIDFormat|snmpEngineBoot'
+  impact: >
+    SNMP answers with a guessable community string. Read access exposes the
+    interface table, running processes, and on network gear the full running
+    configuration including credential hashes. Write access is device takeover.
+  step: "snmpwalk -v2c -c public {host}   # then try 'private' for write"
+
+- script: rdp-ntlm-info
+  ports: [3389]
+  name: RDP discloses domain and host details pre-authentication
+  severity: low
+  cwe: CWE-200
+  match: 'DNS_Domain_Name|NetBIOS_Computer_Name|Product_Version'
+  impact: >
+    RDP leaks the AD domain, hostname and OS build before authentication.
+    Low severity alone; it supplies the domain name needed for password
+    spraying and confirms whether the build is exposed to known RDP CVEs.
+  step: "nmap --script rdp-ntlm-info,rdp-enum-encryption -p3389 {host}"
+
+- script: rdp-enum-encryption
+  ports: [3389]
+  name: RDP allows connections without NLA
+  severity: medium
+  cwe: CWE-287
+  match: 'CredSSP \(NLA\): FAILED|Native RDP: SUCCESS'
+  impact: >
+    Network Level Authentication is not enforced, so the logon screen is
+    reachable pre-authentication. That exposes the host to credential attacks
+    and to the pre-auth RDP vulnerability classes NLA otherwise mitigates.
+  step: "nmap --script rdp-enum-encryption -p3389 {host}"
+
+- script: vnc-info
+  ports: [5900, 5901, 5800]
+  name: VNC reachable with weak or absent authentication
+  severity: high
+  cwe: CWE-306
+  match: 'None \(0\)|security types:.*None|VNC Authentication \(2\)'
+  impact: >
+    A VNC endpoint offering the "None" security type is interactive desktop
+    access with no credentials. Even where VNC auth is offered, the protocol
+    caps passwords at 8 characters and is trivially brute-forced.
+  step: "vncviewer {host}:PORT"
+
+- script: mongodb-info
+  ports: [27017, 27018]
+  name: MongoDB readable without authentication
+  severity: critical
+  cwe: CWE-306
+  match: 'MongoDB Build info|totalSize|db version'
+  impact: >
+    The instance answers administrative commands unauthenticated, so every
+    database is readable and writable. List the databases to demonstrate
+    exposure and stop - do not read customer records.
+  step: "mongosh --host {host} --eval 'db.adminCommand({listDatabases:1})'"
+
+- script: mysql-empty-password
+  ports: [3306, 3307]
+  name: MySQL account with an empty password
+  severity: critical
+  cwe: CWE-521
+  match: 'account has empty password|Empty password'
+  impact: >
+    A MySQL account authenticates with no password. That is direct database
+    access, and with FILE privileges it extends to reading server-side files
+    and writing a webshell into a served directory.
+  step: "mysql -h {host} -u root"
+
+- script: ms-sql-empty-password
+  ports: [1433]
+  name: MSSQL account with an empty password
+  severity: critical
+  cwe: CWE-521
+  match: 'has an empty password|Login Success'
+  impact: >
+    A SQL Server login authenticates with no password. With xp_cmdshell
+    available - or enableable by a sysadmin login - this is command execution
+    on the host as the service account.
+  step: "impacket-mssqlclient {host}"
+
+- script: smtp-open-relay
+  ports: [25, 465, 587]
+  name: SMTP open relay
+  severity: high
+  cwe: CWE-269
+  match: 'Server is an open relay'
+  impact: >
+    The server relays mail for arbitrary senders and recipients. That allows
+    fully authenticated-looking phishing from the organisation's own
+    infrastructure, and will get the domain blacklisted.
+  step: "swaks --to test@example.com --from spoof@{host} --server {host}"
+
+- script: telnet-encryption
+  ports: [23]
+  name: Telnet without encryption
+  severity: medium
+  cwe: CWE-319
+  match: 'Telnet server does not support encryption|does not support encryption'
+  impact: >
+    Credentials cross the network in cleartext and are recoverable by anyone on
+    the path. On the the gateway network this is demonstrable rather than theoretical.
+  step: "nc {host} 23"
+
+- script: ipmi-version
+  ports: [623]
+  udp: true
+  name: IPMI/BMC management interface exposed
+  severity: high
+  cwe: CWE-306
+  match: 'IPMI-2.0|IPMI-1.5'
+  impact: >
+    A baseboard management controller is reachable. IPMI 2.0 has an unfixable
+    RAKP flaw that returns a crackable password hash to any unauthenticated
+    requester, and BMC access is full out-of-band control of the physical host.
+  step: "msf> use auxiliary/scanner/ipmi/ipmi_dumphashes"
+
+- script: nbstat
+  ports: [137]
+  udp: true
+  name: NetBIOS name service discloses host details
+  severity: info
+  cwe: CWE-200
+  match: 'NetBIOS name:|MAC:'
+  impact: >
+    Supplies the NetBIOS name, domain membership and MAC address, which is
+    useful for mapping the estate and for identifying the hardware vendor.
+  step: "nmblookup -A {host}"

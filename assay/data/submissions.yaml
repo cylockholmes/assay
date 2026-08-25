@@ -1,0 +1,332 @@
+# Submission drafts, keyed by module.
+#
+# Structure follows what typical platform rules of engagement and the standard industry
+# submission form ask for: title, category, CVSS, summary, numbered
+# reproduction, impact, remediation. Placeholders are filled from the finding.
+#
+# IMPORTANT: the CVSS vectors here are defensible starting points for the
+# common case, not verdicts. Adjust for the actual data exposed and the
+# target's context before submitting - a scanner cannot know whether the
+# database behind an SQLi holds test rows or customer PII.
+#
+# Placeholders: {target} {host} {url} {path} {param} {matched} {detail}
+#               {evidence} {repro} {title}
+
+default:
+  category: Security Misconfiguration
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+  summary: >
+    {title} was identified on {target}. {impact}
+  steps:
+    - "Send the request below to {target}."
+    - "Observe the response, which demonstrates the condition described above."
+  remediation: >
+    Remove or restrict access to the affected resource, and confirm the change
+    from an unauthenticated context.
+  notes: >
+    Verify the finding manually and capture a fresh request/response pair
+    before submitting.
+
+exposure:
+  category: Sensitive Data Exposure
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    An unauthenticated request to {url} returns a file that should not be
+    served to the public internet. {impact}
+  steps:
+    - "From an unauthenticated context, request {url}"
+    - "Observe HTTP 200 and a response body matching: {matched}"
+    - "Confirm the content is the real artefact and not an application error page by checking the Content-Type and body structure."
+  remediation: >
+    Block the path at the web server or CDN, remove the file from the document
+    root, and rotate any credential the file exposed - the file was publicly
+    readable and must be treated as compromised.
+  notes: >
+    Where the file contains credentials, do not use them beyond the minimum
+    needed to prove they are live. Record the proof and stop.
+
+deaddomain:
+  category: Using Components with Known Vulnerabilities
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N"
+  summary: >
+    The application at {target} references the domain {host}, which is not
+    currently registered. {impact}
+  steps:
+    - "Load the affected page and observe the reference to {host} in the response."
+    - "Confirm the domain has no DNS delegation:  dig NS {host}"
+    - "Confirm the registry holds no record:  curl -s https://rdap.org/domain/{host} -o /dev/null -w '%{http_code}'  (returns 404)"
+    - "Confirm availability at a registrar without completing the purchase."
+  remediation: >
+    Remove the reference, or register the domain defensively and point it at a
+    controlled host. Where the reference is a script source, treat every
+    session served since the domain lapsed as potentially exposed.
+  notes: >
+    Do not register the domain unless the program explicitly permits it.
+    Availability plus the reference is sufficient proof.
+
+cors:
+  category: Broken Access Control
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N"
+  summary: >
+    The endpoint {url} reflects an arbitrary Origin header while permitting
+    credentialed cross-origin requests. {impact}
+  steps:
+    - "Send a request to {url} with the header:  Origin: https://attacker.example"
+    - "Observe the response reflects that origin in Access-Control-Allow-Origin and sets Access-Control-Allow-Credentials: true."
+    - "Repeat with a second, different origin to confirm reflection rather than a static allow-list."
+    - "From a page on an unrelated origin, issue fetch('{url}', {credentials:'include'}) and observe the authenticated response body is readable."
+  remediation: >
+    Replace origin reflection with an explicit server-side allow-list, and do
+    not return Access-Control-Allow-Credentials: true for any origin that is
+    not fully trusted.
+  notes: >
+    A working cross-origin proof-of-concept page materially strengthens this
+    submission - include the HTML.
+
+traversal:
+  category: Path Traversal
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    The '{param}' parameter at {url} is used to build a filesystem path without
+    containment, allowing arbitrary file read as the service account. {impact}
+  steps:
+    - "Request {url} with the '{param}' parameter set to the traversal payload shown below."
+    - "Observe the response contains the contents of a system file (matched: {matched})."
+    - "Repeat with a second file to confirm arbitrary read rather than a single fixed response."
+  remediation: >
+    Resolve the requested path and verify it remains within the intended
+    directory after canonicalisation. Prefer an allow-list of permitted
+    filenames over any filtering of traversal sequences.
+  notes: >
+    Read only what proves the vulnerability. /etc/passwd or win.ini is
+    sufficient; do not retrieve application secrets or user data.
+
+sqli:
+  category: SQL Injection
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+  summary: >
+    The '{param}' parameter at {url} is concatenated into a SQL statement.
+    {impact}
+  steps:
+    - "Request {url} with '{param}' set to a value containing a single quote, and observe the database error in the response."
+    - "Repeat with the quote balanced (two quotes) and observe the error clears - this differential confirms the value reaches the SQL parser."
+    - "Confirm and scope with:  sqlmap -u '{url}' -p {param} --batch"
+  remediation: >
+    Use parameterised queries or prepared statements throughout. Input
+    validation alone is not sufficient, and neither is escaping.
+  notes: >
+    Establish only that injection exists and what privileges it carries.
+    Do not dump tables or read customer data.
+
+reflection:
+  category: Cross-Site Scripting
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+  summary: >
+    Input supplied in the '{param}' parameter at {url} is reflected into the
+    response without adequate encoding for its context. {detail}
+  steps:
+    - "Request {url} with '{param}' set to a benign marker and observe it reflected in the response."
+    - "Repeat with the marker followed by the characters shown in the finding detail, and observe which are returned unencoded."
+    - "Construct a context-appropriate payload from the surviving characters and confirm script execution in a browser."
+    - "Capture a screenshot of the executed payload."
+  remediation: >
+    Encode output for the context it lands in - HTML entity encoding for body
+    text, attribute encoding inside attributes, JavaScript string encoding
+    inside script blocks. Add a Content-Security-Policy as defence in depth.
+  notes: >
+    This finding records reflection and encoding behaviour only. Confirm actual
+    execution in a browser, against the page's CSP, before submitting as XSS -
+    a reflection that does not execute is not reportable.
+
+ssrf:
+  category: Server-Side Request Forgery
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    The '{param}' parameter at {url} causes the server to issue a request to a
+    URL under the tester's control. {impact}
+  steps:
+    - "Request {url} with '{param}' set to a URL on a collaborator domain you control."
+    - "Observe an inbound request arriving at the collaborator from the target's egress address."
+    - "Repeat with an internal address (for example 127.0.0.1 or 169.254.169.254) and record how the response or timing differs, to establish internal reachability."
+  remediation: >
+    Validate the destination against an allow-list of permitted hosts, resolve
+    the hostname and reject private and link-local address ranges, and disable
+    redirect following on the server-side fetch.
+  notes: >
+    Include the collaborator log entry showing the source IP. Do not retrieve
+    cloud credentials from a metadata endpoint - demonstrating reachability is
+    enough.
+
+openredirect:
+  category: Open Redirect
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+  summary: >
+    The '{param}' parameter at {url} redirects to an arbitrary external origin.
+    {impact}
+  steps:
+    - "Request {url} with '{param}' set to an external URL you control."
+    - "Observe the response redirects to that URL (Location header, meta refresh, or JavaScript navigation)."
+    - "Where the endpoint is part of an authentication flow, demonstrate that a token or authorization code is delivered to the external origin."
+  remediation: >
+    Redirect only to paths on the application's own origin, or validate the
+    destination against an allow-list of permitted absolute URLs.
+  notes: >
+    Many programs treat open redirect as out of scope unless additional security
+    impact is demonstrated. Do not submit this on its own - show token theft
+    in an OAuth/SSO flow, or chain it into another finding.
+
+takeover:
+  category: Subdomain Takeover
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N"
+  summary: >
+    {target} has a dangling DNS record pointing at a third-party service where
+    no account claims the name. {impact}
+  steps:
+    - "Resolve the record:  dig CNAME {target}"
+    - "Request the host and observe the provider's unclaimed-resource page."
+    - "Confirm at the provider that the resource name is available for registration."
+  remediation: >
+    Remove the DNS record, or re-claim the resource at the provider. Audit all
+    DNS records for other references to decommissioned third-party services.
+  notes: >
+    Do not claim the resource unless the program explicitly permits it. The
+    dangling record plus the provider's error page is sufficient proof.
+
+hostdeep:
+  category: Security Misconfiguration
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    The service on {target} permits unauthenticated access. {impact}
+  steps:
+    - "Confirm the port is reachable from an unauthenticated position."
+    - "Run:  {repro}"
+    - "Observe the service responds without requiring credentials."
+    - "Record the minimum output that demonstrates access, and stop."
+  remediation: >
+    Require authentication on the service, and restrict network access to the
+    hosts that legitimately need it.
+  notes: >
+    Enumerate only far enough to prove unauthenticated access. Do not read,
+    modify or delete data.
+
+services:
+  category: Security Misconfiguration
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+  summary: >
+    The service exposed on {target} accepts commands without authentication.
+    {impact}
+  steps:
+    - "Connect to the service from an unauthenticated position."
+    - "Run:  {repro}"
+    - "Observe the service executes the command and returns data."
+  remediation: >
+    Enable authentication, bind the service to a private interface, and place
+    it behind network controls.
+  notes: >
+    A single read-only command is sufficient proof. Do not enumerate or modify
+    stored data.
+
+secrets:
+  category: Sensitive Data Exposure
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    A credential is present in a client-side asset served from {target}, and is
+    therefore readable by anyone who loads the application. {impact}
+  steps:
+    - "Retrieve the asset:  curl -sSk {url}"
+    - "Observe the credential in the response (matched: {matched})."
+    - "Confirm the credential is live using the provider's identity endpoint only."
+  remediation: >
+    Remove the credential from the client bundle and rotate it - it must be
+    treated as compromised. Move the call server-side so the secret is never
+    shipped to browsers.
+  notes: >
+    Validate scope with an identity call (for AWS, sts get-caller-identity) and
+    nothing further. Include the response showing the key is active.
+
+archive:
+  category: Sensitive Data Exposure
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+  summary: >
+    A credential is present in an archived copy of an asset from {target}.
+    The current version no longer contains it, but the credential was public
+    for the period the archive covers and remains valid unless rotated.
+  steps:
+    - "Retrieve the archived copy:  curl -sSk '{url}'"
+    - "Observe the credential in the archived response (matched: {matched})."
+    - "Confirm the credential is still live using the provider's identity endpoint only."
+  remediation: >
+    Rotate the credential. Removing it from the current version does not
+    invalidate it, and the archived copy remains publicly retrievable.
+  notes: >
+    The strength of this submission is proving the credential is STILL VALID.
+    Without that, it is a historical note rather than a finding.
+
+origin:
+  category: Security Misconfiguration
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"
+  summary: >
+    The origin server behind {target} is directly reachable, bypassing the
+    edge. {impact}
+  steps:
+    - "Request the site normally and note the CDN headers in the response."
+    - "Request the origin address directly with the correct Host header:  {repro}"
+    - "Observe the same application responds without the CDN headers present."
+    - "Demonstrate a control that is bypassed - for example a request the WAF blocks at the edge but the origin accepts."
+  remediation: >
+    Restrict the origin to accept connections only from the CDN's published
+    address ranges, and rotate the origin address once the restriction is in
+    place.
+  notes: >
+    Impact rests on showing what the bypass unlocks. An origin that enforces
+    the same controls is a low-value finding.
+
+graphql:
+  category: Information Disclosure
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+  summary: >
+    The GraphQL endpoint at {url} answers introspection queries, exposing the
+    full schema including mutations. {impact}
+  steps:
+    - "POST the introspection query shown below to {url}."
+    - "Observe the response returns the complete schema."
+    - "Identify operations not used by the application UI and test each for missing authorization."
+  remediation: >
+    Disable introspection in production, and enforce authorization in every
+    resolver rather than relying on the client not to call an operation.
+  notes: >
+    Introspection alone is usually low value. The reportable finding is what
+    the schema leads you to - submit the access-control failure, citing
+    introspection as how it was found.
+
+dirlisting:
+  category: Security Misconfiguration
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+  summary: >
+    Directory indexing is enabled on {target}, exposing a browsable file list.
+  steps:
+    - "Request the affected directory and observe the generated index page."
+    - "Enumerate the listed files and identify any that are not intended to be public."
+  remediation: >
+    Disable automatic directory indexing at the web server, and place an index
+    file in each served directory.
+  notes: >
+    Submit the interesting file you found through the listing, not the listing
+    itself. Directory indexing alone is frequently rated informational.
+
+tls:
+  category: Cryptographic Failure
+  cvss: "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N"
+  summary: >
+    The TLS configuration on {target} does not meet current expectations.
+    {detail}
+  steps:
+    - "Run:  {repro}"
+    - "Observe the reported certificate or protocol condition."
+  remediation: >
+    Renew or correct the certificate, and disable protocol versions below
+    TLS 1.2.
+  notes: >
+    Many programs treat most TLS hygiene as low value or out of scope on its own.
+    Submit only where it is exploitable in context, or bundle it as supporting
+    detail on a stronger finding.

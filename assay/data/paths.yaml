@@ -1,0 +1,438 @@
+# Exposure signatures.
+#
+# Rules of engagement for every entry:
+#   * `match` is REQUIRED - a status code alone never produces a finding.
+#   * `ct_not` kills the single biggest FP source: SPA catch-alls that answer
+#     200 text/html for every path on earth.
+#   * `impact` must describe what the tester actually gets, not the category.
+#
+# tier: quick | standard | deep  (which profile first requests this path)
+
+signatures:
+
+# ---------------------------------------------------------------- VCS ------
+- path: /.git/HEAD
+  name: Exposed .git repository
+  severity: high
+  category: A05
+  cwe: CWE-527
+  tier: quick
+  match: '^ref:\s+refs/|^[0-9a-f]{40}\s*$'
+  ct_not: [text/html]
+  followup: [/.git/config, /.git/logs/HEAD]
+  impact: >
+    The full repository is downloadable with git-dumper, yielding source code,
+    historical commits, and very often credentials or keys that were committed
+    and later removed. Treat as pre-auth source disclosure.
+  refs: [https://owasp.org/www-project-web-security-testing-guide/]
+
+- path: /.git/config
+  name: Exposed .git/config
+  severity: high
+  category: A05
+  cwe: CWE-527
+  tier: standard
+  match: '\[core\]|\[remote\s|repositoryformatversion'
+  ct_not: [text/html]
+  impact: >
+    Confirms a downloadable .git directory and frequently discloses the internal
+    remote URL, which may itself embed a token (https://user:token@host/...).
+
+- path: /.svn/wc.db
+  name: Exposed Subversion working copy database
+  severity: high
+  category: A05
+  cwe: CWE-527
+  tier: standard
+  match: 'SQLite format 3'
+  ct_not: [text/html]
+  impact: >
+    The SQLite working copy lists every file in the repository and allows full
+    source reconstruction from .svn/pristine.
+
+# ------------------------------------------------------------ secrets ------
+- path: /.env
+  name: Exposed .env file
+  severity: critical
+  category: A05
+  cwe: CWE-540
+  tier: quick
+  match: '(?m)^\s*(APP_KEY|DB_PASSWORD|DB_HOST|AWS_SECRET_ACCESS_KEY|SECRET_KEY|STRIPE_|MAIL_PASSWORD|JWT_SECRET)\s*='
+  ct_not: [text/html]
+  impact: >
+    Live application credentials in cleartext: database passwords, cloud keys,
+    mail and payment provider secrets. In Laravel, APP_KEY alone permits forging
+    signed cookies and, on vulnerable versions, deserialization RCE.
+
+- path: /.aws/credentials
+  name: Exposed AWS credentials file
+  severity: critical
+  category: A05
+  cwe: CWE-540
+  tier: standard
+  match: 'aws_access_key_id|aws_secret_access_key'
+  ct_not: [text/html]
+  impact: >
+    Long-lived IAM keys. Validate scope with `aws sts get-caller-identity` and
+    stop there - enumeration beyond identity is usually out of scope.
+
+- path: /.vscode/sftp.json
+  name: Exposed VS Code SFTP configuration
+  severity: high
+  category: A05
+  cwe: CWE-540
+  tier: deep
+  match: '"host"|"password"|"privateKeyPath"'
+  ct_not: [text/html]
+  impact: >
+    Typically contains the deployment host plus a plaintext SSH/SFTP password,
+    granting write access to the document root.
+
+- path: /.npmrc
+  name: Exposed npm configuration
+  severity: high
+  category: A05
+  cwe: CWE-540
+  tier: deep
+  match: '_authToken|//registry\.'
+  ct_not: [text/html]
+  impact: >
+    An npm auth token permits publishing to the organisation's private packages -
+    a supply-chain foothold.
+
+- path: /.htpasswd
+  name: Exposed .htpasswd
+  severity: high
+  category: A02
+  cwe: CWE-522
+  tier: standard
+  match: '^[A-Za-z0-9_.-]+:\$(?:apr1|2y|1)\$|^[A-Za-z0-9_.-]+:[A-Za-z0-9./]{13}$'
+  ct_not: [text/html]
+  impact: >
+    Offline-crackable password hashes for the HTTP auth realm protecting this path.
+
+# ------------------------------------------------------------- config ------
+- path: /web.config
+  name: Exposed web.config
+  severity: high
+  category: A05
+  cwe: CWE-540
+  tier: standard
+  match: '<configuration|<system\.web'
+  ct_not: [text/html]
+  impact: >
+    IIS application configuration, frequently including connection strings with
+    SQL credentials and the machineKey used to sign/encrypt ViewState.
+
+- path: /appsettings.json
+  name: Exposed appsettings.json
+  severity: high
+  category: A05
+  cwe: CWE-540
+  tier: standard
+  match: '"ConnectionStrings"|"DefaultConnection"|"JwtSettings"|"ClientSecret"'
+  ct_not: [text/html]
+  impact: >
+    ASP.NET Core configuration containing database connection strings and JWT
+    signing keys - the latter permits minting arbitrary authenticated tokens.
+
+- path: /docker-compose.yml
+  name: Exposed docker-compose.yml
+  severity: medium
+  category: A05
+  cwe: CWE-540
+  tier: deep
+  match: '(?m)^\s*(services|version)\s*:'
+  ct_not: [text/html]
+  impact: >
+    Reveals internal service topology, image versions, and very often
+    environment blocks with database and admin passwords.
+
+- path: /WEB-INF/web.xml
+  name: Exposed WEB-INF/web.xml
+  severity: high
+  category: A05
+  cwe: CWE-527
+  tier: standard
+  match: '<web-app|<servlet-mapping'
+  ct_not: [text/html]
+  impact: >
+    WEB-INF should never be servable. Its exposure means class files and JARs
+    under WEB-INF/classes and WEB-INF/lib are likely retrievable too.
+
+# --------------------------------------------------------- debug/admin -----
+- path: /actuator
+  name: Spring Boot Actuator exposed
+  severity: high
+  category: A05
+  cwe: CWE-16
+  tier: quick
+  match: '"_links"|"self"\s*:|/actuator/health'
+  followup: [/actuator/env, /actuator/heapdump, /actuator/mappings]
+  impact: >
+    The actuator index lists which management endpoints are reachable. /env
+    leaks configuration and credentials; /heapdump yields a memory image that
+    routinely contains live session tokens and passwords.
+
+- path: /actuator/env
+  name: Spring Boot Actuator /env exposed
+  severity: critical
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: '"propertySources"|"systemEnvironment"'
+  impact: >
+    Full application environment including datasource passwords and cloud
+    credentials. On older Spring Boot this endpoint is also writable, giving a
+    documented path to remote code execution.
+
+- path: /actuator/heapdump
+  name: Spring Boot heap dump downloadable
+  severity: critical
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: 'JAVA PROFILE 1\.0|HPROF'
+  ct_not: [text/html]
+  impact: >
+    A complete JVM memory image. Extracting strings reliably recovers live
+    session identifiers, database passwords and API keys - a direct path to
+    authenticated access.
+
+- path: /server-status
+  name: Apache mod_status exposed
+  severity: medium
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: 'Apache Server Status|Scoreboard Key|Server uptime'
+  impact: >
+    A live feed of every request the server is handling, including internal
+    URLs, client IPs and session identifiers passed in query strings.
+
+- path: /server-info
+  name: Apache mod_info exposed
+  severity: low
+  category: A05
+  cwe: CWE-200
+  tier: deep
+  match: 'Apache Server Information|Server Settings'
+  impact: >
+    Full module list, compiled-in paths and configuration directives, useful for
+    fingerprinting exploitable modules.
+
+- path: /phpinfo.php
+  name: phpinfo() exposed
+  severity: medium
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: 'phpinfo\(\)|PHP Version|allow_url_fopen'
+  impact: >
+    Discloses absolute paths, loaded extensions, environment variables (often
+    including secrets) and the exact PHP build for exploit selection.
+
+- path: /elmah.axd
+  name: ELMAH error log exposed
+  severity: high
+  category: A01
+  cwe: CWE-200
+  tier: standard
+  match: 'Error Log for|ELMAH'
+  impact: >
+    ELMAH records full HTTP requests for every unhandled exception, including
+    cookies and authorization headers of real users - session theft without any
+    interaction.
+
+- path: /trace.axd
+  name: ASP.NET trace.axd exposed
+  severity: high
+  category: A01
+  cwe: CWE-200
+  tier: standard
+  match: 'Application Trace|Request Details|Trace Information'
+  impact: >
+    Application trace exposes recent requests with their cookies, form values
+    and server variables, allowing session hijacking of other users.
+
+- path: /_profiler/phpinfo
+  name: Symfony profiler exposed
+  severity: high
+  category: A05
+  cwe: CWE-489
+  tier: deep
+  match: 'Symfony|phpinfo\(\)'
+  impact: >
+    The Symfony web profiler in a production deployment exposes every recent
+    request with its parameters, session data and database queries.
+
+- path: /debug/pprof/
+  name: Go pprof debug endpoint exposed
+  severity: medium
+  category: A05
+  cwe: CWE-489
+  tier: deep
+  match: 'Types of profiles available|/debug/pprof/goroutine'
+  impact: >
+    Heap and goroutine profiles can be downloaded; the heap profile frequently
+    contains secrets in memory, and repeated profiling is a cheap DoS.
+
+- path: /telescope/requests
+  name: Laravel Telescope exposed
+  severity: high
+  category: A01
+  cwe: CWE-489
+  tier: deep
+  match: 'Telescope|telescope/app\.js'
+  impact: >
+    Telescope records every request, query, mail and job with full payloads,
+    including other users' authentication traffic.
+
+- path: /jolokia/list
+  name: Jolokia JMX bridge exposed
+  severity: high
+  category: A05
+  cwe: CWE-16
+  tier: deep
+  match: '"request"\s*:|"mbean"|"agent"'
+  impact: >
+    Jolokia exposes JMX over HTTP. Depending on the registered MBeans this leads
+    to configuration disclosure and, with reloadable logging MBeans, RCE.
+
+# ------------------------------------------------------------ api docs -----
+- path: /swagger.json
+  name: Swagger/OpenAPI specification exposed
+  severity: low
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: '"swagger"\s*:|"openapi"\s*:'
+  impact: >
+    Not a vulnerability by itself, but it hands over the complete API surface -
+    including admin and internal routes - which is the fastest route to a real
+    access-control finding. Feed these paths back into authenticated testing.
+
+- path: /openapi.json
+  name: OpenAPI specification exposed
+  severity: low
+  category: A05
+  cwe: CWE-200
+  tier: standard
+  match: '"openapi"\s*:|"paths"\s*:\s*\{'
+  impact: >
+    Complete API route inventory for access-control testing.
+
+- path: /v2/api-docs
+  name: Springfox API docs exposed
+  severity: low
+  category: A05
+  cwe: CWE-200
+  tier: deep
+  match: '"swagger"\s*:|"basePath"'
+  impact: Complete API route inventory for access-control testing.
+
+# ------------------------------------------------------------ backups ------
+- path: /.DS_Store
+  name: Exposed .DS_Store
+  severity: low
+  category: A05
+  cwe: CWE-548
+  tier: standard
+  match: '\x00\x00\x00\x01Bud1'
+  ct_not: [text/html]
+  impact: >
+    Enumerates filenames in the directory, including files never linked from the
+    application - typically the way you find the backup archive or admin script.
+
+- path: /.well-known/security.txt
+  name: security.txt present
+  severity: info
+  category: INFO
+  cwe: ""
+  tier: deep
+  match: 'Contact:|Policy:'
+  impact: Contact channel for the program; not a finding.
+
+# ------------------------------------------------------------- CI/CD -------
+- path: /.gitlab-ci.yml
+  name: Exposed GitLab CI configuration
+  severity: medium
+  category: A05
+  cwe: CWE-540
+  tier: deep
+  match: '(?m)^\s*(stages|image|script)\s*:'
+  ct_not: [text/html]
+  impact: >
+    Build pipeline definition exposing internal registry hosts, deploy targets
+    and occasionally hard-coded deployment tokens.
+
+- path: /Jenkinsfile
+  name: Exposed Jenkinsfile
+  severity: medium
+  category: A05
+  cwe: CWE-540
+  tier: deep
+  match: 'pipeline\s*\{|node\s*\{|withCredentials'
+  ct_not: [text/html]
+  impact: >
+    Reveals build and deployment topology, credential IDs and internal hosts.
+
+# -------------------------------------------------------------- CMS --------
+- path: /wp-json/wp/v2/users
+  name: WordPress user enumeration via REST API
+  severity: low
+  category: A07
+  cwe: CWE-200
+  tier: standard
+  match: '"slug"\s*:|"id"\s*:\s*\d+'
+  ct_not: [text/html]
+  impact: >
+    Yields valid usernames for the site. On its own low value; combine with a
+    weak-password or xmlrpc amplification path for a real authentication finding.
+
+- path: /xmlrpc.php
+  name: WordPress XML-RPC enabled
+  severity: low
+  category: A07
+  cwe: CWE-307
+  tier: deep
+  match: 'XML-RPC server accepts POST requests only'
+  impact: >
+    system.multicall permits hundreds of credential guesses per request,
+    bypassing per-request login rate limits. Also a pingback SSRF primitive.
+
+- path: /wp-content/debug.log
+  name: WordPress debug log exposed
+  severity: medium
+  category: A09
+  cwe: CWE-532
+  tier: deep
+  match: 'PHP (Notice|Warning|Fatal error|Deprecated)'
+  ct_not: [text/html]
+  impact: >
+    Application error log with absolute paths, SQL fragments and sometimes POST
+    data containing credentials.
+
+- path: /storage/logs/laravel.log
+  name: Laravel log exposed
+  severity: medium
+  category: A09
+  cwe: CWE-532
+  tier: deep
+  match: '(?m)^\[\d{4}-\d{2}-\d{2}.*\](?:.*)(local|production)\.(ERROR|DEBUG|INFO)'
+  ct_not: [text/html]
+  impact: >
+    Stack traces with absolute paths, SQL statements, and request payloads that
+    routinely include tokens and passwords.
+
+# ------------------------------------------------------------- flash -------
+- path: /crossdomain.xml
+  name: Permissive crossdomain.xml
+  severity: low
+  category: A05
+  cwe: CWE-942
+  tier: deep
+  match: 'allow-access-from\s+domain="\*"'
+  impact: >
+    Legacy Flash/Silverlight cross-origin policy allowing any domain. Only
+    exploitable where such clients remain in use; record as hardening.

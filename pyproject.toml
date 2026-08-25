@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "assay"
+version = "1.0.0"
+description = "Signal-first recon and triage for authorized offensive testing (a managed)"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28",
+    "urllib3>=1.26",
+    "rich>=13.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.40"]
+
+[project.scripts]
+assay = "assay.cli:main"
+
+[tool.setuptools]
+packages = ["assay", "assay.modules"]
+
+[tool.setuptools.package-data]
+assay = ["data/*.yaml"]
