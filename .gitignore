@@ -47,3 +47,6 @@ Thumbs.db
 # local automation, never published
 scripts/
 sync.sh
+
+# scratch
+assets/preview.html
