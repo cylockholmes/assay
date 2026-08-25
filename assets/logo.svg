@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 268 64" width="268" height="64"
+     role="img" aria-label="assay - recon and triage">
+  <title>assay</title>
+  <style>
+    .ink { stroke: #151a1d; }
+    .acc { stroke: #0d6b74; }
+    .accf { fill: #0d6b74; }
+    .word { fill: #151a1d; }
+    .sub  { fill: #151a1d; opacity: .55; }
+    @media (prefers-color-scheme: dark) {
+      .ink { stroke: #e9eef0; }
+      .acc { stroke: #4fb3bd; }
+      .accf { fill: #4fb3bd; }
+      .word { fill: #e9eef0; }
+      .sub  { fill: #e9eef0; }
+    }
+  </style>
+  <g fill="none" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
+    <path class="ink" d="M32 4 56.25 18 56.25 46 32 60 7.75 46 7.75 18 Z"/>
+    <path class="ink" d="M22 42 V34"/>
+    <path class="ink" d="M32 42 V27"/>
+    <path class="acc" d="M42 42 V21"/>
+  </g>
+  <path class="accf" d="M42 12 46 16.5 42 21 38 16.5 Z"/>
+  <text class="word" x="78" y="41" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif"
+        font-size="33" font-weight="700" letter-spacing="-1.1">assay</text>
+  <text class="sub" x="80" y="54" font-family="'JetBrains Mono', ui-monospace, monospace"
+        font-size="7.5" letter-spacing="2.2">RECON &#183; TRIAGE</text>
+</svg>

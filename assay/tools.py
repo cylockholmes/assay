@@ -1,0 +1,559 @@
+"""Wrappers around the external scanners assay orchestrates.
+
+Everything here is optional: assay degrades to its own pure-Python checks when a
+binary is missing, and tells the user exactly what they are losing. Output is
+streamed line by line rather than buffered, which matters on a small VM where
+a nuclei run against a /24 can otherwise produce hundreds of MB.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import re
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Dict, Iterator, List, Optional, Sequence
+
+from assay import env
+from assay.models import Port
+
+
+@dataclass
+class ToolSpec:
+    """One external tool: what it buys us, and how to obtain it.
+
+    `apt` and `go` are the machine-readable install methods used by
+    assay.installer; `install` is the human-readable string shown by doctor.
+    Keeping all three on the same object means there is exactly one place to
+    edit when a tool moves or is renamed.
+    """
+
+    name: str
+    purpose: str
+    install: str
+    binary: str = ""
+    optional: bool = True
+    apt: str = ""                       # apt package name
+    go: str = ""                        # go module path for `go install`
+    post: List[str] = field(default_factory=list)   # commands to run after install
+
+    def __post_init__(self) -> None:
+        self.binary = self.binary or self.name
+
+    @property
+    def method(self) -> str:
+        if self.apt:
+            return "apt"
+        if self.go:
+            return "go"
+        return "manual"
+
+
+REGISTRY: Dict[str, ToolSpec] = {
+    "nmap": ToolSpec("nmap", "port + service/version detection on host targets",
+                     "sudo apt install -y nmap", apt="nmap", optional=False),
+    "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
+                      "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
+                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"),
+    "httpx": ToolSpec("httpx", "HTTP probing, titles, tech detection, favicon hashes",
+                      "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+                      go="github.com/projectdiscovery/httpx/cmd/httpx@latest"),
+    "nuclei": ToolSpec("nuclei", "community CVE/misconfig templates - the volume driver",
+                       "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+                       go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+                       post=["nuclei -update-templates -silent"]),
+    "katana": ToolSpec("katana", "crawler that feeds URLs/params to the active checks",
+                       "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+                       go="github.com/projectdiscovery/katana/cmd/katana@latest"),
+    "subfinder": ToolSpec("subfinder", "passive subdomain enumeration (opt-in, third-party APIs)",
+                          "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+                          go="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"),
+    "dnsx": ToolSpec("dnsx", "DNS resolution and CNAME chains for takeover checks",
+                     "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+                     go="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"),
+    "tlsx": ToolSpec("tlsx", "certificate details, SAN harvesting, TLS misconfig",
+                     "go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
+                     go="github.com/projectdiscovery/tlsx/cmd/tlsx@latest"),
+    "ffuf": ToolSpec("ffuf", "content discovery with automatic soft-404 calibration",
+                     "sudo apt install -y ffuf", apt="ffuf"),
+    "seclists": ToolSpec("seclists", "wordlists ffuf needs to find unlinked endpoints",
+                         "sudo apt install -y seclists", apt="seclists",
+                         binary="__wordlist__"),
+    "testssl.sh": ToolSpec("testssl.sh", "deep TLS assessment (slow, deep profile only)",
+                           "sudo apt install -y testssl.sh", apt="testssl.sh"),
+    "gau": ToolSpec("gau", "historical URLs from Wayback/CommonCrawl/OTX (passive)",
+                    "go install github.com/lc/gau/v2/cmd/gau@latest",
+                    go="github.com/lc/gau/v2/cmd/gau@latest"),
+    "waybackurls": ToolSpec("waybackurls", "historical URLs from the Wayback Machine (passive)",
+                            "go install github.com/tomnomnom/waybackurls@latest",
+                            go="github.com/tomnomnom/waybackurls@latest"),
+    "arjun": ToolSpec("arjun", "discovers hidden GET/POST parameters the crawl never sees",
+                      "sudo apt install -y arjun", apt="arjun"),
+    "interactsh-client": ToolSpec("interactsh-client",
+                                  "out-of-band callbacks for blind SSRF/RCE/XXE",
+                                  "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
+                                  go="github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"),
+    "puredns": ToolSpec("puredns", "fast DNS resolution for subdomain permutation candidates",
+                        "go install github.com/d3mondev/puredns/v2@latest",
+                        go="github.com/d3mondev/puredns/v2@latest"),
+    "gowitness": ToolSpec("gowitness", "screenshots for fast visual triage of many hosts",
+                          "go install github.com/sensepost/gowitness@latest",
+                          go="github.com/sensepost/gowitness@latest"),
+}
+
+
+@dataclass
+class Proc:
+    rc: int
+    out: str
+    err: str
+    cmd: List[str] = field(default_factory=list)
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.rc == 0 and not self.timed_out
+
+    def cmdline(self) -> str:
+        return " ".join(self.cmd)
+
+
+def available() -> Dict[str, Optional[str]]:
+    env.augment_path()
+    out: Dict[str, Optional[str]] = {}
+    for name, spec in REGISTRY.items():
+        if spec.binary == "__wordlist__":
+            out[name] = default_wordlist()
+        else:
+            out[name] = env.which(spec.binary)
+    return out
+
+
+def have(name: str) -> bool:
+    return env.which(REGISTRY[name].binary if name in REGISTRY else name) is not None
+
+
+def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
+        cwd: Optional[str] = None) -> Proc:
+    env.augment_path()
+    try:
+        p = subprocess.run(
+            list(cmd), input=stdin, capture_output=True, text=True,
+            timeout=timeout, cwd=cwd,
+        )
+        return Proc(rc=p.returncode, out=p.stdout, err=p.stderr, cmd=list(cmd))
+    except subprocess.TimeoutExpired as exc:
+        return Proc(rc=-1, out=exc.stdout or "", err="timeout after %ss" % timeout,
+                    cmd=list(cmd), timed_out=True)
+    except (OSError, ValueError) as exc:
+        return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
+
+
+def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
+                 stdin: str = "") -> Iterator[str]:
+    """Yield stdout lines as they arrive. Keeps peak memory flat."""
+    env.augment_path()
+    try:
+        proc = subprocess.Popen(
+            list(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+    except OSError:
+        return
+    if stdin and proc.stdin:
+        try:
+            proc.stdin.write(stdin)
+            proc.stdin.close()
+        except OSError:
+            pass
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                yield line
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def stream_json(cmd: Sequence[str], timeout: float = 900.0,
+                stdin: str = "") -> Iterator[dict]:
+    for line in stream_lines(cmd, timeout=timeout, stdin=stdin):
+        if not line.startswith("{"):
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
+
+
+# --------------------------------------------------------------------------
+# Proxy plumbing -- route external tools through Burp too
+# --------------------------------------------------------------------------
+
+
+def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str]:
+    """Render extra request headers in each tool's own flag syntax."""
+    if not headers:
+        return []
+    out: List[str] = []
+    flag = {"httpx": "-H", "nuclei": "-H", "katana": "-H", "ffuf": "-H"}.get(tool)
+    if not flag:
+        return []
+    for k, v in headers.items():
+        out += [flag, "%s: %s" % (k, v)]
+    return out
+
+
+def proxy_args(tool: str, proxy: Optional[str]) -> List[str]:
+    if not proxy:
+        return []
+    if tool in ("httpx", "nuclei", "katana"):
+        return ["-proxy", proxy]
+    if tool == "ffuf":
+        return ["-x", proxy]
+    if tool == "gowitness":
+        return ["--proxy", proxy]
+    return []
+
+
+# --------------------------------------------------------------------------
+# nmap
+# --------------------------------------------------------------------------
+
+
+def nmap_port_args(spec: str) -> List[str]:
+    if spec == "top-100":
+        return ["--top-ports", "100"]
+    if spec == "top-1000":
+        return ["--top-ports", "1000"]
+    if spec == "all":
+        return ["-p-"]
+    return ["-p", spec]
+
+
+def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
+              out_dir: str = ".") -> Dict[str, List[Port]]:
+    """Service/version scan. Returns host -> open ports."""
+    xml_path = os.path.join(out_dir, "raw", "nmap.xml")
+    os.makedirs(os.path.dirname(xml_path), exist_ok=True)
+    cmd = [
+        "nmap", "-Pn", "-sV", "--version-intensity", "5",
+        "-T3" if tune.get("constrained") else "-T4",
+        "--max-retries", "2", "--host-timeout", "20m",
+        "--min-rate", str(tune.get("nmap_min_rate", 300)),
+        "-oX", xml_path,
+    ]
+    cmd += nmap_port_args(port_spec)
+    cmd += hosts
+    proc = run(cmd, timeout=timeout)
+    if not os.path.exists(xml_path):
+        return {}
+    return parse_nmap_xml(xml_path)
+
+
+def nmap_script_scan(host: str, ports: List[int], scripts: List[str],
+                     out_dir: str, udp: bool = False,
+                     timeout: float = 600.0) -> Dict[int, Dict[str, str]]:
+    """Run targeted NSE scripts. Returns {port: {script_id: output}}."""
+    if not ports or not scripts:
+        return {}
+    safe_host = re.sub(r"[^A-Za-z0-9._-]", "_", host)
+    xml_path = os.path.join(out_dir, "raw", "nse-%s%s.xml"
+                            % (safe_host, "-udp" if udp else ""))
+    os.makedirs(os.path.dirname(xml_path), exist_ok=True)
+    cmd = ["nmap", "-Pn", "-sU" if udp else "-sT",
+           "-p", ",".join(str(p) for p in sorted(set(ports))),
+           "--script", ",".join(sorted(set(scripts))),
+           "--script-timeout", "90s", "--host-timeout", "10m",
+           "-oX", xml_path, host]
+    run(cmd, timeout=timeout)
+    return parse_nse_xml(xml_path)
+
+
+def parse_nse_xml(path: str) -> Dict[int, Dict[str, str]]:
+    out: Dict[int, Dict[str, str]] = {}
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError):
+        return out
+    for port_el in tree.getroot().iter("port"):
+        try:
+            portid = int(port_el.get("portid", "0"))
+        except ValueError:
+            continue
+        for script in port_el.findall("script"):
+            sid = script.get("id", "")
+            output = script.get("output", "") or ""
+            if sid:
+                out.setdefault(portid, {})[sid] = output
+    # host-level scripts (e.g. smb-os-discovery) attach to hostscript
+    for script in tree.getroot().iter("hostscript"):
+        for sc in script.findall("script"):
+            sid = sc.get("id", "")
+            if sid:
+                out.setdefault(0, {})[sid] = sc.get("output", "") or ""
+    return out
+
+
+def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
+    out: Dict[str, List[Port]] = {}
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError):
+        return out
+    for host_el in tree.getroot().findall("host"):
+        addr = ""
+        for a in host_el.findall("address"):
+            if a.get("addrtype") in ("ipv4", "ipv6"):
+                addr = a.get("addr", "")
+                break
+        names = [h.get("name", "") for h in host_el.findall("hostnames/hostname")]
+        key = names[0] if names and names[0] else addr
+        if not key:
+            continue
+        ports: List[Port] = []
+        for p in host_el.findall("ports/port"):
+            state_el = p.find("state")
+            if state_el is None or state_el.get("state") != "open":
+                continue
+            svc = p.find("service")
+            ports.append(Port(
+                port=int(p.get("portid", "0")),
+                proto=p.get("protocol", "tcp"),
+                state="open",
+                service=(svc.get("name", "") if svc is not None else ""),
+                product=(svc.get("product", "") if svc is not None else ""),
+                version=(svc.get("version", "") if svc is not None else ""),
+                tunnel=(svc.get("tunnel", "") if svc is not None else ""),
+                extra={"extrainfo": (svc.get("extrainfo", "") if svc is not None else ""),
+                       "ip": addr},
+            ))
+        if ports:
+            out[key] = ports
+    return out
+
+
+# --------------------------------------------------------------------------
+# naabu
+# --------------------------------------------------------------------------
+
+
+def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
+               timeout: float = 900.0) -> Dict[str, List[int]]:
+    spec = {"top-100": ["-top-ports", "100"],
+            "top-1000": ["-top-ports", "1000"],
+            "all": ["-p", "-"]}.get(port_spec, ["-p", port_spec])
+    cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
+           "-c", str(tune.get("concurrency", 10))] + spec + ["-list", "-"]
+    found: Dict[str, List[int]] = {}
+    for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
+        h = obj.get("host") or obj.get("ip")
+        p = obj.get("port")
+        if h and p:
+            found.setdefault(str(h), []).append(int(p))
+    return found
+
+
+# --------------------------------------------------------------------------
+# httpx
+# --------------------------------------------------------------------------
+
+
+def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
+                timeout: float = 600.0,
+                headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+    cmd = [
+        "httpx", "-silent", "-json", "-no-color",
+        "-status-code", "-title", "-tech-detect", "-web-server",
+        "-content-length", "-favicon", "-tls-grab", "-location", "-word-count",
+        "-timeout", "10", "-retries", "1",
+        "-threads", str(tune.get("concurrency", 10)),
+        "-rate-limit", str(int(tune.get("rate", 30))),
+        "-list", "-",
+    ] + proxy_args("httpx", proxy) + header_args("httpx", headers)
+    return stream_json(cmd, timeout=timeout, stdin="\n".join(targets) + "\n")
+
+
+# --------------------------------------------------------------------------
+# nuclei
+# --------------------------------------------------------------------------
+
+
+def nuclei_scan(urls: List[str], severity: str, tune: Dict,
+                proxy: Optional[str] = None, extra_tags: str = "",
+                timeout: float = 3600.0,
+                headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+    cmd = [
+        "nuclei", "-silent", "-jsonl", "-no-color", "-disable-update-check",
+        "-severity", severity,
+        "-c", str(tune.get("nuclei_concurrency", 10)),
+        "-bulk-size", str(tune.get("nuclei_bulk", 8)),
+        "-rate-limit", str(tune.get("nuclei_rate", 60)),
+        "-timeout", "8", "-retries", "1",
+        # -irr attaches the matched request/response so findings carry evidence.
+        "-irr",
+        # Templates that fire on generic pages produce most of nuclei's noise.
+        "-exclude-tags", "dos,fuzz,intrusive,honeypot",
+        "-list", "-",
+    ]
+    if extra_tags:
+        cmd += ["-tags", extra_tags]
+    cmd += proxy_args("nuclei", proxy) + header_args("nuclei", headers)
+    return stream_json(cmd, timeout=timeout, stdin="\n".join(urls) + "\n")
+
+
+def nuclei_templates_present() -> bool:
+    return os.path.isdir(os.path.expanduser("~/.local/nuclei-templates")) or os.path.isdir(
+        os.path.expanduser("~/nuclei-templates")
+    )
+
+
+# --------------------------------------------------------------------------
+# katana
+# --------------------------------------------------------------------------
+
+
+def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
+                 proxy: Optional[str] = None, timeout: float = 600.0,
+                 headers: Optional[Dict[str, str]] = None) -> List[dict]:
+    cmd = [
+        "katana", "-silent", "-jsonl", "-no-color",
+        "-d", str(depth), "-c", str(min(tune.get("concurrency", 10), 10)),
+        "-rate-limit", str(int(tune.get("rate", 30))),
+        "-timeout", "10", "-jc", "-kf", "robotstxt,sitemapxml",
+        "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
+        "-list", "-",
+    ] + proxy_args("katana", proxy) + header_args("katana", headers)
+    out: List[dict] = []
+    for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(urls) + "\n"):
+        out.append(obj)
+        if len(out) >= max_urls:
+            break
+    return out
+
+
+# --------------------------------------------------------------------------
+# tlsx / dnsx / subfinder
+# --------------------------------------------------------------------------
+
+
+def tlsx_scan(hostports: List[str], timeout: float = 300.0) -> Iterator[dict]:
+    cmd = ["tlsx", "-silent", "-json", "-expired", "-self-signed", "-mismatched",
+           "-untrusted", "-san", "-cn", "-tls-version", "-cipher", "-list", "-"]
+    return stream_json(cmd, timeout=timeout, stdin="\n".join(hostports) + "\n")
+
+
+def dnsx_resolve(hosts: List[str], timeout: float = 300.0) -> Iterator[dict]:
+    cmd = ["dnsx", "-silent", "-json", "-a", "-cname", "-resp", "-list", "-"]
+    return stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n")
+
+
+def subfinder_enum(domain: str, timeout: float = 300.0) -> List[str]:
+    cmd = ["subfinder", "-silent", "-all", "-d", domain]
+    return [l for l in stream_lines(cmd, timeout=timeout) if l]
+
+
+# --------------------------------------------------------------------------
+# ffuf
+# --------------------------------------------------------------------------
+
+
+def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = None,
+                  extensions: str = "", timeout: float = 600.0) -> List[dict]:
+    """Content discovery with ffuf's own auto-calibration to suppress soft-404s."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    base = url.rstrip("/")
+    cmd = [
+        "ffuf", "-u", base + "/FUZZ", "-w", wordlist,
+        "-ac", "-acc", "-mc", "200,201,204,301,302,307,401,403,405,500",
+        "-fs", "0", "-t", str(tune.get("ffuf_threads", 10)),
+        "-rate", str(int(tune.get("rate", 30))),
+        "-timeout", "8", "-s", "-of", "json", "-o", tmp.name, "-noninteractive",
+    ]
+    if extensions:
+        cmd += ["-e", extensions]
+    cmd += proxy_args("ffuf", proxy)
+    run(cmd, timeout=timeout)
+    try:
+        with open(tmp.name, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get("results", [])
+    except (OSError, ValueError):
+        return []
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def default_wordlist() -> Optional[str]:
+    for path in (
+        "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+        "/usr/share/seclists/Discovery/Web-Content/common.txt",
+        "/usr/share/wordlists/dirb/common.txt",
+        "/usr/share/dirb/wordlists/common.txt",
+    ):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+# --------------------------------------------------------------------------
+# Historical URL sources (passive - these query third-party archives)
+# --------------------------------------------------------------------------
+
+
+def gau_urls(domain: str, limit: int, timeout: float = 300.0) -> List[str]:
+    cmd = ["gau", "--subs", "--threads", "3", "--timeout", "20", domain]
+    out: List[str] = []
+    for line in stream_lines(cmd, timeout=timeout):
+        if line.startswith("http"):
+            out.append(line)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def waybackurls_urls(domain: str, limit: int, timeout: float = 300.0) -> List[str]:
+    out: List[str] = []
+    for line in stream_lines(["waybackurls", domain], timeout=timeout, stdin=""):
+        if line.startswith("http"):
+            out.append(line)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def arjun_params(url: str, tune: Dict, timeout: float = 300.0) -> List[str]:
+    """Discover parameters a crawl cannot see. Returns parameter names."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    cmd = ["arjun", "-u", url, "-oJ", tmp.name, "-q",
+           "-t", str(min(tune.get("ffuf_threads", 8), 12)),
+           "--stable"]
+    run(cmd, timeout=timeout)
+    try:
+        with open(tmp.name, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        names: List[str] = []
+        for entry in (data.values() if isinstance(data, dict) else []):
+            if isinstance(entry, dict):
+                names += list(entry.get("params") or [])
+        return sorted(set(names))
+    except (OSError, ValueError, AttributeError):
+        return []
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass

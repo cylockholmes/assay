@@ -1,0 +1,45 @@
+# --- scan output: never commit engagement data ---------------------------
+assay-out/
+sift-out/
+out/
+*.db
+*.db-wal
+*.db-shm
+raw/
+evidence/
+report.html
+
+# Redaction map reverses pseudonyms back to real client hosts. It is the one
+# file that must never leave the machine.
+redaction-map.json
+ai-payload.json
+ai-triage.json
+oob-payloads.txt
+
+# --- engagement inputs ----------------------------------------------------
+# scope.example.txt is tracked; real scope files are not.
+scope.txt
+scope*.json
+!scope.example.txt
+targets.txt
+*.har
+burp*.xml
+*-scope.json
+
+# --- python ---------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# --- os / editor ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
