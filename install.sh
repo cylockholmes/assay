@@ -44,10 +44,34 @@ ok "base packages installed"
 
 # ----------------------------------------------------------------- assay ----
 say "assay"
-python3 -m venv "$HERE/.venv"
-"$HERE/.venv/bin/pip" install -q --upgrade pip
-"$HERE/.venv/bin/pip" install -q -e "$HERE"
-ok "installed into $HERE/.venv"
+python3 -m venv "$HERE/.venv" || {
+  warn "could not create a virtualenv."
+  warn "On Debian/Kali: sudo apt-get install -y python3-venv"
+  exit 1
+}
+
+# The pip that ships with Python 3.9 predates PEP 660, so an editable install
+# of a pyproject-only project fails against it. Upgrade before installing.
+"$HERE/.venv/bin/pip" install -q --upgrade pip setuptools wheel || {
+  warn "could not upgrade pip inside the virtualenv (offline?)."
+  exit 1
+}
+
+if ! "$HERE/.venv/bin/pip" install -q -e "$HERE"; then
+  warn "editable install failed; retrying as a regular install"
+  "$HERE/.venv/bin/pip" install -q "$HERE" || {
+    warn "could not install assay. Re-run without -q to see the error:"
+    warn "  $HERE/.venv/bin/pip install -e $HERE"
+    exit 1
+  }
+fi
+
+if [ ! -x "$HERE/.venv/bin/assay" ]; then
+  warn "install completed but the 'assay' entry point is missing."
+  warn "Try:  $HERE/.venv/bin/python -m assay --version"
+  exit 1
+fi
+ok "installed into $HERE/.venv  ($("$HERE/.venv/bin/assay" --version))"
 
 read -r -p "Install the optional 'anthropic' SDK for AI triage? [y/N] " ans || ans=n
 case "$ans" in
