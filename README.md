@@ -5,12 +5,74 @@ targets, and answers one question fast: **what here is worth an hour of my
 time?**
 
 Built for a specific setup — Kali under WSL2 on Windows 11, on a
-CPU/RAM-limited VM, with Burp running on the Windows side.
+CPU/RAM-limited VM, with Burp running on the Windows side — but it runs on any
+Debian-family Linux, and degrades gracefully wherever a tool is missing.
+
+> **For authorized testing only.** Point this at systems you have written
+> permission to test. Several checks send crafted input and read files from the
+> target. See [Rules of engagement](#rules-of-engagement).
+
+## Install
+
+Requires Python 3.9+ and `git`. On Kali/Debian everything else is handled for you.
 
 ```bash
-./install.sh                 # python venv + every external tool
-assay doctor                  # what's present, what's missing
+git clone https://github.com/cylockholmes/assay.git
+cd assay
+./install.sh
+```
+
+`install.sh` creates a virtualenv, installs assay into it, links `assay` into
+`~/.local/bin`, and then installs the external scanners it orchestrates — apt
+packages plus the Go toolchain and the ProjectDiscovery suite. It prints every
+command before running it.
+
+```bash
+./install.sh --minimal    # assay + nmap only, for a small VM
+./install.sh --no-go      # skip the Go toolchain and its tools
+```
+
+Open a new shell afterwards (or `source ~/.bashrc`) so `~/.local/bin` and
+`$GOPATH/bin` are on PATH, then confirm:
+
+```bash
+assay doctor              # tools, Burp reachability, WSL networking, resources
+```
+
+`doctor` prints a table of every external tool, whether it was found, and what
+each one buys you. Anything missing can be installed later:
+
+```bash
+assay install --dry-run   # print the exact commands, run nothing
+assay install             # install everything missing, after confirming
+```
+
+### First scan
+
+```bash
 assay scan 10.20.0.0/24 --scope scope.txt --profile standard --open
+```
+
+Copy `scope.example.txt` to `scope.txt` and paste the program's scope into it
+first — assay refuses any request to a host that file does not cover.
+
+### Windows / WSL2 notes
+
+Run assay **inside WSL**, not in PowerShell. Two things trip people up:
+
+1. **Burp is on the Windows side.** WSL cannot reach a listener bound to
+   Windows' own `127.0.0.1`. Either set `networkingMode=mirrored` in
+   `C:\Users\<you>\.wslconfig` and `wsl --shutdown`, or bind Burp's proxy to
+   all interfaces and use `--burp http://<windows-ip>:8080`. `assay doctor`
+   detects which case you are in and prints the exact fix.
+2. **Burp and a managed certificates.** If Burp cannot reach the gateway over TLS, its
+   Java trust store needs the the gateway CA. a prepared CA bundle
+   provides a prepared `cacerts` for this.
+
+### Updating
+
+```bash
+git pull && ./install.sh
 ```
 
 ---
@@ -305,6 +367,28 @@ listening socket and never stands up a vulnerable service. The installer tests
 stub `apt`/`go` presence to exercise the Kali install plan from any dev machine.
 
 ---
+
+## Rules of engagement
+
+assay is a testing tool, not an exploitation framework, and the defaults reflect
+that:
+
+- **Scope is enforced, not advisory.** Every request — assay's own and every
+  external tool's — is checked against the scope file before a packet leaves the
+  machine. Out-of-scope hosts are refused and reported at the end of the run.
+- **Nothing that changes state runs by default.** Non-GET replay, and checks
+  that could mutate data, require `--aggressive`.
+- **Checks stop at proof.** The Docker module reads `/version` and never creates
+  a container; the Elasticsearch check reads cluster health and stops. Findings
+  demonstrate the primitive; they do not exercise it.
+- **Third-party lookups are opt-in.** Archive and certificate-transparency
+  queries tell someone other than your target what you are looking at, so they
+  only run under `--passive`.
+- **AI triage is off unless you ask for it**, sends pseudonymised data only, and
+  aborts rather than transmitting anything that fails the redaction check.
+
+You are responsible for staying inside your authorization. A scope file is the
+safety net, not the permission.
 
 ## Caveats
 
