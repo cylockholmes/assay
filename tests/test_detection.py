@@ -759,5 +759,99 @@ class BasicAuthTests(unittest.TestCase):
         self.assertNotIn("Authorization", Config().request_headers())
 
 
+class WindowsWslBridgeTests(unittest.TestCase):
+    """assay hosted on Windows, external scanners executed inside WSL."""
+
+    def setUp(self):
+        from assay import env
+        self._name = env.os.name
+        self._state = dict(env._WSL_STATE)
+        self._paths = dict(env._PATH_CACHE)
+
+    def tearDown(self):
+        from assay import env
+        env.os.name = self._name
+        env._WSL_STATE.clear(); env._WSL_STATE.update(self._state)
+        env._PATH_CACHE.clear(); env._PATH_CACHE.update(self._paths)
+
+    def _windows(self, gateway=None):
+        from assay import env
+        env.os.name = "nt"
+        env._WSL_STATE.update(checked=True, ok=True, distro="kali-linux",
+                              **({"gateway": gateway} if gateway else {}))
+        env._PATH_CACHE.clear()
+        return env
+
+    def test_native_host_is_untouched(self):
+        from assay import tools
+        self.assertEqual(tools.bridge(["nmap", "-sV"]), ["nmap", "-sV"])
+
+    def test_commands_are_wrapped_for_wsl(self):
+        self._windows()
+        from assay import tools
+        self.assertEqual(tools.bridge(["nuclei", "-silent"]),
+                         ["wsl.exe", "-d", "kali-linux", "--", "nuclei", "-silent"])
+
+    def test_windows_paths_translate_to_wsl_mounts(self):
+        env = self._windows()
+        self.assertEqual(env.to_wsl_path(r"C:\Users\me\out\raw\nmap.xml"),
+                         "/mnt/c/Users/me/out/raw/nmap.xml")
+
+    def test_loopback_proxy_is_rewritten_to_the_windows_host(self):
+        """A WSL-side tool proxying to 127.0.0.1 would miss Burp entirely."""
+        self._windows(gateway="172.28.16.1")
+        from assay import tools
+        self.assertEqual(tools.proxy_args("nuclei", "http://127.0.0.1:8080"),
+                         ["-proxy", "http://172.28.16.1:8080"])
+        self.assertEqual(tools.proxy_args("ffuf", "http://localhost:8080"),
+                         ["-x", "http://172.28.16.1:8080"])
+
+    def test_explicit_proxy_address_is_left_alone(self):
+        self._windows(gateway="172.28.16.1")
+        from assay import tools
+        self.assertEqual(tools.proxy_args("nuclei", "http://192.168.1.50:8080"),
+                         ["-proxy", "http://192.168.1.50:8080"])
+
+    def test_no_proxy_stays_no_proxy(self):
+        self._windows(gateway="172.28.16.1")
+        from assay import tools
+        self.assertEqual(tools.proxy_args("nuclei", None), [])
+
+    def test_sudo_check_does_not_crash_without_geteuid(self):
+        """os.geteuid does not exist on Windows."""
+        from assay import installer
+        real = getattr(installer.os, "geteuid", None)
+        try:
+            if real is not None:
+                del installer.os.geteuid
+            self.assertTrue(installer._sudo_needed())
+        finally:
+            if real is not None:
+                installer.os.geteuid = real
+
+    def test_no_subprocess_uses_a_shell(self):
+        """shell=True plus attacker-influenced argv is how tools get owned.
+
+        Parsed rather than grepped: the string also appears in prose explaining
+        why it is avoided, and a test that cannot tell code from a comment is
+        not a test.
+        """
+        import ast
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent / "assay"
+        offenders = []
+        for f in sorted(root.rglob("*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for kw in node.keywords:
+                    if kw.arg != "shell":
+                        continue
+                    if isinstance(kw.value, ast.Constant) and kw.value.value:
+                        offenders.append("%s:%d" % (f.name, node.lineno))
+        self.assertEqual(offenders, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

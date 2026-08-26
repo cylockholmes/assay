@@ -56,9 +56,40 @@ assay scan 10.20.0.0/24 --scope scope.txt --profile standard --open
 Copy `scope.example.txt` to `scope.txt` and paste the program's scope into it
 first — assay refuses any request to a host that file does not cover.
 
-### Windows / WSL2 notes
+### Running on Windows
 
-Run assay **inside WSL**, not in PowerShell. Two things trip people up:
+Two supported layouts:
+
+**Inside WSL (recommended).** Clone and install in your Kali distribution and
+run everything there. Simplest, and what the defaults assume.
+
+**On Windows, tools in WSL.** assay itself is pure Python and runs natively on
+Windows, but every scanner it orchestrates is a Linux binary. When it detects a
+Windows host with WSL available it bridges automatically — each external command
+is executed as `wsl.exe -d <distro> -- <tool> ...`, output paths are translated
+to `/mnt/...` so both sides see the same files, and a loopback Burp proxy is
+rewritten to the Windows host address so WSL-side tools still reach it.
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\pip install -e .
+.\.venv\Scripts\assay doctor      # confirms "bridge active" and names the distro
+```
+
+`assay doctor` reports which layout it detected. If it says *no WSL
+distribution found*, install one — `wsl --install -d kali-linux` — then run
+`assay install` to populate the toolchain inside it.
+
+There is one asymmetry worth understanding in bridged mode: assay's own HTTP
+requests originate from Windows, while the scanners run inside WSL. They are
+different network positions. assay compensates for the Burp proxy
+automatically; if you use a VPN or gateway, make sure **both** sides route
+through it, or your own requests and your tools' requests will see different
+networks.
+
+### WSL2 notes
+
+Two things trip people up:
 
 1. **Burp is on the Windows side.** WSL cannot reach a listener bound to
    Windows' own `127.0.0.1`. Either set `networkingMode=mirrored` in

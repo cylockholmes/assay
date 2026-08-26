@@ -122,12 +122,28 @@ class Proc:
         return " ".join(self.cmd)
 
 
+def bridge(cmd: Sequence[str]) -> List[str]:
+    """Prepend the WSL prefix when assay is hosted on Windows.
+
+    Every subprocess call in assay funnels through run() or stream_lines(),
+    so wrapping here is enough to move the entire external toolchain into WSL.
+    """
+    cmd = list(cmd)
+    if env.use_wsl_bridge():
+        return env.wsl_prefix() + cmd
+    return cmd
+
+
 def available() -> Dict[str, Optional[str]]:
     env.augment_path()
     out: Dict[str, Optional[str]] = {}
+    binaries = [s.binary for s in REGISTRY.values() if s.binary != "__wordlist__"]
+    resolved = env.wsl_which_many(binaries) if env.use_wsl_bridge() else {}
     for name, spec in REGISTRY.items():
         if spec.binary == "__wordlist__":
             out[name] = default_wordlist()
+        elif resolved:
+            out[name] = resolved.get(spec.binary)
         else:
             out[name] = env.which(spec.binary)
     return out
@@ -140,14 +156,18 @@ def have(name: str) -> bool:
 def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         cwd: Optional[str] = None) -> Proc:
     env.augment_path()
+    argv = bridge(cmd)
     try:
         p = subprocess.run(
-            list(cmd), input=stdin, capture_output=True, text=True,
+            argv, input=stdin, capture_output=True, text=True,
             timeout=timeout, cwd=cwd,
         )
         return Proc(rc=p.returncode, out=p.stdout, err=p.stderr, cmd=list(cmd))
     except subprocess.TimeoutExpired as exc:
-        return Proc(rc=-1, out=exc.stdout or "", err="timeout after %ss" % timeout,
+        out = exc.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        return Proc(rc=-1, out=out, err="timeout after %ss" % timeout,
                     cmd=list(cmd), timed_out=True)
     except (OSError, ValueError) as exc:
         return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
@@ -159,7 +179,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     env.augment_path()
     try:
         proc = subprocess.Popen(
-            list(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            bridge(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
         )
     except OSError:
@@ -213,6 +233,9 @@ def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str
 
 
 def proxy_args(tool: str, proxy: Optional[str]) -> List[str]:
+    # Under the Windows->WSL bridge a loopback proxy has to be rewritten to the
+    # Windows host address, or the tool proxies to the WSL VM and misses Burp.
+    proxy = env.proxy_for_tools(proxy)
     if not proxy:
         return []
     if tool in ("httpx", "nuclei", "katana"):
@@ -253,6 +276,8 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
     ]
     cmd += nmap_port_args(port_spec)
     cmd += hosts
+    # nmap runs inside WSL under the bridge, so -oX must name a path it can see.
+    cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
     proc = run(cmd, timeout=timeout)
     if not os.path.exists(xml_path):
         return {}
@@ -273,7 +298,7 @@ def nmap_script_scan(host: str, ports: List[int], scripts: List[str],
            "-p", ",".join(str(p) for p in sorted(set(ports))),
            "--script", ",".join(sorted(set(scripts))),
            "--script-timeout", "90s", "--host-timeout", "10m",
-           "-oX", xml_path, host]
+           "-oX", env.to_wsl_path(xml_path), host]
     run(cmd, timeout=timeout)
     return parse_nse_xml(xml_path)
 
@@ -477,7 +502,8 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = No
         "-ac", "-acc", "-mc", "200,201,204,301,302,307,401,403,405,500",
         "-fs", "0", "-t", str(tune.get("ffuf_threads", 10)),
         "-rate", str(int(tune.get("rate", 30))),
-        "-timeout", "8", "-s", "-of", "json", "-o", tmp.name, "-noninteractive",
+        "-timeout", "8", "-s", "-of", "json",
+        "-o", env.to_wsl_path(tmp.name), "-noninteractive",
     ]
     if extensions:
         cmd += ["-e", extensions]

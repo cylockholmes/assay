@@ -434,8 +434,21 @@ def cmd_doctor(args) -> int:
     res = env.resources()
     tune = env.autotune(res)
     console.print("[bold]environment[/bold]")
-    console.print("  platform     %s" % ("WSL (%s networking)" % env.wsl_networking_mode()
-                                         if env.is_wsl() else sys.platform))
+    if env.is_windows():
+        if env.use_wsl_bridge():
+            console.print("  platform     Windows host, tools via WSL [green](bridge active)[/green]")
+            console.print("  distro       %s" % env.wsl_distro())
+            gw = env.wsl_gateway_ip()
+            console.print("  wsl gateway  %s  [dim](Windows host as WSL sees it)[/dim]"
+                          % (gw or "unknown"))
+        else:
+            console.print("  platform     Windows [red](no WSL distribution found)[/red]")
+            console.print("  [yellow]assay runs, but every external scanner is a Linux "
+                          "binary.[/yellow] Install WSL with:  wsl --install -d kali-linux")
+    elif env.is_wsl():
+        console.print("  platform     WSL (%s networking)" % env.wsl_networking_mode())
+    else:
+        console.print("  platform     %s" % sys.platform)
     console.print("  cpus         %d" % res.cpus)
     console.print("  memory       %d MB available / %d MB total"
                   % (res.mem_avail_mb, res.mem_total_mb))
