@@ -7,6 +7,7 @@ running on the Windows side and a CPU/RAM-constrained VM underneath.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -28,6 +29,105 @@ EXTRA_BIN_DIRS = [
 # --------------------------------------------------------------------------
 # Platform
 # --------------------------------------------------------------------------
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+# --------------------------------------------------------------------------
+# Windows host -> WSL bridge
+#
+# assay itself is pure Python and runs fine on Windows, but every scanner it
+# orchestrates is a Linux binary. Rather than requiring a second install inside
+# WSL, a Windows-hosted run routes each external command through `wsl.exe`,
+# so the tools stay where they already are.
+#
+# Two things make this work without special-casing every call site: every
+# subprocess invocation in assay is an argv list (never shell=True), so the
+# bridge only has to prepend a prefix; and the handful of flags that pass a
+# filesystem path get translated with `wslpath`.
+# --------------------------------------------------------------------------
+
+_WSL_STATE: Dict[str, object] = {"checked": False, "distro": None, "ok": False}
+
+
+def wsl_available() -> bool:
+    """Is there a usable WSL distribution we can hand commands to?"""
+    if not is_windows():
+        return False
+    if _WSL_STATE["checked"]:
+        return bool(_WSL_STATE["ok"])
+    _WSL_STATE["checked"] = True
+    exe = shutil.which("wsl.exe") or shutil.which("wsl")
+    if not exe:
+        return False
+    try:
+        # -l -q lists installed distributions, one per line. WSL emits UTF-16.
+        p = subprocess.run([exe, "-l", "-q"], capture_output=True, timeout=20)
+        raw = p.stdout or b""
+        text = raw.decode("utf-16-le", "ignore") if b"\x00" in raw[:40] \
+            else raw.decode("utf-8", "ignore")
+        distros = [d.strip() for d in text.splitlines() if d.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if not distros:
+        return False
+    # Prefer a Kali/Debian-family distro, which is where the tools will be.
+    preferred = next((d for d in distros
+                      if any(k in d.lower() for k in ("kali", "debian", "ubuntu"))),
+                     distros[0])
+    _WSL_STATE["distro"] = preferred
+    _WSL_STATE["ok"] = True
+    return True
+
+
+def wsl_distro() -> Optional[str]:
+    wsl_available()
+    d = _WSL_STATE.get("distro")
+    return d if isinstance(d, str) else None
+
+
+def wsl_prefix() -> List[str]:
+    """Argv prefix that runs the rest of the command inside WSL."""
+    distro = wsl_distro()
+    if not distro:
+        return []
+    return ["wsl.exe", "-d", distro, "--"]
+
+
+def use_wsl_bridge() -> bool:
+    """True when external tools must be run through WSL rather than directly."""
+    return is_windows() and wsl_available()
+
+
+_PATH_CACHE: Dict[str, str] = {}
+
+
+def to_wsl_path(path: str) -> str:
+    r"""Translate a Windows path to the path WSL sees.
+
+    C:\Users\me\out  ->  /mnt/c/Users/me/out
+    """
+    if not is_windows() or not path:
+        return path
+    if path in _PATH_CACHE:
+        return _PATH_CACHE[path]
+    translated = path
+    try:
+        p = subprocess.run(wsl_prefix() + ["wslpath", "-u", path],
+                           capture_output=True, text=True, timeout=15)
+        out = (p.stdout or "").strip()
+        if out:
+            translated = out
+    except (OSError, subprocess.SubprocessError):
+        # Fall back to the standard drive mapping.
+        m = re.match(r"^([A-Za-z]):[\\/](.*)$", path)
+        if m:
+            translated = "/mnt/%s/%s" % (m.group(1).lower(),
+                                         m.group(2).replace("\\", "/"))
+    _PATH_CACHE[path] = translated
+    return translated
 
 
 def is_wsl() -> bool:
@@ -218,7 +318,82 @@ def burp_hint() -> str:
 # --------------------------------------------------------------------------
 
 
+def wsl_gateway_ip() -> Optional[str]:
+    """The address WSL uses to reach the Windows host (NAT mode default route)."""
+    if not use_wsl_bridge():
+        return None
+    cached = _WSL_STATE.get("gateway")
+    if isinstance(cached, str):
+        return cached
+    try:
+        p = subprocess.run(wsl_prefix() + ["sh", "-lc",
+                                           "ip route show default | awk '{print $3; exit}'"],
+                           capture_output=True, text=True, timeout=20)
+        ip = (p.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError):
+        ip = ""
+    if ip.count(".") == 3:
+        _WSL_STATE["gateway"] = ip
+        return ip
+    return None
+
+
+def proxy_for_tools(proxy: Optional[str]) -> Optional[str]:
+    """Rewrite a loopback proxy so a tool running inside WSL can reach it.
+
+    assay's own requests run on the Windows host, where Burp on 127.0.0.1 is
+    directly reachable. The scanners run inside WSL, where 127.0.0.1 is the
+    WSL VM itself - a different machine. Under mirrored networking the two
+    coincide; under the default NAT they do not, and the tools would silently
+    bypass the proxy. Point them at the Windows host explicitly.
+    """
+    if not proxy or not use_wsl_bridge():
+        return proxy
+    m = re.match(r"^(\w+://)(127\.0\.0\.1|localhost)(:\d+)?(.*)$", proxy, re.I)
+    if not m:
+        return proxy
+    gateway = wsl_gateway_ip()
+    if not gateway:
+        return proxy
+    return "%s%s%s%s" % (m.group(1), gateway, m.group(3) or "", m.group(4) or "")
+
+
+_WSL_WHICH: Dict[str, Optional[str]] = {}
+
+
+def wsl_which_many(names: List[str]) -> Dict[str, Optional[str]]:
+    """Resolve several tools inside WSL in one call.
+
+    One wsl.exe spawn costs ~200ms, so resolving seventeen tools individually
+    would add several seconds to every startup. `which` accepts multiple
+    arguments and prints a line per hit.
+    """
+    if not use_wsl_bridge() or not names:
+        return {n: None for n in names}
+    missing = [n for n in names if n not in _WSL_WHICH]
+    if missing:
+        found: Dict[str, Optional[str]] = {n: None for n in missing}
+        try:
+            # -lc so the login shell puts ~/go/bin and friends on PATH.
+            script = "which " + " ".join(missing) + " 2>/dev/null"
+            p = subprocess.run(wsl_prefix() + ["sh", "-lc", script],
+                               capture_output=True, text=True, timeout=45)
+            for line in (p.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                base = line.rsplit("/", 1)[-1]
+                if base in found:
+                    found[base] = line
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _WSL_WHICH.update(found)
+    return {n: _WSL_WHICH.get(n) for n in names}
+
+
 def which(name: str) -> Optional[str]:
+    if use_wsl_bridge():
+        return wsl_which_many([name]).get(name)
     path = shutil.which(name)
     if path:
         return path

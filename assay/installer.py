@@ -53,7 +53,13 @@ def _has(binary: str) -> bool:
 
 
 def _sudo_needed() -> bool:
-    return os.geteuid() != 0
+    """Is sudo required to install? os.geteuid does not exist on Windows."""
+    getuid = getattr(os, "geteuid", None)
+    if getuid is None:
+        # Windows host: the install happens inside WSL, where the shell's own
+        # user decides. Assume a normal user and let sudo prompt if needed.
+        return True
+    return getuid() != 0
 
 
 def gopath_bin() -> str:
