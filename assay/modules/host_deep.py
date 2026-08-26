@@ -44,6 +44,7 @@ class HostDeepModule(Module):
     name = "hostdeep"
     stage = "analyze"
     scope = "host"
+    impact_class = "probe"
     desc = "Unauthenticated service checks: anonymous access, null sessions, weak auth"
 
     def applicable(self, ctx: Context) -> bool:

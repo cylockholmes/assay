@@ -13,7 +13,11 @@ from assay import __version__, env, tools
 from assay.burp import BurpBridge
 from assay.config import BurpConfig, Config, Scope, ScopeError, PROFILES
 from assay.store import Store
-from assay.ui import Dashboard, console, detail as show_detail, summary, tool_table
+import time
+
+from assay import report as report_mod
+from assay.ui import (Dashboard, SEV_STYLE, console, detail as show_detail,
+                      summary, tool_table)
 
 EPILOG = """\
 examples:
@@ -48,13 +52,30 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("targets", nargs="*", help="hosts, CIDRs or URLs")
     s.add_argument("-f", "--targets-file", help="file with one target per line")
     s.add_argument("-p", "--profile", choices=sorted(PROFILES), default="standard")
-    s.add_argument("-o", "--out", default="./assay-out", help="output directory")
+    s.add_argument("-o", "--out", default="./assay-out",
+                   help="root output directory; each engagement gets its own subfolder")
+    s.add_argument("-n", "--codename", default="",
+                   help="engagement codename - names the output folder and the report")
+    s.add_argument("--flat", action="store_true",
+                   help="write straight into --out instead of a per-engagement subfolder")
     s.add_argument("--scope", help="scope file (allow list; '!' prefix excludes)")
 
     s.add_argument("-c", "--concurrency", type=int, help="worker threads (auto by default)")
     s.add_argument("-r", "--rate", type=float, help="global requests/second ceiling")
     s.add_argument("--timeout", type=float, default=12.0)
     s.add_argument("--retries", type=int, default=1)
+
+    p_ = s.add_argument_group("pacing and client safety")
+    p_.add_argument("--rate-per-host", type=float, default=8.0, metavar="N",
+                    help="per-host requests/second ceiling (0 disables). The global "
+                         "--rate alone still lets every worker pile onto one host.")
+    p_.add_argument("--delay", type=float, default=0.0, metavar="SEC",
+                    help="extra jittered pause before each request")
+    p_.add_argument("--safe", action="store_true",
+                    help="retrieval only: skip every module that sends crafted "
+                         "input, unusual verbs or fuzzing traffic")
+    p_.add_argument("--no-journal", action="store_true",
+                    help="do not record activity.log / replay.sh")
 
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
     s.add_argument("--passive", action="store_true",
@@ -96,7 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _ai_flags(s)
     s.add_argument("--no-report", action="store_true")
-    s.add_argument("--open", action="store_true", help="open the report when finished")
+    s.add_argument("--no-live", action="store_true",
+                   help="do not update the report while the scan runs")
+    s.add_argument("--open", action="store_true",
+                   help="open the report as soon as it starts filling in")
     s.add_argument("-q", "--quiet", action="store_true")
 
     # -- other commands ----------------------------------------------------
@@ -165,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the exact commands and exit without running them")
     i.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
 
+    df = sub.add_parser("diff", help="what changed since the previous run")
+    df.add_argument("-o", "--out", default="./assay-out")
+    df.add_argument("--run", type=int, help="run id (default: the latest)")
+
     sub.add_parser("modules", help="list detection modules")
     return p
 
@@ -186,6 +214,29 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------
+
+
+def resolve_run_dir(path: str) -> str:
+    """Accept either a run directory or the root that holds several.
+
+    `assay report -o ./assay-out` should keep working after runs started being
+    written to ./assay-out/<target>/, so when the given path has no database
+    but its children do, pick the most recent child.
+    """
+    if os.path.exists(os.path.join(path, "assay.db")):
+        return path
+    try:
+        subs = [os.path.join(path, d) for d in os.listdir(path)]
+    except OSError:
+        return path
+    runs = [d for d in subs if os.path.isfile(os.path.join(d, "assay.db"))]
+    if not runs:
+        return path
+    newest = max(runs, key=lambda d: os.path.getmtime(os.path.join(d, "assay.db")))
+    if len(runs) > 1:
+        console.print("  [dim]%d runs under %s; using the most recent: %s[/dim]"
+                      % (len(runs), path, os.path.basename(newest)))
+    return newest
 
 
 def make_config(args) -> Config:
@@ -213,6 +264,11 @@ def make_config(args) -> Config:
         scope=scope,
         concurrency=args.concurrency or tune["concurrency"],
         rate=args.rate or tune["rate"],
+        rate_per_host=getattr(args, "rate_per_host", 8.0),
+        delay=getattr(args, "delay", 0.0),
+        safe_mode=getattr(args, "safe", False),
+        journal=not getattr(args, "no_journal", False),
+        codename=getattr(args, "codename", "") or "",
         timeout=args.timeout,
         retries=args.retries,
         passive=args.passive,
@@ -239,6 +295,7 @@ def make_config(args) -> Config:
     if args.skip:
         cfg.skip_modules = [x.strip() for x in args.skip.split(",") if x.strip()]
 
+    cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
     cfg.burp = _burp_config(args)
 
     if scope.permissive:
@@ -284,7 +341,8 @@ def cmd_scan(args) -> int:
     if getattr(args, "install_missing", False):
         _do_install(assume_yes=args.quiet)
 
-    dash = Dashboard(len(cfg.targets), cfg.profile, quiet=cfg.quiet)
+    dash = Dashboard(len(cfg.targets), cfg.profile, quiet=cfg.quiet,
+                     codename=cfg.codename)
 
     with dash:
         engine = Engine(cfg, progress=dash.progress)
@@ -297,6 +355,40 @@ def cmd_scan(args) -> int:
             return new
 
         engine.ctx.emit = emit
+
+        # Keep the report current while the scan runs so the first findings can
+        # be worked by hand long before the last host is swept.
+        live = not args.no_report and not args.no_live
+        report_path = os.path.join(cfg.out_dir, "report.html")
+        state = {"last": 0.0, "opened": False}
+
+        def refresh(force: bool = False) -> None:
+            if not live:
+                return
+            now = time.time()
+            if not force and now - state["last"] < 4.0:
+                return
+            state["last"] = now
+            try:
+                report_mod.build(engine.store, engine.assets(), report_path,
+                                 scan_meta={"profile": cfg.profile,
+                                            "codename": cfg.codename},
+                                 live=True)
+            except Exception:
+                return
+            if args.open and not state["opened"]:
+                state["opened"] = True
+                env.open_in_browser(report_path)
+
+        original_progress = dash.progress
+
+        def progress(stage: str, msg: str, advance: int = 0) -> None:
+            original_progress(stage, msg, advance)
+            refresh()
+
+        engine.ctx.progress = progress
+        refresh(force=True)
+
         try:
             engine.run()
         except KeyboardInterrupt:
@@ -318,10 +410,12 @@ def cmd_scan(args) -> int:
     if not args.no_report:
         path = os.path.join(cfg.out_dir, "report.html")
         report_mod.build(engine.store, assets, path, ai=ai_result,
-                         scan_meta={"profile": cfg.profile})
+                         scan_meta={"profile": cfg.profile,
+                                    "codename": cfg.codename},
+                         live=False)
         console.print("\n  report  [cyan]%s[/cyan]" % path)
         console.print("  data    [dim]%s[/dim]" % cfg.db_path())
-        if args.open and not env.open_in_browser(path):
+        if args.open and not state.get("opened") and not env.open_in_browser(path):
             console.print("  [dim](could not launch a browser; open the path above)[/dim]")
 
     engine.store.close()
@@ -349,6 +443,17 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
         dry_run=args.ai_dry_run,
         effort=args.ai_effort,
     )
+
+    # Credentials before anything else: no point redacting a payload we cannot
+    # send, and no point asking for a key after the user has already waited.
+    if not ai_cfg.dry_run:
+        have, how = ai_mod.credential_status()
+        if have:
+            console.print("  [dim]credentials: %s[/dim]" % how)
+        elif not ai_mod.prompt_for_key(console):
+            console.print("  [yellow]skipping AI triage[/yellow] - no credentials. "
+                          "Set ANTHROPIC_API_KEY or run 'ant auth login'.")
+            return None
 
     payload, leaks = ai_mod.build_payload(findings, assets, ai_cfg, redactor)
     if leaks:
@@ -416,6 +521,7 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
 def cmd_ai(args) -> int:
     from assay import report as report_mod
+    args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
     cfg = Config(out_dir=args.out)
     args.ai_yes = getattr(args, "ai_yes", False)
@@ -487,18 +593,23 @@ def cmd_doctor(args) -> int:
         have_sdk = True
     except ImportError:
         have_sdk = False
-    key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     console.print("  sdk     %s" % ("[green]installed[/green]" if have_sdk
                                     else "[yellow]not installed[/yellow]  pip install anthropic"))
-    console.print("  creds   %s" % ("[green]env var set[/green]" if key
-                                    else "[yellow]no ANTHROPIC_API_KEY[/yellow] "
-                                         "(or run 'ant auth login')"))
+    if have_sdk:
+        from assay import ai as ai_mod
+        ok, how = ai_mod.credential_status()
+        console.print("  creds   %s  [dim]%s[/dim]"
+                      % ("[green]ready[/green]" if ok else "[yellow]none[/yellow]", how))
+        if not ok:
+            console.print("  [dim]assay will prompt for a key when you use --ai, "
+                          "or set ANTHROPIC_API_KEY / run 'ant auth login'[/dim]")
     console.print("  [dim]AI triage is opt-in (--ai) and only ever sends redacted data.[/dim]")
     return 0
 
 
 def cmd_report(args) -> int:
     from assay import report as report_mod
+    args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
     assets = {"hosts": len(store.host_rows()), "web": len(store.web_rows()),
               "requests": 0, "duration": 0}
@@ -516,6 +627,7 @@ def cmd_report(args) -> int:
 
 
 def cmd_show(args) -> int:
+    args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
     findings = store.findings()
     target = None
@@ -534,6 +646,7 @@ def cmd_show(args) -> int:
 
 
 def cmd_burp(args) -> int:
+    args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
     cfg = Config(out_dir=args.out, burp=_burp_config(args))
     bridge = BurpBridge(cfg)
@@ -579,6 +692,7 @@ def _burp_push(store: Store, cfg: Config, mirror: bool, scan: bool) -> None:
 
 def cmd_submit(args) -> int:
     from assay import submission
+    args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
     findings = store.findings()
     if args.rank:
@@ -630,6 +744,7 @@ def cmd_replay(args) -> int:
             console.print("[red]cannot read scope file:[/red] %s" % exc)
             return 2
     cfg.aggressive = args.aggressive
+    cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
     cfg.burp = _burp_config(args)
     cfg.ensure_dirs()
 
@@ -717,8 +832,9 @@ def cmd_followup(args) -> int:
     from assay import followup
     from assay.redact import RedactionMap
 
-    store = Store(os.path.join(args.out, "assay.db"))
-    cfg = Config(out_dir=args.out)
+    run_dir = resolve_run_dir(args.out)
+    store = Store(os.path.join(run_dir, "assay.db"))
+    cfg = Config(out_dir=run_dir)
     if getattr(args, "scope", None):
         try:
             cfg.scope = Scope.from_file(args.scope)
@@ -728,7 +844,7 @@ def cmd_followup(args) -> int:
 
     # Un-redact locally: the mapping never left this machine.
     redactor = None
-    map_path = os.path.join(args.out, "redaction-map.json")
+    map_path = os.path.join(run_dir, "redaction-map.json")
     if os.path.exists(map_path):
         class _R:
             pass
@@ -916,6 +1032,57 @@ def _do_install(only=None, include_optional=True, dry_run=False,
     return 0
 
 
+def cmd_diff(args) -> int:
+    args.out = resolve_run_dir(args.out)
+    store = Store(os.path.join(args.out, "assay.db"))
+    runs = store.runs()
+    if not runs:
+        console.print("[yellow]no runs recorded here[/yellow]")
+        store.close()
+        return 1
+    target = args.run or runs[0]["id"]
+    d = store.diff(target)
+
+    console.print("\n[bold]run %s[/bold]  %s"
+                  % (target, time.strftime("%Y-%m-%d %H:%M",
+                                           time.localtime(runs[0]["started"]))))
+    if d["is_first_run"]:
+        console.print("  [dim]first run for this engagement - everything is new, "
+                      "so there is nothing to compare against yet.[/dim]")
+        store.close()
+        return 0
+    console.print("  [dim]compared against run %s[/dim]\n" % d["previous"])
+
+    if d["new_findings"]:
+        console.print("[bold green]new findings (%d)[/bold green]"
+                      % len(d["new_findings"]))
+        for f in d["new_findings"][:25]:
+            console.print("  [%s]%-8s[/%s] %s  [cyan]%s[/cyan]"
+                          % (SEV_STYLE.get(f.severity, "white"), f.severity,
+                             SEV_STYLE.get(f.severity, "white"),
+                             f.title[:62], f.target[:52]))
+    else:
+        console.print("[dim]no new findings[/dim]")
+
+    if d["gone_findings"]:
+        console.print("\n[bold]no longer present (%d)[/bold]  "
+                      "[dim]fixed, or the host stopped answering[/dim]"
+                      % len(d["gone_findings"]))
+        for f in d["gone_findings"][:15]:
+            console.print("  [dim]%-8s %s  %s[/dim]"
+                          % (f.severity, f.title[:62], f.target[:52]))
+
+    if d["new_hosts"]:
+        console.print("\n[bold]new hosts (%d)[/bold]" % len(d["new_hosts"]))
+        console.print("  " + ", ".join(d["new_hosts"][:20]))
+    if d["new_web"]:
+        console.print("\n[bold]new endpoints (%d)[/bold]" % len(d["new_web"]))
+        for u in d["new_web"][:20]:
+            console.print("  [cyan]%s[/cyan]" % u)
+    store.close()
+    return 0
+
+
 def cmd_modules(args) -> int:
     from assay.modules import all_modules
     from rich.table import Table
@@ -933,7 +1100,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     handlers = {
         "scan": cmd_scan, "doctor": cmd_doctor, "report": cmd_report,
         "ai": cmd_ai, "show": cmd_show, "burp": cmd_burp, "modules": cmd_modules,
-        "install": cmd_install, "followup": cmd_followup,
+        "install": cmd_install, "followup": cmd_followup, "diff": cmd_diff,
         "replay": cmd_replay, "submit": cmd_submit,
     }
     try:

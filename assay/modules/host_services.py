@@ -85,6 +85,7 @@ class ServiceTriageModule(Module):
     name = "services"
     stage = "analyze"
     scope = "host"
+    impact_class = "probe"
     desc = "Exposed network services worth manual attention"
 
     def run_host(self, ctx: Context, target: Target) -> List[Finding]:

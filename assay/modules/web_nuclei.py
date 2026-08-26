@@ -55,6 +55,7 @@ class NucleiModule(Module):
     name = "nuclei"
     stage = "external"
     scope = "global"
+    impact_class = "probe"
     desc = "Community template scanning (CVEs, misconfigurations, default logins)"
 
     def applicable(self, ctx: Context) -> bool:

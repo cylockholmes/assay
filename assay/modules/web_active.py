@@ -67,6 +67,7 @@ class OpenRedirectModule(Module):
     name = "openredirect"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Parameter-driven open redirection"
 
     META_RE = re.compile(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+url=([^"\'>\s]+)', re.I)
@@ -157,6 +158,7 @@ class HostHeaderModule(Module):
     name = "hostheader"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Host / X-Forwarded-Host injection and unkeyed-input reflection"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -264,6 +266,7 @@ class TraversalModule(Module):
     name = "traversal"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Path traversal / local file read"
 
     PAYLOADS = [
@@ -338,6 +341,7 @@ class GraphQLModule(Module):
     name = "graphql"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "GraphQL endpoint discovery and introspection"
 
     ENDPOINTS = ["/graphql", "/api/graphql", "/v1/graphql", "/graphql/v1",

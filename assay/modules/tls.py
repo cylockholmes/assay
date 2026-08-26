@@ -71,6 +71,7 @@ class TlsModule(Module):
     name = "tls"
     stage = "analyze"
     scope = "host"
+    impact_class = "read"
     desc = "Certificate validity and legacy TLS protocol support"
 
     def run_host(self, ctx: Context, target: Target) -> List[Finding]:

@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -211,6 +214,58 @@ def estimate_cost(input_tokens: int, output_tokens: int = 4000) -> float:
 # --------------------------------------------------------------------------
 # The call
 # --------------------------------------------------------------------------
+
+
+def credential_status() -> Tuple[bool, str]:
+    """How would the SDK authenticate right now?
+
+    The SDK resolves in a fixed order: ANTHROPIC_API_KEY, then
+    ANTHROPIC_AUTH_TOKEN, then an OAuth profile stored by `ant auth login`.
+    An unset environment variable therefore does not mean "no credentials".
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True, "ANTHROPIC_API_KEY is set"
+    if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return True, "ANTHROPIC_AUTH_TOKEN is set"
+    try:
+        p = subprocess.run(["ant", "auth", "status"], capture_output=True,
+                           text=True, timeout=15)
+        out = (p.stdout or "") + (p.stderr or "")
+        if p.returncode == 0 and re.search(r"active|logged in|profile", out, re.I):
+            return True, "authenticated via an 'ant auth login' profile"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False, "no API key and no stored profile"
+
+
+def prompt_for_key(console=None) -> bool:
+    """Ask for an API key interactively. Session-only, never written to disk.
+
+    Persisting a provider key is the user's decision to make deliberately, so
+    this sets it for the current process and tells them how to make it stick.
+    """
+    import getpass
+    if not sys.stdin.isatty():
+        return False
+    say = console.print if console else (lambda *a, **k: None)
+    say("\n  [bold]AI triage needs an Anthropic API key.[/bold]")
+    say("  [dim]It is used only to send the redacted payload you can inspect "
+        "first with --ai-dry-run.[/dim]")
+    say("  [dim]Leave blank to skip AI triage; the scan results are unaffected.[/dim]")
+    try:
+        key = getpass.getpass("  API key (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if not key:
+        return False
+    if not key.startswith("sk-ant-"):
+        say("  [yellow]that does not look like an Anthropic key "
+            "(expected it to start with 'sk-ant-')[/yellow]")
+    os.environ["ANTHROPIC_API_KEY"] = key
+    say("  [green]key set for this run only.[/green] To persist it:")
+    say("     [dim]export ANTHROPIC_API_KEY=...   (add to ~/.bashrc)[/dim]")
+    say("     [dim]or run 'ant auth login' once, which stores a profile[/dim]")
+    return True
 
 
 def _client(cfg: AIConfig):

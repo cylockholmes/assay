@@ -83,6 +83,7 @@ class SecretsModule(Module):
     name = "secrets"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Credentials, internal hosts and source maps in client-side assets"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:

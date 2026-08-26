@@ -34,6 +34,7 @@ class CorsModule(Module):
     name = "cors"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Cross-origin resource sharing trust boundaries"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -213,6 +214,7 @@ class CookieModule(Module):
     name = "cookies"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Session cookie attributes"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -267,6 +269,7 @@ class HeaderHygieneModule(Module):
     name = "headers"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Security header baseline (single consolidated row)"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -312,6 +315,7 @@ class MethodsModule(Module):
     name = "methods"
     stage = "analyze"
     scope = "web"
+    impact_class = "probe"
     desc = "Dangerous HTTP methods"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:

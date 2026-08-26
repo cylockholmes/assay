@@ -188,6 +188,71 @@ Two checks find surface DNS never advertises:
   directly with the right Host header. If the same application answers without
   the edge headers, every control implemented at the edge is bypassable.
 
+## Working while it scans
+
+The report is written from the first finding and refreshed every few seconds
+while the scan runs, so the first critical can be worked by hand long before
+the last host is swept. Scroll position and filters survive the refresh, and
+auto-refresh can be paused from the page.
+
+```bash
+assay scan 10.20.0.0/24 -n "ZESTY WOMBAT" --scope scope.txt --open
+```
+
+The report itself is a triage surface, not a document: search, severity and
+triage filters, module filter, confirmed-only toggle, copy buttons on every
+repro command and submission draft, and `/` `j` `k` `o` keyboard navigation.
+A **Start here** panel names the three things to do first.
+
+## One folder per engagement
+
+`--out` is the root; each engagement gets its own subfolder, keyed on the
+codename when you give one:
+
+```
+assay-out/
+└── ZESTY-WOMBAT/
+    ├── report.html          live during the scan, final after
+    ├── assay.db             findings, assets, run history
+    ├── activity.log         every request and command, timestamped
+    ├── replay.sh            the same actions as runnable commands
+    ├── raw/                 tool output
+    └── evidence/
+```
+
+Runs accumulate in the same database, so `assay diff` reports only what
+changed since last time — new findings, findings that disappeared, new hosts
+and new endpoints. Findings first seen in the current run are badged **new**
+in the report. The folder name is derived from the sorted target set, so
+reordering the arguments does not start a fresh history.
+
+## Everything is replayable
+
+`activity.log` records every request and every external command in order, with
+timestamps. `replay.sh` is the same set as runnable commands, deduplicated —
+so a finding can be reproduced by re-running the exact request rather than
+reconstructing it from the report. Disable with `--no-journal`.
+
+## Pacing, and not breaking the client
+
+- `--rate` global requests/second, and `--rate-per-host` (default 8/s) because
+  a global ceiling alone still lets every worker pile onto one host.
+- **Adaptive backoff.** A 429 or 503 halves the rate immediately and honours
+  `Retry-After`; the rate creeps back only after a quiet period. A target
+  asking us to slow down is not something to retry through.
+- `--delay` adds a jittered pause per request.
+- `--safe` restricts the run to modules that only retrieve.
+
+Modules declare what they do to the client, and it is reported by
+`assay modules`:
+
+| Class | Meaning |
+|---|---|
+| `passive` | nothing reaches the client — archives, CT logs, registry lookups |
+| `read` | ordinary retrieval. A GET for `/.env` is a read |
+| `probe` | crafted input, unusual verbs, or fuzzing volume |
+| `mutating` | could change state — never runs without `--aggressive` |
+
 ## Scope enforcement
 
 Every outbound request — assay's own and every external tool's — is checked
@@ -389,7 +454,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-65 offline tests. Every detection test asserts **both** directions — the check
+95 offline tests. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).

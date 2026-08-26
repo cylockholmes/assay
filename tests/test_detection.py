@@ -426,7 +426,7 @@ class InstallerTests(unittest.TestCase):
         cmds = [s.display() for s in plan.steps]
         self.assertTrue(any("apt-get update" in c for c in cmds))
         install = next(c for c in cmds if "apt-get install" in c)
-        for pkg in ("nmap", "ffuf", "seclists", "testssl.sh"):
+        for pkg in ("nmap", "ffuf", "seclists", "arjun"):
             self.assertIn(pkg, install)
         self.assertTrue(any("nuclei" in c and "go install" in c for c in cmds))
         self.assertEqual(plan.unsupported, [])
@@ -484,6 +484,12 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(any(s.needs_sudo for s in plan.steps))
         finally:
             installer._sudo_needed = orig
+
+    def test_registry_holds_only_tools_that_get_used(self):
+        """Installing a tool nobody calls wastes build time on a small VM."""
+        from assay import tools
+        self.assertNotIn("gowitness", tools.REGISTRY)
+        self.assertNotIn("puredns", tools.REGISTRY)
 
     def test_non_debian_is_reported_not_attempted(self):
         plan = self._plan(have_apt=False, have_go=True, only=["nmap"])
@@ -851,6 +857,251 @@ class WindowsWslBridgeTests(unittest.TestCase):
                     if isinstance(kw.value, ast.Constant) and kw.value.value:
                         offenders.append("%s:%d" % (f.name, node.lineno))
         self.assertEqual(offenders, [])
+
+
+class WiringTests(unittest.TestCase):
+    """Guards against the failure mode where a feature exists but never runs.
+
+    Each of these caught a real gap: content discovery was documented and
+    installable but never invoked, and four tools were installed on every
+    machine for nothing.
+    """
+
+    def test_every_module_stage_is_one_the_engine_runs(self):
+        import inspect
+        from assay import engine
+        from assay.modules import STAGES, all_modules
+        src = inspect.getsource(engine.Engine.run)
+        executed = {s for s in STAGES if '_stage_modules("%s")' % s in src}
+        # the probe stage is invoked from run() as well
+        declared = {m.stage for m in all_modules()}
+        orphans = sorted(declared - executed)
+        self.assertEqual(orphans, [],
+                         "modules registered at stages the engine never runs: %s"
+                         % orphans)
+
+    def test_every_registered_tool_is_actually_used(self):
+        """A tool in the registry gets installed and advertised by doctor."""
+        import pathlib
+        from assay import tools
+        root = pathlib.Path(__file__).resolve().parent.parent / "assay"
+        blob = "\n".join(f.read_text(encoding="utf-8")
+                          for f in root.rglob("*.py") if f.name != "tools.py")
+        toolsrc = (root / "tools.py").read_text(encoding="utf-8")
+        unused = []
+        for name, spec in tools.REGISTRY.items():
+            if spec.binary == "__wordlist__":
+                continue
+            slug = name.replace("-", "_").replace(".", "")
+            # used if a wrapper for it is called outside tools.py, or the binary
+            # name appears in an argv list built anywhere
+            wrapper_used = any(("%s_" % slug) in blob for _ in (0,)) and \
+                any(w in blob for w in (slug + "_scan", slug + "_probe",
+                                        slug + "_crawl", slug + "_urls",
+                                        slug + "_params", slug + "_enum",
+                                        slug + "_resolve", slug + "_discover"))
+            argv_used = ('"%s"' % spec.binary) in blob
+            helper_defined = ('"%s"' % spec.binary) in toolsrc
+            if not (wrapper_used or argv_used or
+                    (helper_defined and slug in blob)):
+                unused.append(name)
+        self.assertEqual(unused, [],
+                         "registered but never invoked: %s" % unused)
+
+    def test_profile_options_are_all_read(self):
+        import pathlib
+        from assay.config import PROFILES
+        root = pathlib.Path(__file__).resolve().parent.parent / "assay"
+        blob = "\n".join(f.read_text(encoding="utf-8") for f in root.rglob("*.py"))
+        unread = [k for k in PROFILES["standard"]
+                  if 'opts.get("%s"' % k not in blob and 'opts["%s"]' % k not in blob]
+        self.assertEqual(unread, [], "profile options never read: %s" % unread)
+
+    def test_content_discovery_module_is_registered(self):
+        from assay.modules import all_modules
+        self.assertIn("content", [m.name for m in all_modules()])
+
+
+class PacingTests(unittest.TestCase):
+    def test_backoff_halves_and_recovers_to_the_ceiling(self):
+        from assay.net import RateLimiter
+        l = RateLimiter(20)
+        self.assertEqual(l.back_off(), 10.0)
+        self.assertEqual(l.back_off(), 5.0)
+        for _ in range(20):
+            l.recover()
+        self.assertEqual(l.rate, 20)
+        self.assertEqual(l.throttled, 2)
+
+    def test_backoff_has_a_floor(self):
+        from assay.net import RateLimiter
+        l = RateLimiter(20)
+        for _ in range(50):
+            l.back_off()
+        self.assertGreaterEqual(l.rate, 0.5)
+
+    def test_per_host_limiter_is_separate_from_global(self):
+        from assay.config import Config
+        from assay.net import HttpClient
+        c = HttpClient(Config(rate=100, rate_per_host=5))
+        a, b = c._host_limiter("a.test"), c._host_limiter("b.test")
+        self.assertIsNot(a, b)
+        self.assertEqual(a.base_rate, 5)
+        self.assertIs(a, c._host_limiter("a.test"))
+
+    def test_per_host_limiting_can_be_disabled(self):
+        from assay.config import Config
+        from assay.net import HttpClient
+        self.assertIsNone(HttpClient(Config(rate_per_host=0))._host_limiter("a.test"))
+
+
+class ImpactClassTests(unittest.TestCase):
+    def test_every_module_declares_a_valid_class(self):
+        from assay.modules import IMPACT_CLASSES, all_modules
+        bad = [(m.name, m.impact_class) for m in all_modules()
+               if m.impact_class not in IMPACT_CLASSES]
+        self.assertEqual(bad, [])
+
+    def test_safe_mode_admits_only_retrieval_modules(self):
+        from assay.config import Config
+        from assay.context import Context
+        from assay.modules import all_modules
+
+        class _S:
+            def add_finding(self, f): return True
+        cfg = Config(safe_mode=True)
+        ctx = Context(cfg=cfg, store=_S(), http=None, tune={})
+        allowed = [m.name for m in all_modules() if m.applicable(ctx)]
+        classes = {m.impact_class for m in all_modules() if m.name in allowed}
+        self.assertTrue(classes <= {"passive", "read"},
+                        "safe mode admitted a probing module: %s" % classes)
+        self.assertIn("exposure", allowed)
+        self.assertNotIn("sqli", allowed)
+        self.assertNotIn("content", allowed)
+
+    def test_normal_mode_admits_probing_modules(self):
+        from assay.config import Config
+        from assay.context import Context
+        from assay.modules import all_modules
+
+        class _S:
+            def add_finding(self, f): return True
+        ctx = Context(cfg=Config(), store=_S(), http=None, tune={})
+        allowed = [m.name for m in all_modules() if m.applicable(ctx)]
+        self.assertIn("sqli", allowed)
+
+
+class JournalTests(unittest.TestCase):
+    def test_requests_and_commands_become_replayable(self):
+        import tempfile, os
+        from assay.journal import Journal
+        d = tempfile.mkdtemp()
+        j = Journal(d)
+        j.open(["target.test"], "standard")
+        j.request("GET", "https://target.test/.env", {"X-Api-Key": "abc"})
+        j.command(["nmap", "-sV", "10.0.0.1"])
+        j.close()
+        log = open(j.log_path).read()
+        replay = open(j.replay_path).read()
+        self.assertIn("https://target.test/.env", log)
+        self.assertIn("nmap -sV 10.0.0.1", log)
+        self.assertIn("curl -sSik", replay)
+        self.assertIn("nmap -sV 10.0.0.1", replay)
+        self.assertTrue(os.access(j.replay_path, os.X_OK))
+
+    def test_identical_requests_are_recorded_once_in_replay(self):
+        import tempfile
+        from assay.journal import Journal
+        j = Journal(tempfile.mkdtemp())
+        j.open(["t"], "quick")
+        for _ in range(5):
+            j.request("GET", "https://t/x", {})
+        j.close()
+        self.assertEqual(open(j.replay_path).read().count("https://t/x"), 1)
+        self.assertEqual(j.requests, 5)
+
+    def test_disabled_journal_writes_nothing(self):
+        import tempfile, os
+        from assay.journal import Journal
+        d = tempfile.mkdtemp()
+        j = Journal(d, enabled=False)
+        j.open(["t"], "quick"); j.request("GET", "https://t/", {}); j.close()
+        self.assertFalse(os.path.exists(j.log_path))
+
+
+class RunDirTests(unittest.TestCase):
+    def test_codename_wins_over_target_derived_name(self):
+        from assay.config import Config
+        c = Config(targets=["10.20.0.0/24", "a.test"], codename="ZESTY WOMBAT")
+        self.assertTrue(c.apply_run_dir("/out").endswith("ZESTY-WOMBAT"))
+
+    def test_targets_name_the_folder_without_a_codename(self):
+        from assay.config import Config
+        self.assertTrue(
+            Config(targets=["https://app.example.com"]).apply_run_dir("/out")
+            .endswith("app.example.com"))
+
+    def test_multiple_targets_get_a_stable_disambiguated_name(self):
+        from assay.config import Config
+        a = Config(targets=["a.test", "b.test"]).apply_run_dir("/out")
+        b = Config(targets=["b.test", "a.test"]).apply_run_dir("/out")
+        self.assertEqual(a, b, "name must not depend on argument order")
+
+    def test_flat_mode_writes_into_the_root(self):
+        from assay.config import Config
+        self.assertEqual(
+            Config(targets=["a.test"]).apply_run_dir("/out", flat=True), "/out")
+
+
+class DiffTests(unittest.TestCase):
+    def _store(self):
+        import tempfile, os
+        from assay.store import Store
+        return os.path.join(tempfile.mkdtemp(), "assay.db")
+
+    def _add(self, s, title, target="https://a/x"):
+        from assay.models import Evidence, Finding
+        s.add_finding(Finding(title=title, target=target, severity="high",
+                              confidence="confirmed", module="m", impact="i",
+                              evidence=[Evidence(kind="http", output="x")]))
+
+    def test_second_run_reports_only_the_delta(self):
+        from assay.store import Store
+        path = self._store()
+        s = Store(path); s.start_run("standard", ["t"])
+        self._add(s, "A"); self._add(s, "B")
+        s.save_web("https://a/", "a", 443, 200, "", "", [], {})
+        s.finish_run(); s.close()
+
+        s = Store(path); s.start_run("standard", ["t"])
+        self._add(s, "A"); self._add(s, "C")
+        s.save_web("https://b/", "b", 443, 200, "", "", [], {})
+        d = s.diff()
+        self.assertFalse(d["is_first_run"])
+        self.assertEqual([f.title for f in d["new_findings"]], ["C"])
+        self.assertEqual([f.title for f in d["gone_findings"]], ["B"])
+        self.assertEqual(d["new_web"], ["https://b/"])
+        s.close()
+
+    def test_first_run_is_flagged_rather_than_diffed(self):
+        from assay.store import Store
+        s = Store(self._store()); s.start_run("standard", ["t"])
+        self._add(s, "A")
+        d = s.diff()
+        self.assertTrue(d["is_first_run"])
+        self.assertIsNone(d["previous"])
+        s.close()
+
+    def test_repeat_finding_is_not_reported_as_new(self):
+        from assay.store import Store
+        path = self._store()
+        s = Store(path); s.start_run("standard", ["t"]); self._add(s, "A")
+        fid = list(s.iter_findings())[0].fingerprint()
+        s.finish_run(); s.close()
+        s = Store(path); s.start_run("standard", ["t"]); self._add(s, "A")
+        self.assertFalse(s.is_new_this_run(fid))
+        self.assertEqual(s.diff()["new_findings"], [])
+        s.close()
 
 
 if __name__ == "__main__":

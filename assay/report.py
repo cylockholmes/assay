@@ -32,7 +32,14 @@ def _e(s) -> str:
 
 
 def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
-          scan_meta: Optional[Dict] = None) -> str:
+          scan_meta: Optional[Dict] = None, live: bool = False) -> str:
+    """Render the report. `live=True` marks the scan as still running.
+
+    A live report reloads itself every few seconds so findings appear while the
+    scan is still going - you can start testing the first critical while the
+    rest of the netblock is still being swept. Scroll position and filter state
+    survive the reload, so it does not fight you.
+    """
     findings = list(store.iter_findings())
     counts = store.counts()
     chains = store.ai_chains()
@@ -42,7 +49,10 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     for f in findings:
         buckets.setdefault(f.triage, buckets["NOTE"]).append(f)
 
-    parts: List[str] = [_HEAD, _header(counts, assets, meta, ai)]
+    modules = sorted({f.module for f in findings if f.module})
+    parts: List[str] = [_HEAD, _header(counts, assets, meta, ai),
+                        _toolbar(modules, len(findings)),
+                        _start_here(findings, store)]
 
     if chains:
         parts.append(_chains_section(chains, findings))
@@ -60,11 +70,74 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
             parts.append(_finding_card(f, store))
         parts.append("</section>")
 
+    parts.append(_live_script() if live else "")
     parts.append(_FOOT)
     doc = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(doc)
     return out_path
+
+
+def _live_script() -> str:
+    """Auto-reload while a scan is in flight, preserving where you were."""
+    return """
+<div class="livebar" id="livebar">
+  <span class="dot"></span>
+  <b>scan running</b>
+  <span class="dim">findings appear as they are confirmed</span>
+  <label class="cbx"><input type="checkbox" id="autorefresh" checked> auto-refresh</label>
+  <span class="dim" id="nextin"></span>
+</div>
+<script>
+(function () {
+  var KEY = 'assay.scroll', CB = 'assay.autorefresh';
+  var box = document.getElementById('autorefresh');
+  try {
+    var pref = localStorage.getItem(CB);
+    if (pref !== null) box.checked = pref === '1';
+    var y = sessionStorage.getItem(KEY);
+    if (y) window.scrollTo(0, parseInt(y, 10));
+  } catch (e) {}
+  box.addEventListener('change', function () {
+    try { localStorage.setItem(CB, box.checked ? '1' : '0'); } catch (e) {}
+  });
+  var left = 5;
+  setInterval(function () {
+    if (!box.checked) {
+      document.getElementById('nextin').textContent = 'paused';
+      return;
+    }
+    left -= 1;
+    document.getElementById('nextin').textContent = 'refreshing in ' + left + 's';
+    if (left <= 0) {
+      try { sessionStorage.setItem(KEY, String(window.scrollY)); } catch (e) {}
+      location.reload();
+    }
+  }, 1000);
+})();
+</script>
+"""
+
+
+def _toolbar(modules: List[str], total: int) -> str:
+    sev_chips = "".join(
+        '<button class="chip sev-chip on" data-filter="sev" data-value="%s">%s</button>'
+        % (s, s) for s in ("critical", "high", "medium", "low", "info"))
+    tri_chips = "".join(
+        '<button class="chip tri-chip on" data-filter="triage" data-value="%s">%s</button>'
+        % (t, t.lower()) for t in ("CHASE", "LOOK", "NOTE"))
+    mods = "".join('<option value="%s">%s</option>' % (_e(m), _e(m)) for m in modules)
+    return (
+        '<div class="toolbar" id="toolbar">'
+        '<input id="q" type="search" placeholder="filter findings&hellip;  ( / )" '
+        'autocomplete="off" spellcheck="false">'
+        '<div class="chips">%s</div>'
+        '<div class="chips">%s</div>'
+        '<select id="mod"><option value="">all modules</option>%s</select>'
+        '<label class="cbx"><input type="checkbox" id="onlyconf"> confirmed only</label>'
+        '<span class="count"><b id="shown">%d</b> / %d</span>'
+        '<button class="chip" id="reset">reset</button>'
+        '</div>' % (sev_chips, tri_chips, mods, total, total))
 
 
 def _header(counts: Dict, assets: Dict, meta: Dict, ai: Optional[Dict]) -> str:
@@ -88,9 +161,11 @@ def _header(counts: Dict, assets: Dict, meta: Dict, ai: Optional[Dict]) -> str:
                    % (_e(ai.get("_model", "")), _e(ai["summary"])))
     return (
         '<header><div class="titlebar"><h1>assay</h1>'
-        '<div class="meta">%s &middot; profile <b>%s</b> &middot; %.0fs</div></div>'
+        '<div class="meta">%s%s &middot; profile <b>%s</b> &middot; %.0fs</div></div>'
         '<div class="tiles">%s</div>%s</header>'
-        % (_e(time.strftime("%Y-%m-%d %H:%M")), _e(meta.get("profile", "standard")),
+        % (("<b>%s</b> &middot; " % _e(meta.get("codename")))
+           if meta.get("codename") else "",
+           _e(time.strftime("%Y-%m-%d %H:%M")), _e(meta.get("profile", "standard")),
            assets.get("duration", 0), tile_html, summary)
     )
 
@@ -115,9 +190,38 @@ def _chains_section(chains: List[Dict], findings: List[Finding]) -> str:
             % (len(chains), "".join(rows)))
 
 
+def _start_here(findings: List[Finding], store: Store) -> str:
+    """The three things to do first, stated as actions rather than findings."""
+    top = [f for f in findings if f.triage == "CHASE"][:3]
+    if not top:
+        top = findings[:3]
+    if not top:
+        return ""
+    rows = []
+    for i, f in enumerate(top, 1):
+        ai = store.ai_for(f.fingerprint())
+        step = ""
+        if ai and ai.get("next_steps"):
+            step = ai["next_steps"][0]
+        elif f.repro:
+            step = f.repro
+        rows.append(
+            '<li><a href="#f-%s">%s</a>'
+            '<div class="sh-why">%s</div>'
+            '<code class="sh-cmd">%s</code></li>'
+            % (f.fingerprint(), _e(f.title), _e(f.impact[:190]), _e(step[:220]))
+        )
+    return ('<section class="start"><h2>Start here</h2><ol>%s</ol></section>'
+            % "".join(rows))
+
+
 def _finding_card(f: Finding, store: Store) -> str:
     fid = f.fingerprint()
     ai = store.ai_for(fid)
+    try:
+        is_new = store.is_new_this_run(fid)
+    except Exception:
+        is_new = False
     ev_html = ""
     for e in f.evidence[:3]:
         blob = e.compact()
@@ -144,31 +248,53 @@ def _finding_card(f: Finding, store: Store) -> str:
                    for r in f.refs[:4])
     tags = "".join('<span class="tag">%s</span>' % _e(t) for t in f.tags[:6])
 
+    try:
+        from assay import submission
+        draft = submission.draft(f, ai)
+    except Exception:
+        draft = ""
+
+    haystack = " ".join([f.title, f.target, f.module, f.category, f.cwe,
+                         f.impact, f.detail, " ".join(f.tags)]).lower()
+
     return (
-        '<article class="card" data-sev="%s">'
+        '<article class="card" id="f-%s" data-sev="%s" data-triage="%s" '
+        'data-module="%s" data-conf="%s" data-search="%s" tabindex="-1">'
         '<div class="card-head">'
         '<span class="sev" style="background:%s">%s</span>'
         '<span class="conf">%s</span>'
         '<h3>%s</h3>'
-        '<span class="score">%.0f</span>'
+        '<span class="score" title="priority score">%.0f</span>'
         '</div>'
         '<div class="target">%s</div>'
         '<div class="row"><span class="k">Impact</span><span>%s</span></div>'
         '%s'
-        '<div class="row"><span class="k">Class</span><span>%s %s</span></div>'
-        '<div class="row"><span class="k">Repro</span><code>%s</code></div>'
+        '<div class="row"><span class="k">Class</span><span>%s %s '
+        '<span class="modtag">%s</span></span></div>'
+        '<div class="row"><span class="k">Repro</span>'
+        '<span class="cmdwrap"><code>%s</code>'
+        '<button class="copy" data-copy="%s">copy</button></span></div>'
         '<div class="tags">%s %s</div>'
         '%s'
         '%s'
+        '%s'
         '</article>'
-        % (_e(f.severity), SEV_COLOR.get(f.severity, "#8ab4f8"), _e(f.severity),
-           _e(f.confidence), _e(f.title), f.score, _e(f.target), _e(f.impact),
+        % (f.fingerprint(), _e(f.severity), _e(f.triage), _e(f.module),
+           _e(f.confidence), _e(haystack),
+           SEV_COLOR.get(f.severity, "#8ab4f8"), _e(f.severity),
+           _e(f.confidence), _e(f.title),
+           '<span class="newbadge">new</span>' if is_new else "",
+           f.score, _e(f.target), _e(f.impact),
            ('<div class="row"><span class="k">Detail</span><span>%s</span></div>' % _e(f.detail))
            if f.detail else "",
-           _e(f.category), _e(f.cwe), _e(f.repro), tags, refs,
+           _e(f.category), _e(f.cwe), _e(f.module), _e(f.repro), _e(f.repro),
+           tags, refs,
            ('<details><summary>Evidence (%d)</summary>%s</details>'
             % (len(f.evidence), ev_html)) if ev_html else "",
-           ai_html)
+           ai_html,
+           ('<details class="draft"><summary>Submission draft</summary>'
+            '<button class="copy wide" data-copy="%s">copy draft</button>'
+            '<pre>%s</pre></details>' % (_e(draft), _e(draft))) if draft else "")
     )
 
 
@@ -223,7 +349,185 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 .chain-head{display:flex;align-items:center;gap:10px}
 .dim{color:var(--dim);font-size:12px}
 footer{padding:26px 32px;color:var(--dim);font-size:12px;border-top:1px solid var(--line);margin-top:34px}
+
+/* ---------- toolbar ---------- */
+.toolbar{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+  padding:12px 32px;background:var(--card);border-bottom:1px solid var(--line);
+  backdrop-filter:saturate(140%) blur(6px)}
+#q{flex:1 1 240px;min-width:180px;background:var(--bg);color:var(--fg);border:1px solid var(--line);
+  border-radius:6px;padding:7px 11px;font:inherit;font-size:13px}
+#q:focus{outline:2px solid var(--acc);outline-offset:1px}
+.chips{display:flex;gap:5px;flex-wrap:wrap}
+.chip{background:var(--bg);color:var(--dim);border:1px solid var(--line);border-radius:20px;
+  padding:4px 11px;font-size:11.5px;cursor:pointer;font-family:inherit;transition:all .12s}
+.chip:hover{border-color:var(--acc);color:var(--fg)}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#0b0d10;font-weight:600}
+#mod{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;
+  padding:6px 9px;font:inherit;font-size:12px}
+.cbx{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);cursor:pointer}
+.count{font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums;margin-left:auto}
+.count b{color:var(--fg)}
+
+/* ---------- start here ---------- */
+.start{margin:26px 32px 0;background:var(--card);border:1px solid var(--line);
+  border-left:3px solid var(--acc);border-radius:8px;padding:16px 20px}
+.start h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em;color:var(--acc)}
+.start ol{margin:0;padding-left:20px}
+.start li{margin-bottom:12px;font-size:14px}
+.start li a{color:var(--fg);font-weight:600;text-decoration:none}
+.start li a:hover{color:var(--acc);text-decoration:underline}
+.sh-why{color:var(--dim);font-size:12.5px;margin:2px 0 5px}
+.sh-cmd{display:block;font-size:11.5px;background:var(--bg);border:1px solid var(--line);
+  border-radius:5px;padding:5px 9px;overflow-x:auto;white-space:pre}
+
+/* ---------- copy buttons ---------- */
+.cmdwrap{display:flex;gap:8px;align-items:flex-start;flex:1;min-width:0}
+.cmdwrap code{flex:1;min-width:0}
+.copy{background:var(--bg);border:1px solid var(--line);color:var(--dim);border-radius:5px;
+  padding:2px 9px;font-size:11px;cursor:pointer;font-family:inherit;flex-shrink:0}
+.copy:hover{border-color:var(--acc);color:var(--acc)}
+.copy.done{background:#2f7a4d;border-color:#2f7a4d;color:#fff}
+.copy.wide{margin-bottom:8px}
+.newbadge{background:#2f7a4d;color:#fff;border-radius:4px;padding:1px 7px;
+  font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.modtag{background:var(--line);color:var(--dim);border-radius:4px;padding:1px 6px;font-size:11px}
+.card:target{box-shadow:0 0 0 2px var(--acc)}
+.livebar{position:sticky;top:0;z-index:30;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  padding:9px 32px;background:#8a3d12;color:#fff;font-size:12.5px}
+@media(prefers-color-scheme:dark){.livebar{background:#7a3510}}
+.livebar .dim{opacity:.8}
+.livebar .cbx{color:#fff}
+.livebar .dot{width:8px;height:8px;border-radius:50%;background:#ffd166;
+  animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.livebar .dot{animation:none}}
+.card.hidden{display:none}
+.bucket.empty{display:none}
+.draft pre{max-height:420px}
+kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
+  padding:1px 5px;font-size:11px;font-family:ui-monospace,monospace}
 </style></head><body><main>"""
 
-_FOOT = ("</main><footer>Generated by assay. Every finding lists the evidence it was "
-         "derived from - verify before reporting.</footer></body></html>")
+_SCRIPT = """
+<script>
+(function () {
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+  var q = document.getElementById('q');
+  var mod = document.getElementById('mod');
+  var onlyconf = document.getElementById('onlyconf');
+  var shown = document.getElementById('shown');
+  var KEY = 'assay.filters';
+
+  function activeSet(kind) {
+    var out = {};
+    document.querySelectorAll('[data-filter="' + kind + '"].on').forEach(function (b) {
+      out[b.dataset.value] = true;
+    });
+    return out;
+  }
+
+  function apply() {
+    var text = (q.value || '').toLowerCase().trim();
+    var sev = activeSet('sev'), tri = activeSet('triage');
+    var m = mod.value, conf = onlyconf.checked, n = 0;
+    cards.forEach(function (c) {
+      var ok = sev[c.dataset.sev] && tri[c.dataset.triage];
+      if (ok && m && c.dataset.module !== m) ok = false;
+      if (ok && conf && c.dataset.conf !== 'confirmed') ok = false;
+      if (ok && text && c.dataset.search.indexOf(text) === -1) ok = false;
+      c.classList.toggle('hidden', !ok);
+      if (ok) n++;
+    });
+    shown.textContent = n;
+    // hide a bucket heading when everything under it is filtered out
+    document.querySelectorAll('section.bucket').forEach(function (s) {
+      var vis = s.querySelectorAll('.card:not(.hidden)').length;
+      s.classList.toggle('empty', vis === 0 && s.querySelectorAll('.card').length > 0);
+    });
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        q: q.value, mod: mod.value, conf: conf,
+        sev: Object.keys(sev), tri: Object.keys(tri)
+      }));
+    } catch (e) {}
+  }
+
+  document.querySelectorAll('.chip[data-filter]').forEach(function (b) {
+    b.addEventListener('click', function () { b.classList.toggle('on'); apply(); });
+  });
+  [q, mod, onlyconf].forEach(function (el) {
+    el.addEventListener('input', apply);
+    el.addEventListener('change', apply);
+  });
+  var reset = document.getElementById('reset');
+  if (reset) reset.addEventListener('click', function () {
+    q.value = ''; mod.value = ''; onlyconf.checked = false;
+    document.querySelectorAll('.chip[data-filter]').forEach(function (b) {
+      b.classList.add('on');
+    });
+    apply();
+  });
+
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (saved) {
+      q.value = saved.q || ''; mod.value = saved.mod || '';
+      onlyconf.checked = !!saved.conf;
+      document.querySelectorAll('.chip[data-filter]').forEach(function (b) {
+        var list = b.dataset.filter === 'sev' ? saved.sev : saved.tri;
+        if (list) b.classList.toggle('on', list.indexOf(b.dataset.value) !== -1);
+      });
+    }
+  } catch (e) {}
+
+  // copy buttons
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('.copy');
+    if (!b) return;
+    var text = b.getAttribute('data-copy') || '';
+    var done = function () {
+      var old = b.textContent;
+      b.textContent = 'copied'; b.classList.add('done');
+      setTimeout(function () { b.textContent = old; b.classList.remove('done'); }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () {});
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (err) {}
+      document.body.removeChild(ta);
+    }
+  });
+
+  // keyboard: / focus search, j/k move, o toggle evidence, Esc blur
+  var idx = -1;
+  function visible() { return cards.filter(function (c) { return !c.classList.contains('hidden'); }); }
+  function focusAt(i) {
+    var v = visible(); if (!v.length) return;
+    idx = Math.max(0, Math.min(i, v.length - 1));
+    v[idx].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    v[idx].focus({ preventScroll: true });
+  }
+  document.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    if (e.key === 'Escape') { document.activeElement.blur(); return; }
+    if (typing) return;
+    if (e.key === '/') { e.preventDefault(); q.focus(); q.select(); }
+    else if (e.key === 'j') { e.preventDefault(); focusAt(idx + 1); }
+    else if (e.key === 'k') { e.preventDefault(); focusAt(idx - 1); }
+    else if (e.key === 'o') {
+      var v = visible()[idx]; if (!v) return;
+      v.querySelectorAll('details').forEach(function (d) { d.open = !d.open; });
+    }
+  });
+
+  apply();
+})();
+</script>
+"""
+
+_FOOT = ("</main><footer>Generated by assay. Every finding lists the evidence it "
+         "was derived from - verify before reporting.<br>"
+         "<kbd>/</kbd> search &middot; <kbd>j</kbd>/<kbd>k</kbd> move &middot; "
+         "<kbd>o</kbd> expand evidence</footer>" + _SCRIPT + "</body></html>")

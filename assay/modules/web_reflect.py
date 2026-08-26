@@ -129,6 +129,7 @@ class ReflectionModule(Module):
     name = "reflection"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Reflected input, its context, and which characters survive encoding"
 
     PROBE_CHARS = "<>\"'`(){};"

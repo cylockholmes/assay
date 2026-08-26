@@ -24,6 +24,7 @@ class ArchivedSecretsModule(Module):
     name = "archive"
     stage = "analyze"
     scope = "web"
+    impact_class = "passive"
     desc = "Credentials in archived copies of assets that were later removed"
 
     def applicable(self, ctx: Context) -> bool:

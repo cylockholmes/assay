@@ -45,6 +45,7 @@ class SsrfModule(Module):
     name = "ssrf"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "Server-side request forgery, in-band and out-of-band"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:

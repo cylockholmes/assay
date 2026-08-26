@@ -11,7 +11,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from assay.models import Evidence, Finding
 
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS findings (
     fid TEXT PRIMARY KEY,
     run_id INTEGER,
+    last_run INTEGER,
     title TEXT, target TEXT, severity TEXT, confidence TEXT,
     category TEXT, cwe TEXT, module TEXT, impact TEXT, detail TEXT,
     repro TEXT, refs TEXT, tags TEXT, evidence TEXT,
@@ -31,11 +32,13 @@ CREATE TABLE IF NOT EXISTS findings (
 CREATE INDEX IF NOT EXISTS idx_find_score ON findings(score DESC);
 CREATE INDEX IF NOT EXISTS idx_find_target ON findings(target);
 CREATE TABLE IF NOT EXISTS hosts (
-    host TEXT PRIMARY KEY, ip TEXT, data TEXT, updated REAL
+    host TEXT PRIMARY KEY, ip TEXT, data TEXT, updated REAL,
+    first_run INTEGER, last_run INTEGER
 );
 CREATE TABLE IF NOT EXISTS web (
     url TEXT PRIMARY KEY, host TEXT, port INTEGER, status INTEGER,
-    title TEXT, server TEXT, tech TEXT, data TEXT, updated REAL
+    title TEXT, server TEXT, tech TEXT, data TEXT, updated REAL,
+    first_run INTEGER, last_run INTEGER
 );
 CREATE TABLE IF NOT EXISTS ai_triage (
     fid TEXT PRIMARY KEY, verdict TEXT, priority INTEGER, fp_risk TEXT,
@@ -106,17 +109,20 @@ class Store:
                     existing = []
                 merged = existing + [e.__dict__ for e in f.evidence]
                 self._conn.execute(
-                    "UPDATE findings SET evidence=?, score=MAX(score,?) WHERE fid=?",
-                    (json.dumps(merged[:6]), f.score, fid),
+                    "UPDATE findings SET evidence=?, score=MAX(score,?), last_run=?"
+                    " WHERE fid=?",
+                    (json.dumps(merged[:6]), f.score, self.run_id, fid),
                 )
                 self._conn.commit()
                 return False
             self._conn.execute(
-                "INSERT INTO findings (fid, run_id, title, target, severity, confidence,"
-                " category, cwe, module, impact, detail, repro, refs, tags, evidence,"
-                " score, triage, created, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO findings (fid, run_id, last_run, title, target, severity,"
+                " confidence, category, cwe, module, impact, detail, repro, refs, tags,"
+                " evidence, score, triage, created, notes)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    fid, self.run_id, f.title, f.target, f.severity, f.confidence,
+                    fid, self.run_id, self.run_id,
+                    f.title, f.target, f.severity, f.confidence,
                     f.category, f.cwe, f.module, f.impact, f.detail, f.repro,
                     json.dumps(f.refs), json.dumps(f.tags),
                     json.dumps([e.__dict__ for e in f.evidence][:6]),
@@ -182,8 +188,11 @@ class Store:
     def save_host(self, host: str, ip: str, data: Dict) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO hosts (host, ip, data, updated) VALUES (?,?,?,?)",
-                (host, ip, json.dumps(data), time.time()),
+                "INSERT INTO hosts (host, ip, data, updated, first_run, last_run)"
+                " VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(host) DO UPDATE SET ip=excluded.ip, data=excluded.data,"
+                " updated=excluded.updated, last_run=excluded.last_run",
+                (host, ip, json.dumps(data), time.time(), self.run_id, self.run_id),
             )
             self._conn.commit()
 
@@ -191,10 +200,14 @@ class Store:
                  server: str, tech: List[str], data: Dict) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO web (url, host, port, status, title, server,"
-                " tech, data, updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO web (url, host, port, status, title, server, tech,"
+                " data, updated, first_run, last_run) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(url) DO UPDATE SET status=excluded.status,"
+                " title=excluded.title, server=excluded.server, tech=excluded.tech,"
+                " data=excluded.data, updated=excluded.updated,"
+                " last_run=excluded.last_run",
                 (url, host, port, status, title, server, json.dumps(tech),
-                 json.dumps(data), time.time()),
+                 json.dumps(data), time.time(), self.run_id, self.run_id),
             )
             self._conn.commit()
 
@@ -205,6 +218,48 @@ class Store:
     def host_rows(self) -> List[sqlite3.Row]:
         with self._lock:
             return self._conn.execute("SELECT * FROM hosts ORDER BY host").fetchall()
+
+    # -- diffing -----------------------------------------------------------
+    def runs(self, limit: int = 20) -> List[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    def diff(self, run_id: Optional[int] = None) -> Dict[str, Any]:
+        """What changed in `run_id` compared with everything before it.
+
+        Re-running against the same engagement should surface the delta, not
+        the whole picture again - a new subdomain or a newly-appearing finding
+        is the signal, and it is buried if every run reprints the baseline.
+        """
+        current = run_id if run_id is not None else self.run_id
+        with self._lock:
+            prior = self._conn.execute(
+                "SELECT MAX(id) AS p FROM runs WHERE id < ?", (current,)).fetchone()
+            previous = prior["p"] if prior and prior["p"] else None
+
+            new_findings = [self._row_to_finding(r) for r in self._conn.execute(
+                "SELECT * FROM findings WHERE run_id=? ORDER BY score DESC",
+                (current,)).fetchall()]
+            # Seen before but not in this run - fixed, or no longer reachable.
+            gone = [self._row_to_finding(r) for r in self._conn.execute(
+                "SELECT * FROM findings WHERE last_run < ? AND run_id < ?"
+                " ORDER BY score DESC", (current, current)).fetchall()] \
+                if previous else []
+            new_hosts = [r["host"] for r in self._conn.execute(
+                "SELECT host FROM hosts WHERE first_run=?", (current,)).fetchall()]
+            new_web = [r["url"] for r in self._conn.execute(
+                "SELECT url FROM web WHERE first_run=?", (current,)).fetchall()]
+        return {"run": current, "previous": previous,
+                "is_first_run": previous is None,
+                "new_findings": new_findings, "gone_findings": gone,
+                "new_hosts": new_hosts, "new_web": new_web}
+
+    def is_new_this_run(self, fid: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT run_id FROM findings WHERE fid=?", (fid,)).fetchone()
+        return bool(row and row["run_id"] == self.run_id)
 
     # -- AI triage ---------------------------------------------------------
     def save_ai(self, result: Dict) -> int:
@@ -256,17 +311,3 @@ class Store:
                  "impact": r["impact"], "steps": json.loads(r["steps"] or "[]")}
                 for r in rows]
 
-    # -- resume ------------------------------------------------------------
-    def mark_done(self, key: str, value: str = "1") -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO progress (key, value, updated) VALUES (?,?,?)",
-                (key, value, time.time()),
-            )
-            self._conn.commit()
-
-    def is_done(self, key: str) -> bool:
-        with self._lock:
-            return self._conn.execute(
-                "SELECT 1 FROM progress WHERE key=?", (key,)
-            ).fetchone() is not None
