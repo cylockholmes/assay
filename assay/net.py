@@ -44,14 +44,36 @@ def is_infra(host: str) -> bool:
 
 
 class RateLimiter:
-    """Simple thread-safe token bucket, requests per second."""
+    """Thread-safe token bucket, requests per second.
+
+    The rate can be lowered at runtime: when a target starts returning 429 or
+    503 it is telling us we are too fast, and continuing at the configured rate
+    risks degrading a production service. Recovery is gradual.
+    """
 
     def __init__(self, rate: float) -> None:
-        self.rate = max(rate, 0.1)
+        self.base_rate = max(rate, 0.1)
+        self.rate = self.base_rate
         self.capacity = max(rate, 1.0)
         self._tokens = self.capacity
         self._last = time.monotonic()
         self._lock = threading.Lock()
+        self.throttled = 0
+
+    def back_off(self, factor: float = 0.5, floor: float = 0.5) -> float:
+        """Halve the rate. Returns the new rate."""
+        with self._lock:
+            self.rate = max(floor, self.rate * factor)
+            self.capacity = max(1.0, self.rate)
+            self.throttled += 1
+            return self.rate
+
+    def recover(self, step: float = 1.15) -> None:
+        """Creep back toward the configured rate after a quiet period."""
+        with self._lock:
+            if self.rate < self.base_rate:
+                self.rate = min(self.base_rate, self.rate * step)
+                self.capacity = max(1.0, self.rate)
 
     def take(self, n: float = 1.0) -> None:
         while True:
@@ -156,10 +178,44 @@ class HttpClient:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.limiter = RateLimiter(cfg.rate)
+        # A global ceiling still allows every worker to pile onto one host.
+        # The per-host limiter is what actually protects an individual service.
+        self._host_limiters: Dict[str, RateLimiter] = {}
         self._local = threading.local()
         self._blocked: set = set()
         self._lock = threading.Lock()
         self.count = 0
+        self.journal = None                 # set by the engine
+        self.throttle_events = 0
+        self._last_throttle = 0.0
+
+    def _host_limiter(self, host: str) -> Optional[RateLimiter]:
+        if self.cfg.rate_per_host <= 0:
+            return None
+        with self._lock:
+            lim = self._host_limiters.get(host)
+            if lim is None:
+                lim = RateLimiter(self.cfg.rate_per_host)
+                self._host_limiters[host] = lim
+            return lim
+
+    def _note_throttle(self, host: str, resp: "Resp") -> float:
+        """Target pushed back. Slow down and honour Retry-After if given."""
+        with self._lock:
+            self.throttle_events += 1
+            self._last_throttle = time.monotonic()
+        self.limiter.back_off()
+        lim = self._host_limiter(host)
+        if lim is not None:
+            lim.back_off()
+        wait = 0.0
+        header = resp.header("Retry-After").strip()
+        if header:
+            try:
+                wait = min(float(header), 30.0)
+            except ValueError:
+                wait = 5.0
+        return wait or 2.0
 
     # -- session ----------------------------------------------------------
     def _session(self) -> requests.Session:
@@ -211,8 +267,16 @@ class HttpClient:
         attempts = self.cfg.retries + 1
         last_err = ""
 
+        if self.journal is not None:
+            self.journal.request(method.upper(), url, hdrs,
+                                 data if isinstance(data, str) else "")
+        host_limiter = self._host_limiter(host)
         for attempt in range(attempts):
             self.limiter.take()
+            if host_limiter is not None:
+                host_limiter.take()
+            if self.cfg.delay > 0:
+                time.sleep(self.cfg.delay * (0.5 + random.random()))
             start = time.monotonic()
             try:
                 r = self._session().request(
@@ -232,7 +296,12 @@ class HttpClient:
                 r.close()
                 with self._lock:
                     self.count += 1
-                return Resp(
+                    since = time.monotonic() - (self._last_throttle or 0)
+                if since > 20:
+                    self.limiter.recover()
+                    if host_limiter is not None:
+                        host_limiter.recover()
+                built = Resp(
                     url=r.url,
                     status=r.status_code,
                     headers=dict(r.headers),
@@ -245,6 +314,12 @@ class HttpClient:
                     history=[h.headers.get("Location", h.url) for h in r.history],
                     raw_len=len(raw),
                 )
+                if built.status in (429, 503):
+                    wait = self._note_throttle(host, built)
+                    if attempt + 1 < attempts:
+                        time.sleep(wait)
+                        continue
+                return built
             except requests.RequestException as exc:
                 last_err = type(exc).__name__ + ": " + str(exc)[:160]
                 if attempt + 1 < attempts:

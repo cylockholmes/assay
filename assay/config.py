@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import re
 import json
 import ipaddress
 import os
@@ -192,7 +193,6 @@ PROFILES: Dict[str, Dict] = {
     # ~2 min/target. Live-host + obvious wins. Use while triaging a fresh list.
     "quick": {
         "port_spec": "top-100",
-        "http_paths": 40,
         "nuclei_severity": "critical,high",
         "nuclei": True,
         "crawl": False,
@@ -204,7 +204,6 @@ PROFILES: Dict[str, Dict] = {
     # Default. Balanced coverage, still hands-off.
     "standard": {
         "port_spec": "top-1000",
-        "http_paths": 120,
         "nuclei_severity": "critical,high,medium",
         "nuclei": True,
         "crawl": True,
@@ -216,7 +215,6 @@ PROFILES: Dict[str, Dict] = {
     # Long tail. Run overnight on a shortlist, not on the whole netblock.
     "deep": {
         "port_spec": "all",
-        "http_paths": 400,
         "nuclei_severity": "critical,high,medium,low",
         "nuclei": True,
         "crawl": True,
@@ -251,11 +249,17 @@ class Config:
     targets: List[str] = field(default_factory=list)
     profile: str = "standard"
     out_dir: str = "./assay-out"
+    # Engagement codename. Targets are usually known by a codename rather than
+    # a hostname, and one codename covers many hosts - so it, not the first
+    # target, is the right thing to file a run under.
+    codename: str = ""
     scope: Scope = field(default_factory=Scope)
 
     # pacing -- shared gateway links, so be a good neighbour
     concurrency: int = 12
     rate: float = 25.0                      # global requests/second ceiling
+    rate_per_host: float = 8.0              # per-host ceiling; 0 disables
+    delay: float = 0.0                      # extra jittered pause per request
     timeout: float = 12.0
     retries: int = 1
 
@@ -265,8 +269,9 @@ class Config:
     expand: bool = False                    # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain
-    verify: bool = True                     # second-request confirmation pass
     aggressive: bool = False                # enable checks that mutate state
+    safe_mode: bool = False                 # retrieval only: no crafted input
+    journal: bool = True                    # record every request for replay
     insecure: bool = True                   # engagement targets often have broken certs
 
     # http
@@ -282,12 +287,45 @@ class Config:
     only_modules: List[str] = field(default_factory=list)
     skip_modules: List[str] = field(default_factory=list)
 
-    resume: bool = False
     quiet: bool = False
 
     @property
     def opts(self) -> Dict:
         return PROFILES.get(self.profile, PROFILES["standard"])
+
+    @staticmethod
+    def slug_for(targets: List[str]) -> str:
+        """A stable, filesystem-safe directory name for this target set.
+
+        One directory per target keeps runs from overwriting each other, which
+        matters most when the same tooling is pointed at several clients or
+        several netblocks in a day.
+        """
+        import hashlib
+        clean = sorted({re.sub(r"^\w+://", "", t).strip().strip("/")
+                        for t in targets if t})
+        if not clean:
+            return "scan"
+        # Sorted, so the same engagement lands in the same directory however the
+        # targets were ordered on the command line. Without that, a reordered
+        # re-run starts a fresh history and `assay diff` has nothing to compare.
+        first = re.sub(r"[^A-Za-z0-9._-]+", "_", clean[0]).strip("_")[:48] or "scan"
+        if len(clean) == 1:
+            return first
+        digest = hashlib.sha1("\n".join(clean).encode()).hexdigest()[:6]
+        return "%s+%d-%s" % (first, len(clean) - 1, digest)
+
+    def apply_run_dir(self, root: str, flat: bool = False) -> str:
+        """Point out_dir at a per-engagement subdirectory of `root`."""
+        if flat:
+            self.out_dir = root
+            return self.out_dir
+        if self.codename:
+            name = re.sub(r"[^A-Za-z0-9._-]+", "-", self.codename).strip("-")[:64]
+        else:
+            name = self.slug_for(self.targets)
+        self.out_dir = os.path.join(root, name or "scan")
+        return self.out_dir
 
     def db_path(self) -> str:
         return os.path.join(self.out_dir, "assay.db")

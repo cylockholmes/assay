@@ -20,6 +20,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from assay import env, recon, tools, urls as urlsrc
+from assay.journal import Journal
 from assay.oob import OOBSession
 from assay.burp import BurpBridge
 from assay.config import Config
@@ -71,12 +72,16 @@ class Engine:
         self.ctx = Context(cfg=cfg, store=self.store, http=self.http, tune=self.tune,
                            tools=tools.available(), progress=progress)
         self.burp = BurpBridge(cfg)
+        self.journal = Journal(cfg.out_dir, enabled=cfg.journal)
+        self.http.journal = self.journal
+        tools.JOURNAL = self.journal
         self.started = 0.0
 
     # ------------------------------------------------------------------
     def run(self) -> Context:
         self.started = time.time()
         self.store.start_run(self.cfg.profile, self.cfg.targets)
+        self.journal.open(self.cfg.targets, self.cfg.profile)
         say = self.ctx.say
 
         if self.cfg.burp.enabled:
@@ -97,6 +102,9 @@ class Engine:
         self._stage_probe()
         if self.cfg.module_enabled("crawl"):
             self._stage_urls()
+        # Content discovery runs after the other URL sources so it can add to
+        # the same pool, and before the checks that consume it.
+        self._stage_modules("probe")
         self._stage_modules("analyze")
         if self.cfg.opts.get("active_web"):
             self._stage_modules("active")
@@ -109,6 +117,10 @@ class Engine:
                 % (fired, hits, (" - ledger: %s" % ledger) if ledger else ""))
         self.oob.stop()
 
+        self.journal.close()
+        if self.cfg.journal:
+            say("journal", "%d request(s) and %d command(s) recorded - replay.sh"
+                % (self.journal.requests, self.journal.commands))
         self.store.finish_run()
         say("done", "%d finding(s) in %.0fs, %d requests"
             % (self.store.counts().get("total", 0), time.time() - self.started,
@@ -238,6 +250,24 @@ class Engine:
         if not hosts:
             return
         spec = self.cfg.opts.get("port_spec", "top-1000")
+
+        # naabu sweeps far faster than nmap; when both are present, use naabu to
+        # find the open ports and nmap only to fingerprint them. On a /24 this
+        # is the difference between minutes and most of an hour.
+        if self.ctx.has("naabu") and self.ctx.has("nmap") and len(hosts) > 1:
+            self.ctx.say("ports", "naabu sweep (%s) across %d host(s)"
+                         % (spec, len(hosts)))
+            swept = tools.naabu_scan(hosts, spec, self.tune)
+            open_ports = sorted({p for ports in swept.values() for p in ports})
+            if open_ports:
+                self.ctx.say("ports", "naabu found %d distinct open port(s); "
+                                      "nmap -sV on those only" % len(open_ports))
+                spec = ",".join(str(p) for p in open_ports)
+                hosts = sorted(swept.keys()) or hosts
+            else:
+                self.ctx.say("ports", "naabu found nothing open")
+                return
+
         if not self.ctx.has("nmap"):
             self.ctx.say("ports", "nmap not installed - falling back to a %d-port sweep"
                          % len(WEB_PORTS))
@@ -295,6 +325,16 @@ class Engine:
 
         self.ctx.say("probe", "probing %d host:port candidate(s)" % len(candidates))
         seen: Set[str] = {w.key() for w in self.ctx.web}
+
+        # httpx probes far faster than a Python thread pool once there are many
+        # candidates. Below that threshold the process spawn costs more than it
+        # saves, so the native path stays.
+        if self.ctx.has("httpx") and len(candidates) >= 25:
+            got = self._probe_via_httpx(candidates, seen)
+            if got:
+                self.ctx.say("probe", "httpx: %d live endpoint(s)" % got)
+                self._calibrate()
+                return
         with ThreadPoolExecutor(max_workers=self.tune["concurrency"]) as pool:
             futures = [pool.submit(self._probe_one, t, p) for t, p in candidates]
             for fut in as_completed(futures):
@@ -311,6 +351,53 @@ class Engine:
         self.ctx.say("probe", "%d live web endpoint(s)" % len(self.ctx.web))
 
         # Calibrate soft-404 baselines up front; every content check depends on it.
+        self._calibrate()
+
+    def _probe_via_httpx(self, candidates, seen: Set[str]) -> int:
+        targets = ["%s:%d" % (t.host, p.port) for t, p in candidates]
+        added = 0
+        try:
+            stream = tools.httpx_probe(targets, self.tune,
+                                       proxy=self.cfg.burp.proxy,
+                                       headers=self._tool_headers() or None)
+            for obj in stream:
+                url = obj.get("url") or ""
+                if not url:
+                    continue
+                host = obj.get("host") or obj.get("input", "").split(":")[0]
+                port = int(obj.get("port") or 0) or (443 if url.startswith("https") else 80)
+                scheme = url.split("://", 1)[0]
+                wt = WebTarget(
+                    url=url, host=host, port=port, scheme=scheme,
+                    status=int(obj.get("status_code") or 0),
+                    title=(obj.get("title") or "")[:120],
+                    server=obj.get("webserver") or "",
+                    content_type=(obj.get("content_type") or "").split(";")[0],
+                    length=int(obj.get("content_length") or 0),
+                    words=int(obj.get("words") or 0),
+                    tech=list(obj.get("tech") or []),
+                    final_url=obj.get("final_url") or url,
+                )
+                if obj.get("favicon"):
+                    try:
+                        wt.favicon_hash = int(obj["favicon"])
+                    except (TypeError, ValueError):
+                        pass
+                if wt.key() in seen:
+                    continue
+                seen.add(wt.key())
+                self.ctx.web.append(wt)
+                self.store.save_web(wt.url, wt.host, wt.port, wt.status, wt.title,
+                                    wt.server, wt.tech,
+                                    {"content_type": wt.content_type,
+                                     "final_url": wt.final_url, "length": wt.length})
+                added += 1
+        except Exception:
+            # httpx is an optimisation; fall back to the native probe.
+            return 0
+        return added
+
+    def _calibrate(self) -> None:
         origins = sorted({re.sub(r"(https?://[^/]+).*", r"\1", w.final_url or w.url)
                           for w in self.ctx.web})
         self.ctx.say("probe", "calibrating %d baseline(s)" % len(origins))

@@ -64,6 +64,7 @@ class SqliModule(Module):
     name = "sqli"
     stage = "active"
     scope = "web"
+    impact_class = "probe"
     desc = "SQL injection via error differential and boolean inference"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:

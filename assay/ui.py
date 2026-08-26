@@ -45,9 +45,11 @@ BANNER = r"""
 class Dashboard:
     """Live scan view. Pass .progress as the engine's progress callback."""
 
-    def __init__(self, targets: int, profile: str, quiet: bool = False) -> None:
+    def __init__(self, targets: int, profile: str, quiet: bool = False,
+                 codename: str = "") -> None:
         self.targets = targets
         self.profile = profile
+        self.codename = codename
         self.quiet = quiet
         self.stage = "starting"
         self.detail = ""
@@ -105,7 +107,8 @@ class Dashboard:
         head.add_column(justify="left")
         head.add_column(justify="right")
         head.add_row(
-            Text.assemble(("targets ", "dim"), (str(self.targets), "bold"),
+            Text.assemble(*(((self.codename + "  ", "bold magenta"),) if self.codename else ()),
+                          ("targets ", "dim"), (str(self.targets), "bold"),
                           ("   profile ", "dim"), (self.profile, "bold"),
                           ("   stage ", "dim"), (self.stage, "bold cyan")),
             Text.assemble(

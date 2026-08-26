@@ -53,6 +53,7 @@ class ExposureModule(Module):
     name = "exposure"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Exposed VCS dirs, secrets files, debug endpoints and admin consoles"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -134,6 +135,7 @@ class DirListingModule(Module):
     name = "dirlisting"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Directory indexing"
 
     INDEX_RE = re.compile(
@@ -192,6 +194,7 @@ class BackupFileModule(Module):
     name = "backups"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "Editor/backup copies of server-side source next to live files"
 
     SUFFIXES = [".bak", ".old", ".save", "~", ".swp", ".orig", ".txt", ".copy"]

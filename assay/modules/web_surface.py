@@ -16,6 +16,7 @@ class OriginExposureModule(Module):
     name = "origin"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "CDN/WAF bypass via a directly reachable origin server"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
@@ -94,6 +95,7 @@ class VhostModule(Module):
     name = "vhost"
     stage = "analyze"
     scope = "web"
+    impact_class = "probe"
     desc = "Virtual hosts served by an IP but not advertised in DNS"
 
     def applicable(self, ctx: Context) -> bool:

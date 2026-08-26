@@ -61,6 +61,7 @@ class TakeoverModule(Module):
     name = "takeover"
     stage = "analyze"
     scope = "host"
+    impact_class = "read"
     desc = "Dangling CNAME / subdomain takeover"
 
     def run_host(self, ctx: Context, target: Target) -> List[Finding]:

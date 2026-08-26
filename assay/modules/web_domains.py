@@ -78,6 +78,7 @@ class UnregisteredDomainModule(Module):
     name = "deaddomain"
     stage = "analyze"
     scope = "web"
+    impact_class = "read"
     desc = "References to unregistered domains (script, CSP, CORS, cert SANs)"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:

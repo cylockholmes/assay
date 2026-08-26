@@ -75,16 +75,11 @@ REGISTRY: Dict[str, ToolSpec] = {
     "dnsx": ToolSpec("dnsx", "DNS resolution and CNAME chains for takeover checks",
                      "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
                      go="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"),
-    "tlsx": ToolSpec("tlsx", "certificate details, SAN harvesting, TLS misconfig",
-                     "go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
-                     go="github.com/projectdiscovery/tlsx/cmd/tlsx@latest"),
     "ffuf": ToolSpec("ffuf", "content discovery with automatic soft-404 calibration",
                      "sudo apt install -y ffuf", apt="ffuf"),
     "seclists": ToolSpec("seclists", "wordlists ffuf needs to find unlinked endpoints",
                          "sudo apt install -y seclists", apt="seclists",
                          binary="__wordlist__"),
-    "testssl.sh": ToolSpec("testssl.sh", "deep TLS assessment (slow, deep profile only)",
-                           "sudo apt install -y testssl.sh", apt="testssl.sh"),
     "gau": ToolSpec("gau", "historical URLs from Wayback/CommonCrawl/OTX (passive)",
                     "go install github.com/lc/gau/v2/cmd/gau@latest",
                     go="github.com/lc/gau/v2/cmd/gau@latest"),
@@ -97,12 +92,6 @@ REGISTRY: Dict[str, ToolSpec] = {
                                   "out-of-band callbacks for blind SSRF/RCE/XXE",
                                   "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
                                   go="github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"),
-    "puredns": ToolSpec("puredns", "fast DNS resolution for subdomain permutation candidates",
-                        "go install github.com/d3mondev/puredns/v2@latest",
-                        go="github.com/d3mondev/puredns/v2@latest"),
-    "gowitness": ToolSpec("gowitness", "screenshots for fast visual triage of many hosts",
-                          "go install github.com/sensepost/gowitness@latest",
-                          go="github.com/sensepost/gowitness@latest"),
 }
 
 
@@ -120,6 +109,18 @@ class Proc:
 
     def cmdline(self) -> str:
         return " ".join(self.cmd)
+
+
+# Set by the engine so external commands land in the run journal too.
+JOURNAL = None
+
+
+def _record(cmd: Sequence[str]) -> None:
+    if JOURNAL is not None:
+        try:
+            JOURNAL.command(list(cmd))
+        except Exception:
+            pass
 
 
 def bridge(cmd: Sequence[str]) -> List[str]:
@@ -156,6 +157,7 @@ def have(name: str) -> bool:
 def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         cwd: Optional[str] = None) -> Proc:
     env.augment_path()
+    _record(cmd)
     argv = bridge(cmd)
     try:
         p = subprocess.run(
@@ -177,6 +179,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                  stdin: str = "") -> Iterator[str]:
     """Yield stdout lines as they arrive. Keeps peak memory flat."""
     env.augment_path()
+    _record(cmd)
     try:
         proc = subprocess.Popen(
             bridge(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
@@ -466,14 +469,9 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
 
 
 # --------------------------------------------------------------------------
-# tlsx / dnsx / subfinder
+# dnsx / subfinder
 # --------------------------------------------------------------------------
 
-
-def tlsx_scan(hostports: List[str], timeout: float = 300.0) -> Iterator[dict]:
-    cmd = ["tlsx", "-silent", "-json", "-expired", "-self-signed", "-mismatched",
-           "-untrusted", "-san", "-cn", "-tls-version", "-cipher", "-list", "-"]
-    return stream_json(cmd, timeout=timeout, stdin="\n".join(hostports) + "\n")
 
 
 def dnsx_resolve(hosts: List[str], timeout: float = 300.0) -> Iterator[dict]:
