@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "assay"
 version = "1.0.0"
-description = "Signal-first recon and triage for authorized offensive testing (a managed)"
+description = "Signal-first recon and triage for authorized offensive testing"
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.28",
