@@ -65,9 +65,10 @@ Run assay **inside WSL**, not in PowerShell. Two things trip people up:
    `C:\Users\<you>\.wslconfig` and `wsl --shutdown`, or bind Burp's proxy to
    all interfaces and use `--burp http://<windows-ip>:8080`. `assay doctor`
    detects which case you are in and prints the exact fix.
-2. **Burp and a managed certificates.** If Burp cannot reach the gateway over TLS, its
-   Java trust store needs the the gateway CA. a prepared CA bundle
-   provides a prepared `cacerts` for this.
+2. **Gateway certificates.** If you connect through a managed VPN or gateway
+   that terminates TLS with its own CA, Burp will not trust it until that CA is
+   added to Burp's Java trust store (`cacerts`). Import the CA with `keytool`,
+   or point Burp at a `cacerts` bundle that already contains it.
 
 ### Updating
 

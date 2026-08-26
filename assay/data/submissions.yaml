@@ -1,7 +1,7 @@
 # Submission drafts, keyed by module.
 #
-# Structure follows what typical platform rules of engagement and the standard industry
-# submission form ask for: title, category, CVSS, summary, numbered
+# Structure follows what typical platform rules of engagement and the standard
+# industry submission form ask for: title, category, CVSS, summary, numbered
 # reproduction, impact, remediation. Placeholders are filled from the finding.
 #
 # IMPORTANT: the CVSS vectors here are defensible starting points for the
@@ -171,9 +171,9 @@ openredirect:
     Redirect only to paths on the application's own origin, or validate the
     destination against an allow-list of permitted absolute URLs.
   notes: >
-    Many programs treat open redirect as out of scope unless additional security
-    impact is demonstrated. Do not submit this on its own - show token theft
-    in an OAuth/SSO flow, or chain it into another finding.
+    Many programs treat open redirect as out of scope unless additional
+    security impact is demonstrated. Do not submit this on its own - show token
+    theft in an OAuth/SSO flow, or chain it into another finding.
 
 takeover:
   category: Subdomain Takeover
@@ -327,6 +327,6 @@ tls:
     Renew or correct the certificate, and disable protocol versions below
     TLS 1.2.
   notes: >
-    Many programs treat most TLS hygiene as low value or out of scope on its own.
+    Most programs treat TLS hygiene as low value or out of scope on its own.
     Submit only where it is exploitable in context, or bundle it as supporting
     detail on a stronger finding.

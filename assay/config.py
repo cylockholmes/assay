@@ -1,8 +1,8 @@
 """Run configuration, profiles, and the scope guard.
 
-The scope guard is deliberately strict: on a a managed engagement, a request
-to an out-of-scope host is worse than a missed finding, so every outbound
-request in this tool funnels through Scope.allows().
+The scope guard is deliberately strict: on a managed engagement, a request to
+an out-of-scope host is worse than a missed finding, so every outbound request
+in this tool funnels through Scope.allows().
 """
 
 from __future__ import annotations
@@ -253,7 +253,7 @@ class Config:
     out_dir: str = "./assay-out"
     scope: Scope = field(default_factory=Scope)
 
-    # pacing -- the gateway links are shared, be a good neighbour
+    # pacing -- shared gateway links, so be a good neighbour
     concurrency: int = 12
     rate: float = 25.0                      # global requests/second ceiling
     timeout: float = 12.0
@@ -267,7 +267,7 @@ class Config:
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain
     verify: bool = True                     # second-request confirmation pass
     aggressive: bool = False                # enable checks that mutate state
-    insecure: bool = True                   # the gateway targets have broken certs constantly
+    insecure: bool = True                   # engagement targets often have broken certs
 
     # http
     user_agent: str = DEFAULT_UA

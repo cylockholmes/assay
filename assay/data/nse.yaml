@@ -199,7 +199,7 @@ rules:
   match: 'Telnet server does not support encryption|does not support encryption'
   impact: >
     Credentials cross the network in cleartext and are recoverable by anyone on
-    the path. On the the gateway network this is demonstrable rather than theoretical.
+    the path. On a shared testing network this is demonstrable, not theoretical.
   step: "nc {host} 23"
 
 - script: ipmi-version
