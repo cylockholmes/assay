@@ -264,6 +264,25 @@ def resolve_run_dir(path: str) -> str:
     return newest
 
 
+def open_run(path: str, what: str = "results"):
+    """Open an existing run, or explain why there isn't one.
+
+    Store() creates the database if it is missing, so without this check every
+    read command silently produces an empty result in a directory that was
+    never scanned - and leaves a stray assay.db behind.
+    """
+    run_dir = resolve_run_dir(path)
+    db = os.path.join(run_dir, "assay.db")
+    if not os.path.isfile(db):
+        console.print("[yellow]no scan found in %s[/yellow]" % path)
+        console.print("  [dim]run one first:[/dim]  assay scan <target> "
+                      "--scope scope.txt -n CODENAME")
+        console.print("  [dim]or point -o at the folder that holds it; each "
+                      "engagement gets its own subfolder[/dim]")
+        return None, run_dir
+    return Store(db), run_dir
+
+
 def make_config(args) -> Config:
     targets: List[str] = list(getattr(args, "targets", []) or [])
     if getattr(args, "targets_file", None):
@@ -549,8 +568,9 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
 def cmd_ai(args) -> int:
     from assay import report as report_mod
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "findings")
+    if store is None:
+        return 1
     cfg = Config(out_dir=args.out)
     args.ai_yes = getattr(args, "ai_yes", False)
     assets = {"hosts": len(store.host_rows()), "web": len(store.web_rows()),
@@ -637,8 +657,9 @@ def cmd_doctor(args) -> int:
 
 def cmd_report(args) -> int:
     from assay import report as report_mod
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "results")
+    if store is None:
+        return 1
     assets = {"hosts": len(store.host_rows()), "web": len(store.web_rows()),
               "requests": 0, "duration": 0}
     ai_path = os.path.join(args.out, "ai-triage.json")
@@ -655,8 +676,9 @@ def cmd_report(args) -> int:
 
 
 def cmd_show(args) -> int:
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "findings")
+    if store is None:
+        return 1
     findings = store.findings()
     target = None
     if args.rank.isdigit():
@@ -674,8 +696,9 @@ def cmd_show(args) -> int:
 
 
 def cmd_burp(args) -> int:
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "findings")
+    if store is None:
+        return 1
     cfg = Config(out_dir=args.out, burp=_burp_config(args))
     bridge = BurpBridge(cfg)
     st = bridge.detect()
@@ -720,8 +743,9 @@ def _burp_push(store: Store, cfg: Config, mirror: bool, scan: bool) -> None:
 
 def cmd_submit(args) -> int:
     from assay import submission
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "findings")
+    if store is None:
+        return 1
     findings = store.findings()
     if args.rank:
         if args.rank.isdigit():
@@ -860,8 +884,9 @@ def cmd_followup(args) -> int:
     from assay import followup
     from assay.redact import RedactionMap
 
-    run_dir = resolve_run_dir(args.out)
-    store = Store(os.path.join(run_dir, "assay.db"))
+    store, run_dir = open_run(args.out, "findings")
+    if store is None:
+        return 1
     cfg = Config(out_dir=run_dir)
     if getattr(args, "scope", None):
         try:
@@ -869,6 +894,11 @@ def cmd_followup(args) -> int:
         except OSError as exc:
             console.print("[red]cannot read scope file:[/red] %s" % exc)
             return 2
+
+    if not store.findings():
+        console.print("[yellow]no findings to follow up[/yellow]")
+        store.close()
+        return 1
 
     # Un-redact locally: the mapping never left this machine.
     redactor = None
@@ -1061,9 +1091,16 @@ def _do_install(only=None, include_optional=True, dry_run=False,
 
 
 def cmd_triage(args) -> int:
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "findings")
+    if store is None:
+        return 1
     findings = store.findings()
+
+    if not findings:
+        console.print("[yellow]no findings recorded yet[/yellow]")
+        console.print("  [dim]this run completed but found nothing to report[/dim]")
+        store.close()
+        return 0
 
     if args.list or not args.rank:
         from rich.table import Table
@@ -1111,8 +1148,9 @@ def cmd_triage(args) -> int:
 
 
 def cmd_diff(args) -> int:
-    args.out = resolve_run_dir(args.out)
-    store = Store(os.path.join(args.out, "assay.db"))
+    store, args.out = open_run(args.out, "runs")
+    if store is None:
+        return 1
     runs = store.runs()
     if not runs:
         console.print("[yellow]no runs recorded here[/yellow]")
