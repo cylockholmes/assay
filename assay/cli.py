@@ -105,6 +105,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="HTTP Basic credentials, applied to assay and its tools")
     s.add_argument("--cookie", default="", help="Cookie header to send with every request")
     s.add_argument("--ua", help="override User-Agent")
+    s.add_argument("--tag", default="", metavar="SLUG-TARGET",
+                   help="identifying header on every request assay and its tools "
+                        "make (e.g. 'a1b2c3d4-ENGAGEMENT-01'). Required by some "
+                        "programmes for authorised automated traffic.")
+    s.add_argument("--tag-header", default="X-Scan-Tag", metavar="NAME",
+                   help="header name for --tag (default X-Scan-Tag)")
+    s.add_argument("--auth-authorized", action="store_true",
+                   help="confirm that authenticated enumeration is permitted on "
+                        "this test. Required before assay will crawl, fuzz or "
+                        "run content discovery while credentials are set.")
 
     g = s.add_argument_group("surface expansion and blind checks")
     g.add_argument("--expand", action="store_true",
@@ -326,6 +336,9 @@ def make_config(args) -> Config:
         aggressive=args.aggressive,
         cookies=args.cookie,
         basic_auth=getattr(args, "basic", None) or "",
+        traffic_tag=getattr(args, "tag", "") or "",
+        traffic_tag_header=getattr(args, "tag_header", "X-Scan-Tag") or "X-Scan-Tag",
+        auth_authorized=getattr(args, "auth_authorized", False),
         quiet=args.quiet,
     )
     if getattr(args, "basic", None) and ":" not in args.basic:
@@ -344,6 +357,26 @@ def make_config(args) -> Config:
 
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
     cfg.burp = _burp_config(args)
+
+    # Enumerating after authenticating is a rules violation on a test that is
+    # meant to be unauthenticated - and crawling, fuzzing and content discovery
+    # all count as enumeration, not recon. Credentials alone are not consent.
+    if cfg.has_credentials and not cfg.auth_authorized:
+        enumerating = cfg.opts.get("crawl") or cfg.opts.get("content_discovery")
+        if enumerating:
+            console.print(
+                "[yellow]credentials are set and this profile enumerates "
+                "(crawl / content discovery).[/yellow]")
+            console.print(
+                "  On a test meant to be unauthenticated, enumerating after "
+                "authenticating is a rules violation - discovered credentials "
+                "are meant to be reported, not used to reach more of the app.")
+            console.print(
+                "  [dim]Re-run with --auth-authorized to confirm authenticated "
+                "testing is in scope, or with --safe to retrieve only.[/dim]")
+            cfg.skip_modules = list(set(cfg.skip_modules) | {"content", "crawl"})
+            console.print("  [dim]continuing with content discovery and crawling "
+                          "disabled[/dim]")
 
     if scope.permissive:
         console.print(
