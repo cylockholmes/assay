@@ -300,6 +300,34 @@ Modules declare what they do to the client, and it is reported by
 | `probe` | crafted input, unusual verbs, or fuzzing volume |
 | `mutating` | could change state — never runs without `--aggressive` |
 
+## AI and ML infrastructure
+
+A class that barely existed two years ago and is now one of the most reliably
+exposed things on an internal network. Ollama, vLLM, Gradio, Ray, MLflow and
+the common vector databases all ship with **no authentication**, and the usual
+deployment advice tells people to bind them to `0.0.0.0`.
+
+assay probes eleven of them plus MCP servers, on ports that sit outside nmap's
+top-1000 and are therefore added to every scan explicitly — a default port scan
+never finds `11434` or `8265` on its own.
+
+| Service | Port | What it costs |
+|---|---|---|
+| Ollama | 11434 | model theft, prompt/corpus extraction, free compute. Version below 0.17.1 also flags CVE-2026-7482, an unauthenticated heap read returning system prompts, chat history and environment credentials |
+| vLLM / OpenAI-compatible | 8000 | RAG corpus extraction through ordinary completions; stolen inference |
+| Ray dashboard | 8265 | job submission is arbitrary Python on the cluster — unauthenticated RCE |
+| TorchServe management | 8081 | registers a model archive from a URL; the handler executes on the server |
+| Qdrant / ChromaDB / Weaviate / Milvus | 6333, 8000, 8080, 9091 | the indexed corpus is readable, and writable — RAG answers can be poisoned |
+| MLflow | 5000 | experiments and artifacts, which routinely hold training data and credentials |
+| Gradio | 7860 | full component graph and event API |
+| MCP servers | various | whatever the server wraps — filesystem, shell, database, cloud API — callable with its own credentials |
+
+Every probe is a read-only GET or a protocol handshake. Nothing uploads a
+model, submits a job, or runs an inference: reachability and the service's own
+identification are the finding, and exercising it would cost the client compute
+or change their state. Each finding names which part of the CIA triad it
+affects and why.
+
 ## Networks that proxy everything
 
 Some testing gateways proxy all port 80 and 443 traffic for security, so every
@@ -544,7 +572,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-130 offline tests. Every detection test asserts **both** directions — the check
+155 offline tests. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).
