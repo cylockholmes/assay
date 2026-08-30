@@ -1902,5 +1902,92 @@ class McpTests(unittest.TestCase):
         self.assertTrue(all("tools/call" not in str(c) for c in bodies))
 
 
+class JournalSecretTests(unittest.TestCase):
+    """replay.sh is an executable file in the output folder.
+
+    Writing engagement credentials into it is exactly the artefact you do not
+    want left behind, so secret-bearing headers are referenced, never stored.
+    """
+
+    def _journal(self, headers):
+        import tempfile
+        from assay.journal import Journal
+        j = Journal(tempfile.mkdtemp())
+        j.open(["t"], "standard")
+        j.request("GET", "https://target.tld/admin", headers)
+        j.close()
+        return j
+
+    def test_basic_credentials_are_not_written_to_disk(self):
+        from assay.config import Config
+        cfg = Config(basic_auth="admin:hunter2")
+        j = self._journal(cfg.request_headers())
+        blob = open(j.replay_path).read() + open(j.log_path).read()
+        self.assertNotIn("YWRtaW46aHVudGVyMg==", blob)
+        self.assertNotIn("hunter2", blob)
+        self.assertIn("${ASSAY_AUTH", open(j.replay_path).read())
+
+    def test_cookies_and_api_keys_are_not_written(self):
+        j = self._journal({"Cookie": "session=abc123secret",
+                           "X-Api-Key": "live_key_9999"})
+        blob = open(j.replay_path).read()
+        self.assertNotIn("abc123secret", blob)
+        self.assertNotIn("live_key_9999", blob)
+
+    def test_ordinary_headers_are_still_recorded(self):
+        """Redaction must not gut the replay's usefulness."""
+        j = self._journal({"X-Trace": "ok", "Referer": "https://target.tld/"})
+        blob = open(j.replay_path).read()
+        self.assertIn("X-Trace: ok", blob)
+
+    def test_journal_files_are_owner_only(self):
+        import os, stat
+        j = self._journal({"X-Trace": "ok"})
+        self.assertEqual(stat.S_IMODE(os.stat(j.log_path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(j.replay_path).st_mode), 0o700)
+
+
+class EmptyStateTests(unittest.TestCase):
+    """Read commands on a folder that was never scanned.
+
+    Store() creates the database if missing, so every read command used to
+    produce an empty result and leave a stray assay.db behind.
+    """
+
+    def test_open_run_reports_missing_and_creates_nothing(self):
+        import os, tempfile
+        from assay.cli import open_run
+        d = os.path.join(tempfile.mkdtemp(), "never")
+        store, resolved = open_run(d)
+        self.assertIsNone(store)
+        self.assertFalse(os.path.exists(os.path.join(d, "assay.db")),
+                         "a stray database was created")
+        self.assertFalse(os.path.exists(d), "a stray folder was created")
+
+    def test_open_run_finds_an_existing_run(self):
+        import os, tempfile
+        from assay.cli import open_run
+        from assay.store import Store
+        d = tempfile.mkdtemp()
+        Store(os.path.join(d, "assay.db")).close()
+        store, resolved = open_run(d)
+        self.assertIsNotNone(store)
+        store.close()
+
+    def test_open_run_resolves_the_newest_engagement_subfolder(self):
+        import os, tempfile, time
+        from assay.cli import open_run
+        from assay.store import Store
+        root = tempfile.mkdtemp()
+        for name in ("ALPHA", "BRAVO"):
+            os.makedirs(os.path.join(root, name))
+            Store(os.path.join(root, name, "assay.db")).close()
+            time.sleep(0.01)
+        store, resolved = open_run(root)
+        self.assertIsNotNone(store)
+        self.assertTrue(resolved.endswith("BRAVO"))
+        store.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -22,6 +22,18 @@ import threading
 import time
 from typing import Dict, List, Optional, Set
 
+# Header values that are secrets. They are replaced with a shell variable so
+# the replay stays runnable without writing the credential to disk - an
+# executable file full of engagement credentials is exactly the artefact you
+# do not want sitting in an output folder.
+SECRET_HEADERS = {
+    "authorization": "ASSAY_AUTH",
+    "proxy-authorization": "ASSAY_PROXY_AUTH",
+    "cookie": "ASSAY_COOKIE",
+    "x-api-key": "ASSAY_API_KEY",
+    "x-auth-token": "ASSAY_AUTH_TOKEN",
+}
+
 HEADER = """#!/usr/bin/env bash
 # Replay of an assay run - every request and command it issued, in order.
 #
@@ -31,6 +43,13 @@ HEADER = """#!/usr/bin/env bash
 #
 # Review before running. These are the same requests assay already made, so
 # re-running them repeats that traffic against the target.
+#
+# Credentials are NOT stored here. Where a request carried one, the value is
+# referenced as a shell variable; export it before running if you need the
+# authenticated replay:
+#
+#   export ASSAY_AUTH='Basic ...'      # or ASSAY_COOKIE, ASSAY_API_KEY
+#
 set -u
 """
 
@@ -74,7 +93,12 @@ class Journal:
                 self._log = None
             with open(self.replay_path, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(self._replay) + "\n")
-            os.chmod(self.replay_path, 0o755)
+            # Executable, but owner-only: it records every target URL touched.
+            os.chmod(self.replay_path, 0o700)
+            try:
+                os.chmod(self.log_path, 0o600)
+            except OSError:
+                pass
         except OSError:
             pass
 
@@ -133,7 +157,13 @@ class Journal:
         skip = {"accept-encoding", "connection", "content-length", "host",
                 "accept", "accept-language", "user-agent"}
         for k, v in headers.items():
-            if k.lower() in skip:
+            kl = k.lower()
+            if kl in skip:
+                continue
+            var = SECRET_HEADERS.get(kl)
+            if var:
+                # Reference, never the value.
+                parts.append('-H "%s: ${%s:-}"' % (k, var))
                 continue
             parts.append("-H %s" % shlex.quote("%s: %s" % (k, v)))
         if body:

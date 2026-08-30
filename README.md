@@ -251,6 +251,70 @@ triage filters, module filter, confirmed-only toggle, copy buttons on every
 repro command and submission draft, and `/` `j` `k` `o` keyboard navigation.
 A **Start here** panel names the three things to do first.
 
+## What assay writes, and where
+
+Everything from a run lives under one folder. Nothing is written outside it
+during a scan.
+
+```
+<--out>/<CODENAME>/
+├── assay.db            SQLite. PERSISTENT — accumulates across runs
+├── report.html         rebuilt every run (and every few seconds while scanning)
+├── activity.log        every request and command, timestamped   (mode 0600)
+├── replay.sh           the same actions as runnable commands    (mode 0700)
+├── raw/                nmap XML, NSE output
+├── evidence/           captured request/response bodies
+├── ai-payload.json     exactly what was sent to the model       --ai only
+├── ai-triage.json      verdicts and chains, re-hydrated locally --ai only
+├── redaction-map.json  pseudonym → real value  (mode 0600)      --ai only
+└── oob-payloads.txt    fired OOB payloads, for collaborator correlation
+```
+
+### What persists, and what is replaced
+
+| File | Lifetime |
+|---|---|
+| `assay.db` | **Persistent.** Findings, hosts, endpoints, run history and your triage verdicts accumulate. This is what `assay diff` compares and what makes a re-run report only the delta. Schema changes are migrated in place on upgrade. |
+| `report.html`, `activity.log`, `replay.sh` | **Replaced** on every run |
+| `raw/`, `evidence/` | **Appended** to |
+| `ai-*.json`, `redaction-map.json` | Written only when you use `--ai`; replaced each time |
+
+Deleting `assay.db` resets the engagement: the next scan becomes a first run,
+everything reports as new, and your `reported`/`duplicate` marks are gone.
+
+### Sensitive contents
+
+Treat the whole folder as engagement data. Specifically:
+
+- **`assay.db` and `report.html`** contain target hostnames, response bodies,
+  and any credential a finding disclosed.
+- **`redaction-map.json`** maps every pseudonym back to the real value. It is
+  the one file that can reverse the redaction, is written `0600`, and never
+  leaves the machine.
+- **`replay.sh` and `activity.log`** record every URL touched. Credentials are
+  **not** written to them — where a request carried `Authorization`, `Cookie`
+  or an API key, the replay references a shell variable instead:
+
+  ```bash
+  export ASSAY_AUTH='Basic ...'   # then ./replay.sh
+  ```
+
+### Outside the output folder
+
+Only the installer touches anything else:
+
+| Path | Written by | What |
+|---|---|---|
+| `<repo>/.venv/` | `install.sh` | the virtualenv |
+| `~/.local/bin/assay` | `install.sh` | symlink to the entry point |
+| `~/.bashrc`, `~/.zshrc` | `assay install` | appends `$GOPATH/bin` to PATH, once |
+| `$GOPATH/bin/*` | `assay install` | the Go-built scanners |
+| `~/.local/nuclei-templates` | `assay install` | nuclei's template library |
+| system packages | `assay install` | apt packages, after showing you the commands |
+
+A scan writes none of these. `assay install --dry-run` prints every command
+without running any of them.
+
 ## One folder per engagement
 
 `--out` is the root; each engagement gets its own subfolder, keyed on the
@@ -499,6 +563,28 @@ assay orchestrates these when present and degrades gracefully when not —
 `tlsx` · `ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` ·
 `interactsh-client` · `puredns` · `testssl.sh` · `gowitness`
 
+### What each tool is for
+
+All optional. `assay doctor` shows which are present and what each buys you.
+
+| Tool | Called during | Why | Without it |
+|---|---|---|---|
+| `nmap` | port scan | service and version detection; also runs the 18 NSE host rules | native sweep of a fixed port list; no service triage, no host rules |
+| `naabu` | port scan | fast sweep first, so nmap only version-scans ports known to be open | nmap does the whole range — much slower on a /24 |
+| `httpx` | probe | bulk HTTP probing once there are 25+ candidates | native probe: same fields, slower |
+| `katana` | URL sourcing | JS-aware crawl — the main source of parameters | single-page link pass; **active checks lose most of their reach** |
+| `gau` / `waybackurls` | URL sourcing | every URL the host ever served (`--passive` only) | you only see what is linked today |
+| `arjun` | URL sourcing | parameters the server accepts but no page emits | hidden parameters stay untested |
+| `ffuf` + `seclists` | content discovery | unlinked endpoints — admin panels, backups, old API versions | that surface stays invisible |
+| `nuclei` | external | CVE and misconfiguration volume | stage skipped entirely |
+| `dnsx` | recon | bulk resolution and CNAME chains for takeover | threaded `getaddrinfo`, plus `dig` |
+| `subfinder` | recon | passive subdomain enumeration (`--passive`) | falls back to certificate transparency via crt.sh |
+| `interactsh-client` | active | automatic OOB callback correlation for blind SSRF | ledger mode — payloads still fire, you correlate in Collaborator |
+
+Nothing is installed that assay does not call: a test fails if a registered
+tool is never invoked, because an unused tool still costs build time on a small
+VM and still gets advertised by `doctor`.
+
 ### Installing them
 
 `./install.sh` does this on first run, but `assay install` handles it any time:
@@ -572,14 +658,30 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-155 offline tests. Every detection test asserts **both** directions — the check
+**155 tests in 43 classes**, all offline. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).
 
-Tests run entirely against canned responses. assay's suite never opens a
-listening socket and never stands up a vulnerable service. The installer tests
-stub `apt`/`go` presence to exercise the Kali install plan from any dev machine.
+Tests run entirely against canned responses. The suite never opens a listening
+socket and never stands up a vulnerable service.
+
+Roughly half are detection tests — one class per module, each asserting the
+check fires on the real condition and stays silent on the lookalike. The rest
+guard things that broke at least once:
+
+| Class | What it exists to prevent |
+|---|---|
+| `WiringTests` | a tool, module stage or profile option that exists but is never reached. Caught content discovery being installable but never invoked |
+| `ReportRenderTests` | the report generator crashing. It shipped broken once because nothing rendered a report — only checked pre-generated HTML |
+| `SchemaMigrationTests` | an upgrade destroying existing run history |
+| `RegexBudgetTests` | catastrophic backtracking. Sweeps all 87 patterns against adversarial input; found a 1.8s stall reachable through a CSP header |
+| `GatewayThresholdTests` | filtering a real load-balanced pool as though it were the proxy |
+| `LivenessTests` | marking a proxy's error page as a live service, or a short 403 as dead |
+| `ReplaySafetyTests` | shell metacharacters in a target URL becoming commands in `replay.sh` |
+| `ConcurrencyTests` | the URL pool exceeding its cap or admitting duplicates under threads |
+| `WindowsWslBridgeTests` | the Windows→WSL bridge, verified from any dev machine by stubbing `wsl.exe` |
+| `AccountingTests` | a summary that counts only successful requests and reports "0" for a run that attempted hundreds |
 
 ---
 
