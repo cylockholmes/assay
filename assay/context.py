@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from assay.config import Config
 from assay.models import Finding, Target, WebTarget
@@ -56,6 +56,28 @@ class Context:
             with self._lock:
                 self.baselines[origin] = bl
         return bl
+
+    def add_urls(self, origin: str, urls: "Iterable[str]", cap: int) -> int:
+        """Add injection points for an origin, respecting a cap.
+
+        Modules in the same stage run concurrently, so the obvious
+        `if u not in bucket and len(bucket) < cap` is a check-then-act race:
+        two workers can both pass the test and both append. Cheap to serialise,
+        and it keeps the URL pool free of duplicates.
+        """
+        added = 0
+        with self._lock:
+            bucket = self.urls.setdefault(origin, [])
+            existing = set(bucket)
+            for u in urls:
+                if len(bucket) >= cap:
+                    break
+                if u in existing:
+                    continue
+                existing.add(u)
+                bucket.append(u)
+                added += 1
+        return added
 
     def has(self, tool: str) -> bool:
         return bool(self.tools.get(tool))

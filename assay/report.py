@@ -28,7 +28,9 @@ TRIAGE_LABEL = {
 
 
 def _e(s) -> str:
-    return html.escape(str(s or ""), quote=True)
+    # `s or ""` would turn a zero count into an empty cell - the Look and
+    # Context tiles rendered blank instead of 0 for exactly that reason.
+    return html.escape("" if s is None else str(s), quote=True)
 
 
 def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
@@ -263,7 +265,7 @@ def _finding_card(f: Finding, store: Store) -> str:
         '<div class="card-head">'
         '<span class="sev" style="background:%s">%s</span>'
         '<span class="conf">%s</span>'
-        '<h3>%s</h3>'
+        '<h3>%s</h3>%s'
         '<span class="score" title="priority score">%.0f</span>'
         '</div>'
         '<div class="target">%s</div>'

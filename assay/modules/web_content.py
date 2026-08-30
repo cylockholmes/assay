@@ -64,8 +64,8 @@ class ContentDiscoveryModule(Module):
         if not results:
             return []
 
-        bucket = ctx.urls.setdefault(origin, [])
         cap = ctx.cfg.opts.get("max_urls_per_host", 60) * 3
+        discovered: List[str] = []
         found: List[str] = []
         interesting: List[Dict] = []
 
@@ -83,13 +83,13 @@ class ContentDiscoveryModule(Module):
                 if not r.ok or bl.is_noise(r):
                     continue
 
-            if url not in bucket and len(bucket) < cap:
-                bucket.append(url)
+            discovered.append(url)
             found.append(url)
             if NOTEWORTHY.match(path) and status in (200, 401, 403, 301, 302):
                 interesting.append({"url": url, "status": status,
                                     "length": row.get("length")})
 
+        ctx.add_urls(origin, discovered, cap)
         ctx.say("content", "%s: %d path(s), %d noteworthy"
                 % (origin, len(found), len(interesting)))
         if not interesting:

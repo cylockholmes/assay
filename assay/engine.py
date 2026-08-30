@@ -343,6 +343,8 @@ class Engine:
         with ThreadPoolExecutor(max_workers=self.tune["concurrency"]) as pool:
             futures = [pool.submit(self._probe_one, t, p) for t, p in candidates]
             for fut in as_completed(futures):
+                # as_completed yields in this thread, so the seen-set below is
+                # only ever touched here - no race, unlike the worker bodies.
                 wt = fut.result()
                 if wt is None or wt.key() in seen:
                     continue
