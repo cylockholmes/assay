@@ -180,10 +180,12 @@ def _chains_section(chains: List[Dict], findings: List[Finding]) -> str:
         links = ", ".join(_e(titles.get(i, i)) for i in c.get("finding_ids", []))
         rows.append(
             '<div class="chain"><div class="chain-head"><span class="sev" '
-            'style="background:%s">%s</span><b>%s</b></div>'
+            'style="background:%s">%s</span><b>%s</b>'
+            '<span class="modtag">%s</span></div>'
             '<p>%s</p><p class="dim">Combines: %s</p><ol>%s</ol></div>'
             % (SEV_COLOR.get(c.get("severity", "medium"), "#ffd166"),
                _e(c.get("severity", "")), _e(c.get("name", "")),
+               "correlated" if c.get("source") == "assay" else "ai",
                _e(c.get("impact", "")), links, steps)
         )
     return ('<section class="bucket"><h2>Attack chains <span class="count">%d</span></h2>'
