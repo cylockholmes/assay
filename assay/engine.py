@@ -34,6 +34,13 @@ from assay.store import Store
 WEB_PORTS = [80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7001, 8081, 9000,
              9090, 9200, 10000, 4443, 8180, 8181, 2375, 5601, 15672]
 
+# AI and ML services listen well outside nmap's top-1000, so a default scan
+# never finds them - 11434 and 8265 in particular. They are always added to
+# the port specification rather than left to chance, because this class is
+# unauthenticated by default and therefore worth the handful of extra probes.
+AI_PORTS = [11434, 8265, 6333, 6334, 7860, 7861, 5001, 8001, 8002, 9091, 19530,
+            8765, 5173, 3001]
+
 HTTP_SERVICES = {"http", "https", "http-alt", "https-alt", "http-proxy",
                  "ssl/http", "www", "webcache", "tomcat", "nginx"}
 
@@ -268,6 +275,7 @@ class Engine:
         if not hosts:
             return
         spec = self.cfg.opts.get("port_spec", "top-1000")
+        spec = self._with_ai_ports(spec)
 
         # naabu sweeps far faster than nmap; when both are present, use naabu to
         # find the open ports and nmap only to fingerprint them. On a /24 this
@@ -307,6 +315,18 @@ class Engine:
                 "ports": [p.__dict__ for p in ports]})
         self.ctx.say("ports", "%d open port(s) across %d host(s)" % (found, len(results)))
 
+    @staticmethod
+    def _with_ai_ports(spec: str) -> str:
+        """Ensure the AI/ML ports are covered whatever profile is in use."""
+        if spec == "all":
+            return spec
+        extra = ",".join(str(p) for p in AI_PORTS)
+        if spec == "top-100":
+            return "top-100+" + extra
+        if spec == "top-1000":
+            return "top-1000+" + extra
+        return spec + "," + extra
+
     def _native_portscan(self, hosts: List[str]) -> None:
         by_host = {t.host: t for t in self.ctx.targets}
 
@@ -317,7 +337,7 @@ class Engine:
             except OSError:
                 return None
 
-        jobs = [(h, p) for h in hosts for p in WEB_PORTS]
+        jobs = [(h, p) for h in hosts for p in WEB_PORTS + AI_PORTS]
         with ThreadPoolExecutor(max_workers=self.tune["concurrency"]) as pool:
             for fut in as_completed([pool.submit(check, h, p) for h, p in jobs]):
                 res = fut.result()

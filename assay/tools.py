@@ -256,13 +256,20 @@ def proxy_args(tool: str, proxy: Optional[str]) -> List[str]:
 
 
 def nmap_port_args(spec: str) -> List[str]:
-    if spec == "top-100":
-        return ["--top-ports", "100"]
-    if spec == "top-1000":
-        return ["--top-ports", "1000"]
+    """Translate a port spec, including 'top-N+extra,ports' forms."""
     if spec == "all":
         return ["-p-"]
-    return ["-p", spec]
+    extra = ""
+    if "+" in spec:
+        spec, _, extra = spec.partition("+")
+    if spec == "top-100":
+        args = ["--top-ports", "100"]
+    elif spec == "top-1000":
+        args = ["--top-ports", "1000"]
+    else:
+        return ["-p", ",".join(x for x in (spec, extra) if x)]
+    # nmap accepts --top-ports alongside -p; the union is scanned.
+    return args + (["-p", extra] if extra else [])
 
 
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
@@ -376,9 +383,12 @@ def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
 
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                timeout: float = 900.0) -> Dict[str, List[int]]:
+    base, _, extra = port_spec.partition("+")
     spec = {"top-100": ["-top-ports", "100"],
             "top-1000": ["-top-ports", "1000"],
-            "all": ["-p", "-"]}.get(port_spec, ["-p", port_spec])
+            "all": ["-p", "-"]}.get(base, ["-p", base])
+    if extra:
+        spec += ["-p", extra]
     cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
            "-c", str(tune.get("concurrency", 10))] + spec + ["-list", "-"]
     found: Dict[str, List[int]] = {}

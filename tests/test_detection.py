@@ -1744,5 +1744,163 @@ class GatewayThresholdTests(unittest.TestCase):
                         "asserted should conclude at 3 of 4")
 
 
+class AiSurfaceTests(unittest.TestCase):
+    """AI infrastructure ships unauthenticated and is now widely deployed."""
+
+    def _target(self, *ports):
+        from assay.models import Port, Target
+        t = Target(raw="10.0.0.5", host="10.0.0.5", ip="10.0.0.5")
+        t.ports = [Port(port=p, service="") for p in ports]
+        return t
+
+    def test_ollama_is_detected_from_its_model_list(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([path_route(
+            "/api/tags", ctype="application/json",
+            body='{"models":[{"name":"llama3:8b","size":4661224676}]}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(11434))
+        self.assertTrue(found, "exposed Ollama was missed")
+        self.assertIn("Ollama", found[0].title)
+        self.assertEqual(found[0].confidence, "confirmed")
+        self.assertIn("Confidentiality", found[0].detail)
+
+    def test_outdated_ollama_is_escalated_to_critical(self):
+        """A version below the CVE-2026-7482 fix changes the severity."""
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([
+            path_route("/api/tags", ctype="application/json",
+                       body='{"models":[{"name":"llama3"}]}'),
+            path_route("/api/version", ctype="application/json",
+                       body='{"version":"0.16.4"}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(11434))
+        self.assertEqual(found[0].severity, "critical")
+        self.assertIn("CVE-2026-7482", found[0].impact)
+        self.assertIn("cve-2026-7482", found[0].tags)
+
+    def test_patched_ollama_stays_high_not_critical(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([
+            path_route("/api/tags", ctype="application/json",
+                       body='{"models":[{"name":"llama3"}]}'),
+            path_route("/api/version", ctype="application/json",
+                       body='{"version":"0.17.4"}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(11434))
+        self.assertEqual(found[0].severity, "high")
+        self.assertNotIn("CVE-2026-7482", found[0].impact)
+
+    def test_vllm_openai_endpoint_detected(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([path_route(
+            "/v1/models", ctype="application/json",
+            body='{"object":"list","data":[{"id":"m","owned_by":"vllm"}]}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(8000))
+        self.assertTrue(any("OpenAI-compatible" in f.title for f in found))
+
+    def test_qdrant_detected(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([path_route(
+            "/collections", ctype="application/json",
+            body='{"result":{"collections":[{"name":"docs"}]},"status":"ok"}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(6333))
+        self.assertTrue(any("Qdrant" in f.title for f in found))
+        self.assertEqual(found[0].severity, "high")
+
+    def test_ray_dashboard_is_critical(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([path_route(
+            "/api/version", ctype="application/json",
+            body='{"ray_version":"2.9.0","ray_commit":"abc"}')])
+        found = AiSurfaceModule().run_host(ctx, self._target(8265))
+        self.assertTrue(found)
+        self.assertEqual(found[0].severity, "critical")
+
+    def test_an_ordinary_web_app_on_a_shared_port_is_not_claimed(self):
+        """Port 8000 is vLLM, ChromaDB, Triton and a thousand dev servers."""
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, _ = make_ctx([])   # catch-all HTML shell
+        self.assertEqual(AiSurfaceModule().run_host(ctx, self._target(8000)), [])
+
+    def test_closed_ports_are_not_probed(self):
+        from assay.modules.ai_surface import AiSurfaceModule
+        ctx, http = make_ctx([path_route(
+            "/api/tags", ctype="application/json", body='{"models":[]}')])
+        self.assertEqual(AiSurfaceModule().run_host(ctx, self._target(22)), [])
+
+    def test_ai_ports_are_always_scanned(self):
+        """11434 and 8265 are outside nmap's top-1000; a default scan misses them."""
+        from assay.engine import AI_PORTS, Engine
+        from assay.tools import nmap_port_args
+        for profile_spec in ("top-100", "top-1000"):
+            spec = Engine._with_ai_ports(profile_spec)
+            args = " ".join(nmap_port_args(spec))
+            for port in (11434, 8265, 6333):
+                self.assertIn(str(port), args,
+                              "port %d absent from %s" % (port, profile_spec))
+        self.assertEqual(Engine._with_ai_ports("all"), "all",
+                         "a full scan needs no additions")
+
+    def test_service_ports_are_covered_by_discovery(self):
+        from assay.engine import AI_PORTS, WEB_PORTS
+        from assay.modules.ai_surface import load_services
+        covered = set(AI_PORTS) | set(WEB_PORTS)
+        missing = sorted({p for s in load_services() for p in s["ports"]} - covered)
+        self.assertEqual(missing, [],
+                         "these service ports would never be discovered: %s" % missing)
+
+    def test_every_service_declares_impact_and_a_next_step(self):
+        from assay.modules.ai_surface import load_services
+        for s in load_services():
+            self.assertTrue(s.get("impact"), "%s has no impact" % s["name"])
+            self.assertTrue(s.get("step"), "%s has no repro step" % s["name"])
+            self.assertTrue(s.get("cia"), "%s has no CIA mapping" % s["name"])
+            self.assertTrue(s.get("match"), "%s would fire on a port alone" % s["name"])
+
+
+class McpTests(unittest.TestCase):
+    def _target(self, *ports):
+        from assay.models import Port, Target
+        t = Target(raw="10.0.0.6", host="10.0.0.6", ip="10.0.0.6")
+        t.ports = [Port(port=p, service="") for p in ports]
+        return t
+
+    def test_mcp_handshake_is_detected(self):
+        from assay.modules.ai_surface import McpModule
+
+        def route(m, url, h, b):
+            if m != "POST" or "initialize" not in (b or ""):
+                return None
+            return 200, {"Content-Type": "application/json"}, (
+                '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18",'
+                '"capabilities":{"tools":{},"resources":{}},'
+                '"serverInfo":{"name":"filesystem-server","version":"1.0"}}}')
+        ctx, _ = make_ctx([route])
+        found = McpModule().run_host(ctx, self._target(3000))
+        self.assertTrue(found, "MCP handshake was missed")
+        self.assertEqual(found[0].severity, "critical")
+        self.assertIn("tools", found[0].detail)
+        self.assertIn("filesystem-server", found[0].detail)
+
+    def test_a_plain_json_api_is_not_mcp(self):
+        from assay.modules.ai_surface import McpModule
+
+        def route(m, url, h, b):
+            return 200, {"Content-Type": "application/json"}, '{"status":"ok"}'
+        ctx, _ = make_ctx([route])
+        self.assertEqual(McpModule().run_host(ctx, self._target(3000)), [])
+
+    def test_handshake_only_no_tool_is_ever_called(self):
+        """Detection must not execute anything the server exposes."""
+        from assay.modules.ai_surface import McpModule
+
+        def route(m, url, h, b):
+            return 200, {"Content-Type": "application/json"}, (
+                '{"result":{"protocolVersion":"2025-06-18","capabilities":{},'
+                '"serverInfo":{"name":"s"}}}')
+        ctx, http = make_ctx([route])
+        McpModule().run_host(ctx, self._target(3000))
+        bodies = [c for c in http.calls]
+        self.assertTrue(all("tools/call" not in str(c) for c in bodies))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

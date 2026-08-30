@@ -1,0 +1,180 @@
+# Unauthenticated AI/ML infrastructure.
+#
+# This class barely existed two years ago and is now one of the most reliably
+# exposed things on an internal network: Ollama, vLLM, Gradio and the common
+# vector databases all ship with no authentication whatsoever, and the usual
+# deployment advice tells people to bind them to 0.0.0.0.
+#
+# Every probe here is a read-only GET or a harmless JSON-RPC introspection.
+# Nothing uploads, creates, or infers - the point is to prove reachability and
+# say what it costs, not to exercise it.
+#
+# `match` is required: a port answering is never sufficient, and several of
+# these share default ports with each other and with ordinary web apps.
+
+services:
+
+- name: Ollama exposed without authentication
+  ports: [11434]
+  path: /api/tags
+  match: '"models"\s*:'
+  severity: high
+  cwe: CWE-306
+  version_path: /api/version
+  version_match: '"version"\s*:\s*"([0-9.]+)"'
+  vulnerable_below: "0.17.1"
+  cve: CVE-2026-7482
+  cia: "Confidentiality, Integrity, Availability"
+  impact: >
+    Ollama has no authentication of any kind, so anyone who can reach the port
+    controls it. Confidentiality: the model list and any system prompts are
+    readable, and prompts submitted to a RAG-backed model return content from
+    the internal corpus behind it. Integrity: models can be pulled, replaced or
+    deleted, which silently changes the answers every downstream application
+    gives. Availability: inference is free compute for whoever finds it, and a
+    single large request will saturate the GPU.
+  step: "curl -s http://{host}:{port}/api/tags   # then /api/ps for running models"
+  refs:
+    - https://github.com/ollama/ollama/blob/main/docs/faq.md
+
+- name: vLLM / OpenAI-compatible inference API exposed
+  ports: [8000, 8001, 8080, 5000]
+  path: /v1/models
+  match: '"object"\s*:\s*"list"|"owned_by"'
+  severity: high
+  cwe: CWE-306
+  cia: "Confidentiality, Availability"
+  impact: >
+    An OpenAI-compatible endpoint with no API key. Anything the served model
+    can reach is reachable by the caller: where the deployment fronts a RAG
+    pipeline or carries a system prompt, that content is extractable through
+    ordinary completions. The compute is also free to whoever finds it, which
+    is the mechanism behind current large-scale inference theft.
+  step: "curl -s http://{host}:{port}/v1/models"
+
+- name: Gradio application exposed without authentication
+  ports: [7860, 7861]
+  path: /config
+  match: '"mode"\s*:\s*"[^"]*blocks|"is_space"|gradio'
+  severity: medium
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    Gradio serves its full component graph and event API to anonymous callers.
+    The config alone reveals what the application does and what it is wired to;
+    where a component reads or writes files, those handlers are callable
+    directly rather than through the UI.
+  step: "curl -s http://{host}:{port}/config | head -c 400"
+
+- name: Qdrant vector database exposed without authentication
+  ports: [6333, 6334]
+  path: /collections
+  match: '"result"\s*:\s*\{[^}]*"collections"'
+  severity: high
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    Vector stores hold the embedded form of whatever corpus was indexed -
+    typically internal documents, tickets or source. Confidentiality: stored
+    payloads are usually the original text, and embeddings alone can be
+    inverted well enough to recover the substance. Integrity: collections are
+    writable, so the knowledge base behind every RAG answer can be poisoned or
+    deleted without touching the application.
+  step: "curl -s http://{host}:{port}/collections"
+
+- name: ChromaDB exposed without authentication
+  ports: [8000, 8001]
+  path: /api/v2/heartbeat
+  match: '"nanosecond heartbeat"|"nanosecond_heartbeat"'
+  severity: high
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    ChromaDB ships with no authentication. Collections and their documents are
+    readable and writable by anyone who reaches the port, which exposes the
+    indexed corpus and allows the retrieval layer to be poisoned.
+  step: "curl -s http://{host}:{port}/api/v2/collections"
+
+- name: Weaviate exposed without authentication
+  ports: [8080, 8081]
+  path: /v1/meta
+  match: '"hostname"\s*:|"modules"\s*:'
+  severity: high
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    Weaviate's REST and GraphQL interfaces are open. The schema names every
+    indexed class, and objects are retrievable and mutable - both a disclosure
+    of the corpus and a route to poisoning it.
+  step: "curl -s http://{host}:{port}/v1/meta"
+
+- name: Milvus vector database exposed
+  ports: [9091, 19530]
+  path: /healthz
+  match: 'OK|"state"\s*:'
+  severity: medium
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    Milvus reachable without credentials. Collections can be listed and
+    queried, exposing the indexed corpus and allowing insertion of chosen
+    vectors into the retrieval path.
+  step: "curl -s http://{host}:{port}/healthz"
+
+- name: Ray dashboard exposed without authentication
+  ports: [8265]
+  path: /api/version
+  match: '"ray_version"|"version"\s*:'
+  severity: critical
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity, Availability"
+  impact: >
+    The Ray dashboard accepts job submissions from anyone who can reach it, and
+    a job is arbitrary Python on the cluster. This is unauthenticated remote
+    code execution with cluster-wide reach, and it has been exploited at scale
+    for exactly that. Confirm reachability and stop - do not submit a job.
+  step: "curl -s http://{host}:{port}/api/version"
+
+- name: MLflow tracking server exposed without authentication
+  ports: [5000, 5001]
+  path: /api/2.0/mlflow/experiments/search?max_results=1
+  match: '"experiments"|"next_page_token"'
+  severity: high
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity"
+  impact: >
+    MLflow has no authentication by default. Experiments, parameters and
+    artifacts are readable - artifacts routinely contain training data,
+    credentials and notebooks - and the artifact store is writable, which has
+    historically been a path to reading arbitrary files from the host.
+  step: "curl -s 'http://{host}:{port}/api/2.0/mlflow/experiments/search?max_results=1'"
+
+- name: Triton Inference Server exposed
+  ports: [8000, 8002]
+  path: /v2/health/ready
+  match: '^$|"ready"'
+  status: [200]
+  require_sibling: /v2
+  sibling_match: '"name"\s*:\s*"triton"|"extensions"'
+  severity: medium
+  cwe: CWE-306
+  cia: "Confidentiality, Availability"
+  impact: >
+    Triton exposes its model repository and inference endpoints unauthenticated.
+    Model metadata discloses what the organisation runs and on what inputs, and
+    the inference endpoint is free compute.
+  step: "curl -s http://{host}:{port}/v2"
+
+- name: TorchServe management API exposed
+  ports: [8081]
+  path: /models
+  match: '"models"\s*:\s*\['
+  severity: critical
+  cwe: CWE-306
+  cia: "Confidentiality, Integrity, Availability"
+  impact: >
+    The TorchServe management port registers models from a URL. An
+    unauthenticated caller can register a model archive they control, which
+    executes their handler code on the server - remote code execution.
+    Reachability is the finding; do not register anything.
+  step: "curl -s http://{host}:{port}/models"
