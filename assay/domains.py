@@ -188,7 +188,13 @@ REF_PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     ("preconnect", re.compile(r"""<link[^>]+rel=["']?(?:dns-prefetch|preconnect)["']?[^>]+href=["']?([^"'\s>]+)""", re.I)),
 ]
 
-CSP_HOST_RE = re.compile(r"(?:https?://)?(\*\.)?([A-Za-z0-9][A-Za-z0-9.-]{2,}\.[A-Za-z]{2,24})")
+# Written as explicit labels rather than a broad character class. The obvious
+# form - [A-Za-z0-9.-]{2,}\. - is ambiguous about where each label ends, and
+# backtracks catastrophically on a long run of letters: 1.8s on 40KB of input,
+# which a target can trigger with a single oversized CSP header.
+CSP_HOST_RE = re.compile(
+    r"(?:https?://)?(\*\.)?"
+    r"((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,10}[A-Za-z]{2,24})")
 
 
 def refs_from_html(body: str, base_host: str) -> Dict[str, Set[str]]:
@@ -206,7 +212,8 @@ def refs_from_html(body: str, base_host: str) -> Dict[str, Set[str]]:
 
 def refs_from_csp(header_value: str, base_host: str) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = {}
-    for _, host in CSP_HOST_RE.findall(header_value or ""):
+    # Defence in depth: cap the input as well as fixing the pattern.
+    for _, host in CSP_HOST_RE.findall((header_value or "")[:20000]):
         apex = registrable(host)
         if not apex or apex == registrable(base_host) or apex in IGNORE_APEXES:
             continue
