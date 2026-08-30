@@ -307,16 +307,35 @@ address in scope answers a connect and returns something whether or not a
 service exists. Untreated, a /24 reports as two hundred web endpoints and every
 content check runs against the proxy's own error page.
 
-assay handles this two ways:
+An open port is therefore not evidence of anything. assay decides from the
+**response**, not the connection:
+
+| Response | Verdict |
+|---|---|
+| 502 / 503 / 504 | proxy with nothing behind it — not a service |
+| empty body | not a service |
+| 200 with almost no content | the proxy, not a site |
+| 401 / 403 with a real page | **a service**, and a good lead — something is guarding it |
+| anything with real content | a service |
+
+It also probes **every open TCP port** for HTTP, not a fixed list — only ports
+whose service is definitively something else (ssh, mysql, smtp…) are skipped.
+On a network where 80 and 443 are proxied noise, the interesting application is
+usually on an odd port, and a site on 7777 with no service banner would
+otherwise be invisible.
+
+On top of that, assay identifies the gateway's default page two ways:
 
 - **Inferred, by default.** If most probed hosts return effectively the same
   response, that response is the gateway's, not two hundred identical
   applications. Those hosts are dropped and it says so. A genuine
   load-balanced pool stays, because it never reaches a majority share.
 - **Asserted, when you know.** `--proxied-ports 80,443` tells assay the ports
-  are always open. It then judges those ports purely on the response — two
-  matching hosts is enough to identify the default — and stops reporting them
-  as exposed services, since a connect proves nothing.
+  are always open, so it stops reporting them as exposed services and lowers
+  the bar for identifying the default page — to three matching hosts and a
+  majority, rather than five. It does not drop the bar to two: two identical
+  responses are just as likely to be a two-node load-balanced pool, and
+  filtering a real pool away is worse than the noise it saves.
 
 ```bash
 assay scan 10.20.0.0/24 -n CODENAME --scope scope.txt --proxied-ports 80,443

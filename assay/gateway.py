@@ -23,6 +23,38 @@ from assay.models import WebTarget
 from assay.net import similarity
 
 
+# A proxy with nothing behind it says so. These need no clustering and carry
+# no risk of mistaking a real server for the gateway.
+NO_BACKEND_STATUSES = (502, 503, 504)
+
+# Below this, a body carries no application content worth calling a service.
+MIN_BODY_BYTES = 24
+
+
+def looks_live(status: int, body: str, proxied_port: bool) -> Tuple[bool, str]:
+    """Is there actually a service here, or just a proxy answering?
+
+    On a network that proxies every address, a completed TCP connect and even
+    an HTTP response prove nothing. What still distinguishes a real service is
+    the content: a proxy with no backend returns a gateway error or an empty
+    body, while a backend returns its own page.
+    """
+    if status == 0:
+        return False, "no response"
+    if status in NO_BACKEND_STATUSES:
+        return False, "HTTP %d - proxy has no backend" % status
+    body = (body or "").strip()
+    if not body:
+        return False, "empty response body"
+    # A near-empty 200 through a proxy is the proxy. The size rule applies only
+    # to 200s: a short 401 or 403 page is a real service protecting itself, and
+    # those are precisely the endpoints worth testing for an access-control
+    # bypass - filtering them would hide the best leads on the network.
+    if status == 200 and len(body) < MIN_BODY_BYTES:
+        return False, "200 with no meaningful content"
+    return True, ""
+
+
 @dataclass
 class GatewayVerdict:
     detected: bool = False
@@ -57,7 +89,11 @@ def detect(web: Sequence[WebTarget], min_hosts: int = 5,
     longer guessing whether a proxy exists, only which response is its default.
     """
     if asserted:
-        min_hosts, min_share = 2, 0.0
+        # Lower than inferred, but not to the point where two genuinely
+        # identical load-balanced nodes would be mistaken for the gateway.
+        # Knowing a proxy exists does not tell us which response is its
+        # default, so a majority is still required - just a smaller one.
+        min_hosts, min_share = 3, 0.5
     verdict = GatewayVerdict()
     # Only compare across distinct hosts; several ports on one host are not
     # evidence of anything.
