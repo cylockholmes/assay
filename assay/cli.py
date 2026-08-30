@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 from typing import Dict, List, Optional
@@ -16,6 +17,8 @@ from assay.store import Store
 import time
 
 from assay import report as report_mod
+from rich.text import Text
+
 from assay.ui import (Dashboard, SEV_STYLE, console, detail as show_detail,
                       summary, tool_table)
 
@@ -27,6 +30,7 @@ examples:
   assay ai --out ./assay-out --ai-dry-run       # see exactly what would be sent
   assay replay authed.xml --scope scope.txt    # unauth access from a Burp capture
   assay submit 1 > report.md                   # submission draft for finding #1
+  assay triage 3 --status reported            # stop a submitted finding resurfacing
   assay followup --scope scope.txt             # preview the AI's verify commands
   assay followup --scope scope.txt --run       # un-redact and execute them
   assay doctor                                  # tools, Burp, WSL, resources
@@ -74,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_.add_argument("--safe", action="store_true",
                     help="retrieval only: skip every module that sends crafted "
                          "input, unusual verbs or fuzzing traffic")
+    p_.add_argument("--proxied-ports", default="", metavar="80,443",
+                    help="ports your testing network proxies for every address. "
+                         "A connect on these proves nothing, so assay judges them "
+                         "purely on the response and will not report them as "
+                         "exposed services.")
+    p_.add_argument("--no-gateway-filter", action="store_true",
+                    help="keep endpoints that look like a proxy's default response. "
+                         "By default, when most addresses answer 80/443 identically, "
+                         "assay treats that response as 'no service' rather than as "
+                         "hundreds of web servers.")
     p_.add_argument("--no-journal", action="store_true",
                     help="do not record activity.log / replay.sh")
 
@@ -189,6 +203,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the exact commands and exit without running them")
     i.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
 
+    tr = sub.add_parser("triage",
+                        help="record your verdict on a finding so it stops resurfacing")
+    tr.add_argument("rank", nargs="?", help="rank number or finding id")
+    tr.add_argument("-s", "--status", default="reported",
+                    choices=["reported", "duplicate", "false-positive",
+                             "ignored", "in-progress", "new"])
+    tr.add_argument("--note", default="", help="why - kept with the finding")
+    tr.add_argument("-o", "--out", default="./assay-out")
+    tr.add_argument("--list", action="store_true",
+                    help="show every finding with its current status")
+
     df = sub.add_parser("diff", help="what changed since the previous run")
     df.add_argument("-o", "--out", default="./assay-out")
     df.add_argument("--run", type=int, help="run id (default: the latest)")
@@ -268,6 +293,9 @@ def make_config(args) -> Config:
         delay=getattr(args, "delay", 0.0),
         safe_mode=getattr(args, "safe", False),
         journal=not getattr(args, "no_journal", False),
+        detect_gateway=not getattr(args, "no_gateway_filter", False),
+        proxied_ports=[int(x) for x in
+                       re.findall(r"\d+", getattr(args, "proxied_ports", "") or "")],
         codename=getattr(args, "codename", "") or "",
         timeout=args.timeout,
         retries=args.retries,
@@ -1032,6 +1060,56 @@ def _do_install(only=None, include_optional=True, dry_run=False,
     return 0
 
 
+def cmd_triage(args) -> int:
+    args.out = resolve_run_dir(args.out)
+    store = Store(os.path.join(args.out, "assay.db"))
+    findings = store.findings()
+
+    if args.list or not args.rank:
+        from rich.table import Table
+        t = Table(box=None, expand=True)
+        t.add_column("#", width=3, justify="right", style="dim")
+        t.add_column("status", width=14)
+        t.add_column("sev", width=8)
+        t.add_column("finding", overflow="fold")
+        for i, f in enumerate(findings, 1):
+            st = store.status_of(f.fingerprint())
+            style = "dim" if st in store.MUTED else (
+                "yellow" if st == "in-progress" else "green")
+            t.add_row(str(i), "[%s]%s[/%s]" % (style, st, style),
+                      Text(f.severity, style=SEV_STYLE.get(f.severity, "")),
+                      f.title)
+        console.print(t)
+        counts = store.status_counts()
+        console.print("\n  " + "  ".join("%s [bold]%d[/bold]" % (k, v)
+                                          for k, v in sorted(counts.items())))
+        console.print("  [dim]assay triage <n> --status reported --note '...'[/dim]")
+        store.close()
+        return 0
+
+    target = None
+    if args.rank.isdigit():
+        i = int(args.rank) - 1
+        if 0 <= i < len(findings):
+            target = findings[i]
+    else:
+        target = next((f for f in findings
+                       if f.fingerprint().startswith(args.rank)), None)
+    if target is None:
+        console.print("[red]no such finding[/red]")
+        store.close()
+        return 1
+
+    store.set_status(target.fingerprint(), args.status, notes=args.note)
+    console.print("  [green]%s[/green]  %s" % (args.status, target.title))
+    console.print("  [dim]%s[/dim]" % target.target)
+    if args.status in store.MUTED:
+        console.print("  [dim]it will no longer appear in 'assay diff' or count "
+                      "as new on later runs[/dim]")
+    store.close()
+    return 0
+
+
 def cmd_diff(args) -> int:
     args.out = resolve_run_dir(args.out)
     store = Store(os.path.join(args.out, "assay.db"))
@@ -1101,6 +1179,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "scan": cmd_scan, "doctor": cmd_doctor, "report": cmd_report,
         "ai": cmd_ai, "show": cmd_show, "burp": cmd_burp, "modules": cmd_modules,
         "install": cmd_install, "followup": cmd_followup, "diff": cmd_diff,
+        "triage": cmd_triage,
         "replay": cmd_replay, "submit": cmd_submit,
     }
     try:

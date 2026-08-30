@@ -20,6 +20,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from assay import env, recon, tools, urls as urlsrc
+from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
 from assay.burp import BurpBridge
@@ -355,6 +356,7 @@ class Engine:
                                     {"content_type": wt.content_type,
                                      "final_url": wt.final_url,
                                      "length": wt.length})
+        self._filter_gateway()
         self.ctx.say("probe", "%d live web endpoint(s)" % len(self.ctx.web))
 
         # Calibrate soft-404 baselines up front; every content check depends on it.
@@ -406,6 +408,34 @@ class Engine:
                          % type(exc).__name__)
             return 0
         return added
+
+    def _filter_gateway(self) -> None:
+        """Drop endpoints that are only a transparent proxy answering.
+
+        Where all port 80/443 traffic is proxied, every address responds
+        whether or not a service exists. Without this a /24 reports as
+        hundreds of web endpoints and every content check runs against the
+        proxy's own error page.
+        """
+        asserted = bool(self.cfg.proxied_ports)
+        if not self.cfg.detect_gateway:
+            return
+        if not asserted and len(self.ctx.web) < 5:
+            return
+        verdict = gateway.detect(self.ctx.web, asserted=asserted)
+        if not verdict.detected:
+            return
+        before = len(self.ctx.web)
+        self.ctx.web = gateway.filter_web(self.ctx.web, verdict)
+        self.ctx.say(
+            "probe",
+            "gateway answers identically for %d of %d host(s) (%s) - treating "
+            "those as no service. %d real endpoint(s) remain; --no-gateway-filter "
+            "to keep them."
+            % (verdict.count, before, verdict.signature, len(self.ctx.web)))
+        self.journal.note(
+            "gateway default response detected (%s) across %d hosts: %s"
+            % (verdict.signature, verdict.count, ", ".join(verdict.members[:30])))
 
     def _calibrate(self) -> None:
         origins = sorted({re.sub(r"(https?://[^/]+).*", r"\1", w.final_url or w.url)

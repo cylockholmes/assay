@@ -272,6 +272,18 @@ class Config:
     aggressive: bool = False                # enable checks that mutate state
     safe_mode: bool = False                 # retrieval only: no crafted input
     journal: bool = True                    # record every request for replay
+    # Some gateways proxy all 80/443 traffic, so every address answers even
+    # with nothing behind it. Detect that response and stop treating it as
+    # hundreds of distinct services.
+    detect_gateway: bool = True
+    # Ports the testing network proxies for every address, so a successful
+    # connect proves nothing about whether a service exists. Declaring them
+    # is better than inferring: assay can then be strict from the first host
+    # instead of waiting for a majority to look alike.
+    proxied_ports: List[int] = field(default_factory=list)
+
+    def is_proxied_port(self, port: int) -> bool:
+        return port in self.proxied_ports
     insecure: bool = True                   # engagement targets often have broken certs
 
     # http

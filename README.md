@@ -300,6 +300,30 @@ Modules declare what they do to the client, and it is reported by
 | `probe` | crafted input, unusual verbs, or fuzzing volume |
 | `mutating` | could change state — never runs without `--aggressive` |
 
+## Networks that proxy everything
+
+Some testing gateways proxy all port 80 and 443 traffic for security, so every
+address in scope answers a connect and returns something whether or not a
+service exists. Untreated, a /24 reports as two hundred web endpoints and every
+content check runs against the proxy's own error page.
+
+assay handles this two ways:
+
+- **Inferred, by default.** If most probed hosts return effectively the same
+  response, that response is the gateway's, not two hundred identical
+  applications. Those hosts are dropped and it says so. A genuine
+  load-balanced pool stays, because it never reaches a majority share.
+- **Asserted, when you know.** `--proxied-ports 80,443` tells assay the ports
+  are always open. It then judges those ports purely on the response — two
+  matching hosts is enough to identify the default — and stops reporting them
+  as exposed services, since a connect proves nothing.
+
+```bash
+assay scan 10.20.0.0/24 -n CODENAME --scope scope.txt --proxied-ports 80,443
+```
+
+`--no-gateway-filter` disables both if you would rather see everything.
+
 ## Scope enforcement
 
 Every outbound request — assay's own and every external tool's — is checked
@@ -501,7 +525,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-95 offline tests. Every detection test asserts **both** directions — the check
+130 offline tests. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).

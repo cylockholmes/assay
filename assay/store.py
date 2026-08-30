@@ -183,8 +183,13 @@ class Store:
             self._conn.commit()
             return True
 
-    def findings(self, min_score: float = 0.0, limit: int = 0) -> List[Finding]:
-        q = "SELECT * FROM findings WHERE score >= ? ORDER BY score DESC"
+    def findings(self, min_score: float = 0.0, limit: int = 0,
+                 include_muted: bool = True) -> List[Finding]:
+        q = "SELECT * FROM findings WHERE score >= ?"
+        if not include_muted:
+            q += " AND (status IS NULL OR status NOT IN (%s))" % ",".join(
+                "'%s'" % m for m in self.MUTED)
+        q += " ORDER BY score DESC"
         if limit:
             q += " LIMIT %d" % int(limit)
         with self._lock:
@@ -212,6 +217,25 @@ class Store:
         out["total"] = sum(r["c"] for r in rows)
         return out
 
+    # A hunter's verdict on a finding, which must outlive the run that found
+    # it - re-seeing something you already submitted is worse than noise,
+    # because it costs you the time to recognise it again.
+    STATUSES = ["new", "reported", "duplicate", "false-positive", "ignored",
+                "in-progress", "followup-run"]
+    MUTED = ("reported", "duplicate", "false-positive", "ignored")
+
+    def status_of(self, fid: str) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM findings WHERE fid=?", (fid,)).fetchone()
+        return (row["status"] if row else "new") or "new"
+
+    def status_counts(self) -> Dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) c FROM findings GROUP BY status").fetchall()
+        return {(r["status"] or "new"): r["c"] for r in rows}
+
     def set_status(self, fid: str, status: str, notes: str = "") -> None:
         with self._lock:
             self._conn.execute(
@@ -221,7 +245,7 @@ class Store:
             self._conn.commit()
 
     @staticmethod
-    def _row_to_finding(r: sqlite3.Row) -> Finding:
+    def _row_to_finding(r: sqlite3.Row) -> Finding:  # noqa: C901
         f = Finding(
             title=r["title"], target=r["target"], severity=r["severity"],
             confidence=r["confidence"], category=r["category"], cwe=r["cwe"],
@@ -231,6 +255,10 @@ class Store:
             evidence=[Evidence(**e) for e in json.loads(r["evidence"] or "[]")],
             created=r["created"], notes=r["notes"] or "",
         )
+        try:
+            f.status = r["status"] or "new"
+        except (IndexError, KeyError):
+            f.status = "new"
         f.score = r["score"]
         f.triage = r["triage"]
         return f
@@ -289,9 +317,11 @@ class Store:
                 "SELECT MAX(id) AS p FROM runs WHERE id < ?", (current,)).fetchone()
             previous = prior["p"] if prior and prior["p"] else None
 
+            muted = ",".join("'%s'" % m for m in self.MUTED)
             new_findings = [self._row_to_finding(r) for r in self._conn.execute(
-                "SELECT * FROM findings WHERE run_id=? ORDER BY score DESC",
-                (current,)).fetchall()]
+                "SELECT * FROM findings WHERE run_id=?"
+                " AND (status IS NULL OR status NOT IN (%s))"
+                " ORDER BY score DESC" % muted, (current,)).fetchall()]
             # Seen before but not in this run - fixed, or no longer reachable.
             gone = [self._row_to_finding(r) for r in self._conn.execute(
                 "SELECT * FROM findings WHERE last_run < ? AND run_id < ?"
