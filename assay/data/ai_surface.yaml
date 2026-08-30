@@ -11,10 +11,22 @@
 #
 # `match` is required: a port answering is never sufficient, and several of
 # these share default ports with each other and with ordinary web apps.
+#
+# Every path here is a GET unless noted. That matters: a signature pointing at
+# a POST-only endpoint can never fire, which is a silent gap rather than a
+# visible failure. MLflow's experiments/search is POST-only and was originally
+# written here as a GET for exactly that reason.
+#
+# Because matching is on content rather than port, a wrong port or path costs a
+# missed detection - never a false positive.
+#
+# verified: where the port and path were confirmed against vendor documentation
+# or an authoritative source, rather than asserted from memory.
 
 services:
 
 - name: Ollama exposed without authentication
+  verified: NVD CVE-2026-7482 + docs.ollama.com/api/tags
   ports: [11434]
   path: /api/tags
   match: '"models"\s*:'
@@ -38,6 +50,10 @@ services:
     - https://github.com/ollama/ollama/blob/main/docs/faq.md
 
 - name: vLLM / OpenAI-compatible inference API exposed
+  # /v1/models is defined by the OpenAI API specification that vLLM and the
+  # other compatible servers implement, so the path is definitional rather than
+  # vendor-specific. The port is the common default, not a guarantee.
+  verified: OpenAI API specification (path); default port asserted
   ports: [8000, 8001, 8080, 5000]
   path: /v1/models
   match: '"object"\s*:\s*"list"|"owned_by"'
@@ -53,6 +69,7 @@ services:
   step: "curl -s http://{host}:{port}/v1/models"
 
 - name: Gradio application exposed without authentication
+  verified: gradio/routes.py @app.get("/config"); default port asserted
   ports: [7860, 7861]
   path: /config
   match: '"mode"\s*:\s*"[^"]*blocks|"is_space"|gradio'
@@ -67,6 +84,7 @@ services:
   step: "curl -s http://{host}:{port}/config | head -c 400"
 
 - name: Qdrant vector database exposed without authentication
+  verified: qdrant.tech documentation
   ports: [6333, 6334]
   path: /collections
   match: '"result"\s*:\s*\{[^}]*"collections"'
@@ -83,6 +101,7 @@ services:
   step: "curl -s http://{host}:{port}/collections"
 
 - name: ChromaDB exposed without authentication
+  verified: cookbook.chromadb.dev health checks
   ports: [8000, 8001]
   path: /api/v2/heartbeat
   match: '"nanosecond heartbeat"|"nanosecond_heartbeat"'
@@ -96,6 +115,7 @@ services:
   step: "curl -s http://{host}:{port}/api/v2/collections"
 
 - name: Weaviate exposed without authentication
+  verified: docs.weaviate.io
   ports: [8080, 8081]
   path: /v1/meta
   match: '"hostname"\s*:|"modules"\s*:'
@@ -109,6 +129,9 @@ services:
   step: "curl -s http://{host}:{port}/v1/meta"
 
 - name: Milvus vector database exposed
+  # 19530 is confirmed from milvus.yaml (proxy port). The 9091 metrics/health
+  # port could not be confirmed from upstream config and is asserted.
+  verified: milvus.yaml proxy port 19530; 9091 asserted
   ports: [9091, 19530]
   path: /healthz
   match: 'OK|"state"\s*:'
@@ -122,6 +145,7 @@ services:
   step: "curl -s http://{host}:{port}/healthz"
 
 - name: Ray dashboard exposed without authentication
+  verified: docs.ray.io dashboard port
   ports: [8265]
   path: /api/version
   match: '"ray_version"|"version"\s*:'
@@ -136,9 +160,12 @@ services:
   step: "curl -s http://{host}:{port}/api/version"
 
 - name: MLflow tracking server exposed without authentication
+  verified: mlflow.org REST API reference
   ports: [5000, 5001]
-  path: /api/2.0/mlflow/experiments/search?max_results=1
-  match: '"experiments"|"next_page_token"'
+  # experiments/search is POST-only; experiments/get is the GET equivalent and
+  # experiment 0 is the Default experiment every server has.
+  path: /api/2.0/mlflow/experiments/get?experiment_id=0
+  match: '"experiment"\s*:|"experiment_id"\s*:|RESOURCE_DOES_NOT_EXIST'
   severity: high
   cwe: CWE-306
   cia: "Confidentiality, Integrity"
@@ -147,9 +174,10 @@ services:
     artifacts are readable - artifacts routinely contain training data,
     credentials and notebooks - and the artifact store is writable, which has
     historically been a path to reading arbitrary files from the host.
-  step: "curl -s 'http://{host}:{port}/api/2.0/mlflow/experiments/search?max_results=1'"
+  step: "curl -s 'http://{host}:{port}/api/2.0/mlflow/experiments/get?experiment_id=0'"
 
 - name: Triton Inference Server exposed
+  verified: docs.nvidia.com triton health endpoint
   ports: [8000, 8002]
   path: /v2/health/ready
   match: '^$|"ready"'
@@ -166,6 +194,7 @@ services:
   step: "curl -s http://{host}:{port}/v2"
 
 - name: TorchServe management API exposed
+  verified: docs.pytorch.org/serve management_api
   ports: [8081]
   path: /models
   match: '"models"\s*:\s*\['

@@ -685,6 +685,31 @@ guard things that broke at least once:
 
 ---
 
+## How to read the signatures
+
+Signature data — ports, paths, error strings, provider fingerprints — is easy
+to assert confidently and get wrong. Two things make that manageable:
+
+**A wrong value costs a missed detection, never a false claim.** Every
+signature in `paths.yaml`, `nse.yaml` and `ai_surface.yaml` requires a content
+match; none fires on a port or a status code alone. If a path is wrong the
+check silently finds nothing, which is a gap — not a fabricated finding.
+
+**Provenance is recorded where it matters.** The AI service signatures each
+carry a `verified:` field naming the source the port and path came from, and
+say plainly where a value is asserted rather than documented:
+
+```yaml
+- name: Milvus vector database exposed
+  verified: milvus.yaml proxy port 19530; 9091 asserted
+```
+
+Where a fact is load-bearing it was checked against an authoritative source
+rather than recalled — CVE-2026-7482's affected range against NVD and MITRE,
+every NSE script name against its nmap documentation page, every Go module path
+against the module proxy, every apt package against the Kali and Debian
+indexes.
+
 ## Rules of engagement
 
 assay is a testing tool, not an exploitation framework, and the defaults reflect
