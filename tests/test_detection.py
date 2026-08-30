@@ -1104,5 +1104,115 @@ class DiffTests(unittest.TestCase):
         s.close()
 
 
+class SchemaMigrationTests(unittest.TestCase):
+    """Upgrading must not destroy an existing engagement's history.
+
+    CREATE TABLE IF NOT EXISTS leaves an existing table alone, so every column
+    added after the first release has to be migrated in. Without this the first
+    scan after a git pull crashes, and takes the run history that `assay diff`
+    depends on with it.
+    """
+
+    LEGACY = """
+    CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started REAL,
+      finished REAL, profile TEXT, targets TEXT, args TEXT);
+    CREATE TABLE findings (fid TEXT PRIMARY KEY, run_id INTEGER, title TEXT,
+      target TEXT, severity TEXT, confidence TEXT, category TEXT, cwe TEXT,
+      module TEXT, impact TEXT, detail TEXT, repro TEXT, refs TEXT, tags TEXT,
+      evidence TEXT, score REAL, triage TEXT, created REAL,
+      status TEXT DEFAULT 'new', notes TEXT);
+    CREATE TABLE hosts (host TEXT PRIMARY KEY, ip TEXT, data TEXT, updated REAL);
+    CREATE TABLE web (url TEXT PRIMARY KEY, host TEXT, port INTEGER,
+      status INTEGER, title TEXT, server TEXT, tech TEXT, data TEXT,
+      updated REAL);
+    """
+
+    def _legacy_db(self):
+        import os, sqlite3, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "assay.db")
+        c = sqlite3.connect(path)
+        c.executescript(self.LEGACY)
+        c.execute("INSERT INTO runs (started, profile, targets)"
+                  " VALUES (1,'standard','[]')")
+        c.execute("INSERT INTO findings (fid,run_id,title,target,severity,"
+                  "confidence,score,triage,created,refs,tags,evidence) VALUES"
+                  " ('old',1,'Legacy finding','https://a/','high','firm',50,"
+                  "'LOOK',1,'[]','[]','[]')")
+        c.execute("INSERT INTO web VALUES"
+                  " ('https://a/','a',443,200,'','','[]','{}',1)")
+        c.commit(); c.close()
+        return path
+
+    def _add(self, s, title):
+        from assay.models import Evidence, Finding
+        s.add_finding(Finding(title=title, target="https://a/x", severity="high",
+                              confidence="confirmed", module="m", impact="i",
+                              evidence=[Evidence(kind="http", output="x")]))
+
+    def test_writing_to_a_legacy_database_succeeds(self):
+        from assay.store import Store
+        s = Store(self._legacy_db())
+        s.start_run("standard", ["t"])
+        self._add(s, "New finding")
+        s.save_web("https://b/", "b", 443, 200, "", "", [], {})
+        s.close()
+
+    def test_legacy_rows_survive_the_upgrade(self):
+        from assay.store import Store
+        s = Store(self._legacy_db())
+        s.start_run("standard", ["t"])
+        titles = [f.title for f in s.iter_findings()]
+        self.assertIn("Legacy finding", titles)
+        s.close()
+
+    def test_pre_existing_findings_are_not_reported_as_new(self):
+        from assay.store import Store
+        s = Store(self._legacy_db())
+        s.start_run("standard", ["t"])
+        self._add(s, "New finding")
+        d = s.diff()
+        self.assertEqual([f.title for f in d["new_findings"]], ["New finding"])
+        s.close()
+
+    def test_migration_is_idempotent(self):
+        from assay.store import Store
+        path = self._legacy_db()
+        for _ in range(3):
+            s = Store(path); s.start_run("standard", ["t"]); s.close()
+
+    def test_database_is_self_contained_after_close(self):
+        """A copy of the .db alone must carry the findings."""
+        import os, shutil, sqlite3, tempfile
+        from assay.store import Store
+        path = self._legacy_db()
+        s = Store(path); s.start_run("standard", ["t"])
+        self._add(s, "Persisted"); s.finish_run(); s.close()
+        copy = os.path.join(tempfile.mkdtemp(), "copy.db")
+        shutil.copy(path, copy)
+        n = sqlite3.connect(copy).execute(
+            "SELECT COUNT(*) FROM findings WHERE title='Persisted'").fetchone()[0]
+        self.assertEqual(n, 1)
+
+
+class AccountingTests(unittest.TestCase):
+    def test_failed_requests_are_counted_not_dropped(self):
+        """A summary that only counts successes under-reports the traffic sent."""
+        from assay.config import Config, Scope
+        from assay.net import HttpClient
+        c = HttpClient(Config(scope=Scope(allow=["192.0.2.0/24"]),
+                              timeout=0.6, retries=0))
+        c.get("https://192.0.2.7/")
+        self.assertEqual(c.attempts, 1)
+        self.assertEqual(c.failures, 1)
+        self.assertEqual(c.count, 0)
+
+    def test_out_of_scope_requests_are_not_counted_as_attempts(self):
+        from assay.config import Config, Scope
+        from assay.net import HttpClient
+        c = HttpClient(Config(scope=Scope(allow=["target.tld"])))
+        c.get("https://evil.tld/")
+        self.assertEqual(c.attempts, 0, "nothing was sent, so nothing was attempted")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

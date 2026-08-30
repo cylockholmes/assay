@@ -62,10 +62,52 @@ class Store:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.commit()
         self.run_id = 0
+
+    # -- schema ------------------------------------------------------------
+    # Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves
+    # an existing table untouched, so without this an upgrade crashes on the
+    # first write - and takes the run history that diffing depends on with it.
+    _ADDED_COLUMNS = [
+        ("findings", "last_run", "INTEGER"),
+        ("hosts", "first_run", "INTEGER"),
+        ("hosts", "last_run", "INTEGER"),
+        ("web", "first_run", "INTEGER"),
+        ("web", "last_run", "INTEGER"),
+        ("ai_triage", "commands", "TEXT"),
+    ]
+
+    def _migrate(self) -> None:
+        for table, column, coltype in self._ADDED_COLUMNS:
+            try:
+                cols = {r[1] for r in self._conn.execute(
+                    "PRAGMA table_info(%s)" % table).fetchall()}
+            except sqlite3.DatabaseError:
+                continue
+            if not cols or column in cols:
+                continue
+            try:
+                self._conn.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                                   % (table, column, coltype))
+            except sqlite3.DatabaseError:
+                continue
+        # Rows written before these columns existed have NULL. Backfill from
+        # run_id so an upgraded database still diffs sensibly instead of
+        # reporting every pre-existing finding as new.
+        try:
+            self._conn.execute(
+                "UPDATE findings SET last_run = run_id WHERE last_run IS NULL")
+            for table in ("hosts", "web"):
+                self._conn.execute(
+                    "UPDATE %s SET first_run = 0, last_run = 0"
+                    " WHERE first_run IS NULL" % table)
+        except sqlite3.DatabaseError:
+            pass
+        self._conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
     def start_run(self, profile: str, targets: List[str], args: str = "") -> int:
@@ -88,6 +130,15 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.commit()
+            try:
+                # Fold the write-ahead log back in and drop it, so the .db file
+                # is complete on its own. wal_checkpoint alone truncates the WAL
+                # but leaves -wal/-shm on disk; switching journal mode removes
+                # them, which is what makes the database safe to copy or ship.
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.execute("PRAGMA journal_mode=DELETE")
+            except sqlite3.DatabaseError:
+                pass
             self._conn.close()
 
     # -- findings ----------------------------------------------------------

@@ -12,15 +12,86 @@ Debian-family Linux, and degrades gracefully wherever a tool is missing.
 > permission to test. Several checks send crafted input and read files from the
 > target. See [Rules of engagement](#rules-of-engagement).
 
-## Install
+## Quick start
 
-Requires Python 3.9+ and `git`. On Kali/Debian everything else is handled for you.
+Copy-paste, in order. Kali/Debian (including WSL):
 
 ```bash
+sudo apt-get update && sudo apt-get install -y git python3 python3-venv
 git clone https://github.com/cylockholmes/assay.git
 cd assay
 ./install.sh
 ```
+
+Then open a new shell (or `source ~/.bashrc`) so `~/.local/bin` and
+`$GOPATH/bin` are on PATH, and check what you got:
+
+```bash
+assay doctor
+```
+
+Set up your scope and run the first scan:
+
+```bash
+cp scope.example.txt scope.txt
+nano scope.txt          # paste the program's in-scope hosts
+assay scan 10.20.0.0/24 -n "CODENAME" --scope scope.txt --open
+```
+
+`--open` launches the report as soon as it starts filling in, and it keeps
+refreshing while the scan runs.
+
+### One-liner
+
+If you would rather not read `install.sh` first — but do read it, it asks for
+sudo:
+
+```bash
+git clone https://github.com/cylockholmes/assay.git && cd assay && ./install.sh
+```
+
+### Without the installer
+
+If you only want assay itself and will bring your own tools:
+
+```bash
+git clone https://github.com/cylockholmes/assay.git
+cd assay
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip setuptools wheel
+.venv/bin/pip install -e .
+.venv/bin/assay doctor
+```
+
+Add the scanners later, at any time:
+
+```bash
+assay install --dry-run    # print the exact commands, run nothing
+assay install              # install everything missing, after confirming
+```
+
+### Everyday commands
+
+```bash
+assay scan <target> -n NAME --scope scope.txt --open   # scan
+assay diff -o ./assay-out                              # what changed since last run
+assay show 3                                           # finding #3 in full
+assay submit 3                                         # submission draft
+assay replay -o ./assay-out                            # everything it ran
+assay ai -o ./assay-out --ai-dry-run                   # redacted AI payload preview
+assay report --open                                    # rebuild the report
+```
+
+### Updating
+
+```bash
+cd assay && git pull && ./install.sh
+```
+
+Your existing databases are migrated in place, so run history and `assay diff`
+survive the upgrade.
+
+## Install detail
 
 `install.sh` creates a virtualenv, installs assay into it, links `assay` into
 `~/.local/bin`, and then installs the external scanners it orchestrates — apt
@@ -31,30 +102,6 @@ command before running it.
 ./install.sh --minimal    # assay + nmap only, for a small VM
 ./install.sh --no-go      # skip the Go toolchain and its tools
 ```
-
-Open a new shell afterwards (or `source ~/.bashrc`) so `~/.local/bin` and
-`$GOPATH/bin` are on PATH, then confirm:
-
-```bash
-assay doctor              # tools, Burp reachability, WSL networking, resources
-```
-
-`doctor` prints a table of every external tool, whether it was found, and what
-each one buys you. Anything missing can be installed later:
-
-```bash
-assay install --dry-run   # print the exact commands, run nothing
-assay install             # install everything missing, after confirming
-```
-
-### First scan
-
-```bash
-assay scan 10.20.0.0/24 --scope scope.txt --profile standard --open
-```
-
-Copy `scope.example.txt` to `scope.txt` and paste the program's scope into it
-first — assay refuses any request to a host that file does not cover.
 
 ### Running on Windows
 
