@@ -21,6 +21,7 @@ from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
 from assay.modules.web_active import candidate_urls, existing_params, with_param
+from assay import params as P
 from assay.net import rand_token
 
 # (engine family, payload template, expected result) - %d pairs substituted.
@@ -52,12 +53,12 @@ class SstiModule(Module):
             12 if ctx.cfg.profile == "standard" else 30)
 
         for url in candidate_urls(ctx, wt):
-            params = existing_params(url)
-            if not params and url == (wt.final_url or wt.url):
-                params = COMMON_PARAMS[:5] if ctx.cfg.profile != "quick" else []
+            params = P.targets_for(
+                "ssti", url,
+                fallback=(COMMON_PARAMS[:5]
+                          if url == (wt.final_url or wt.url)
+                          and ctx.cfg.profile != "quick" else []))
             for p in params:
-                if p.startswith("assay_"):
-                    continue
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:
                     continue
@@ -137,12 +138,11 @@ class CrlfModule(Module):
             10 if ctx.cfg.profile == "standard" else 24)
 
         for url in candidate_urls(ctx, wt):
-            params = existing_params(url)
-            if not params and url == (wt.final_url or wt.url):
-                params = ["redirect", "url", "next", "lang", "page"]
+            params = P.targets_for(
+                "crlf", url,
+                fallback=(["redirect", "url", "next", "lang"]
+                          if url == (wt.final_url or wt.url) else []))
             for p in params:
-                if p.startswith("assay_"):
-                    continue
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:
                     continue

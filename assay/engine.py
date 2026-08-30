@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
-from assay import env, recon, tools, urls as urlsrc
+from assay import correlate, env, recon, tools, urls as urlsrc
 from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
@@ -129,6 +129,8 @@ class Engine:
         if self.cfg.opts.get("active_web"):
             self._stage_modules("active")
         self._stage_modules("external")
+
+        self._stage_correlate()
 
         fired, hits = self.oob.stats()
         if fired:
@@ -714,6 +716,30 @@ class Engine:
         if kind == "host":
             return module.run_host(self.ctx, subject)
         return module.run_global(self.ctx)
+
+    def _stage_correlate(self) -> None:
+        """Reason over the whole finding set once every check has run."""
+        findings = self.store.findings()
+        if not findings:
+            return
+
+        prevalent = correlate.environmental(findings)
+        if prevalent:
+            n = correlate.apply_prevalence(findings, prevalent)
+            for f in findings:
+                if "environmental" in f.tags:
+                    self.store.update_finding_score(f.fingerprint(), f.score,
+                                                    f.triage, f.tags, f.notes)
+            self.ctx.say("correlate",
+                         "%d finding(s) across %d title(s) are present on most "
+                         "hosts - ranked down as environmental"
+                         % (n, len(prevalent)))
+
+        found = correlate.chains(findings)
+        if found:
+            self.store.save_chains([c.as_dict() for c in found], source="assay")
+            self.ctx.say("correlate", "%d attack chain(s): %s"
+                         % (len(found), "; ".join(c.name for c in found[:3])))
 
     def _tool_headers(self) -> Dict[str, str]:
         """Auth and custom headers to hand to external tools."""
