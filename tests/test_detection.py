@@ -1847,6 +1847,30 @@ class AiSurfaceTests(unittest.TestCase):
         self.assertEqual(missing, [],
                          "these service ports would never be discovered: %s" % missing)
 
+    def test_every_service_records_where_its_facts_came_from(self):
+        """Ports and paths are easy to assert confidently and get wrong.
+
+        Each signature carries provenance so a reader can tell a documented
+        fact from a remembered one. Because matching is on content rather than
+        port, a wrong value costs a missed detection, never a false positive.
+        """
+        from assay.modules.ai_surface import load_services
+        missing = [s["name"] for s in load_services() if not s.get("verified")]
+        self.assertEqual(missing, [],
+                         "no provenance recorded for: %s" % missing)
+
+    def test_no_signature_targets_a_post_only_endpoint(self):
+        """A GET probe against a POST-only path can never fire.
+
+        MLflow's experiments/search is POST-only and was written here as a GET,
+        which is a silent gap rather than a visible failure.
+        """
+        from assay.modules.ai_surface import load_services
+        post_only = ("experiments/search", "/query", "/search")
+        offenders = [s["name"] for s in load_services()
+                     if any(p in s["path"] for p in post_only)]
+        self.assertEqual(offenders, [], "GET probe on a POST endpoint: %s" % offenders)
+
     def test_every_service_declares_impact_and_a_next_step(self):
         from assay.modules.ai_surface import load_services
         for s in load_services():
