@@ -75,7 +75,7 @@ def all_modules() -> List[Module]:
     # Import for side effects; keep the list explicit so a broken module is loud.
     from assay.modules import (  # noqa: F401
         ai_surface, host_deep, host_services, secrets, takeover, tls, web_active, web_bypass, web_archive,
-        web_content, web_domains, web_exposure, web_headers, web_inject, web_nuclei, web_reflect, web_sqli,
+        web_content, web_domains, web_exposure, web_headers, web_idor, web_inject, web_nuclei, web_reflect, web_sqli,
         web_ssrf, web_surface,
     )
     return [cls() for cls in _REGISTRY]

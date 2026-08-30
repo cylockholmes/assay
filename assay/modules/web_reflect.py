@@ -24,6 +24,7 @@ from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
 from assay.modules.web_active import candidate_urls, existing_params, with_param
+from assay import params as P
 from assay.net import Resp, rand_token
 
 # Characters that decide whether a reflection is exploitable, and what each

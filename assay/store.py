@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS ai_triage (
 );
 CREATE TABLE IF NOT EXISTS ai_chains (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, severity TEXT,
-    finding_ids TEXT, impact TEXT, steps TEXT
+    finding_ids TEXT, impact TEXT, steps TEXT, source TEXT DEFAULT 'ai'
 );
 CREATE TABLE IF NOT EXISTS progress (
     key TEXT PRIMARY KEY, value TEXT, updated REAL
@@ -79,6 +79,7 @@ class Store:
         ("web", "first_run", "INTEGER"),
         ("web", "last_run", "INTEGER"),
         ("ai_triage", "commands", "TEXT"),
+        ("ai_chains", "source", "TEXT"),
     ]
 
     def _migrate(self) -> None:
@@ -359,15 +360,16 @@ class Store:
                      json.dumps(item.get("commands", [])), time.time()),
                 )
                 n += 1
-            self._conn.execute("DELETE FROM ai_chains")
+            self._conn.execute("DELETE FROM ai_chains WHERE source='ai'")
             for chain in result.get("chains", []) or []:
                 self._conn.execute(
-                    "INSERT INTO ai_chains (name, severity, finding_ids, impact, steps)"
-                    " VALUES (?,?,?,?,?)",
+                    "INSERT INTO ai_chains (name, severity, finding_ids, impact,"
+                    " steps, source) VALUES (?,?,?,?,?,?)",
                     (chain.get("name", ""), chain.get("combined_severity", ""),
                      json.dumps(chain.get("finding_ids", [])),
                      chain.get("combined_impact", ""),
-                     json.dumps(chain.get("steps", []))),
+                     json.dumps(chain.get("steps", [])),
+                     chain.get("source", "ai")),
                 )
             self._conn.commit()
         return n
@@ -384,11 +386,45 @@ class Store:
                 "next_steps": json.loads(row["next_steps"] or "[]"),
                 "commands": json.loads(row["commands"] or "[]")}
 
+    def save_chains(self, chains: List[Dict], source: str = "assay") -> int:
+        """Persist locally-derived chains, replacing the previous set."""
+        with self._lock:
+            self._conn.execute("DELETE FROM ai_chains WHERE source=?", (source,))
+            for c in chains:
+                self._conn.execute(
+                    "INSERT INTO ai_chains (name, severity, finding_ids, impact,"
+                    " steps, source) VALUES (?,?,?,?,?,?)",
+                    (c.get("name", ""), c.get("combined_severity", ""),
+                     json.dumps(c.get("finding_ids", [])),
+                     c.get("combined_impact", ""),
+                     json.dumps(c.get("steps", [])), source))
+            self._conn.commit()
+        return len(chains)
+
+    def update_finding_score(self, fid: str, score: float, triage: str,
+                             tags: List[str], notes: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE findings SET score=?, triage=?, tags=?, notes=? WHERE fid=?",
+                (score, triage, json.dumps(tags), notes, fid))
+            self._conn.commit()
+
     def ai_chains(self) -> List[Dict]:
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM ai_chains").fetchall()
-        return [{"name": r["name"], "severity": r["severity"],
-                 "finding_ids": json.loads(r["finding_ids"] or "[]"),
-                 "impact": r["impact"], "steps": json.loads(r["steps"] or "[]")}
-                for r in rows]
+            rows = self._conn.execute(
+                "SELECT * FROM ai_chains ORDER BY"
+                " CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1"
+                " WHEN 'medium' THEN 2 ELSE 3 END").fetchall()
+        out = []
+        for r in rows:
+            try:
+                src = r["source"] or "ai"
+            except (IndexError, KeyError):
+                src = "ai"
+            out.append({"name": r["name"], "severity": r["severity"],
+                        "finding_ids": json.loads(r["finding_ids"] or "[]"),
+                        "impact": r["impact"],
+                        "steps": json.loads(r["steps"] or "[]"),
+                        "source": src})
+        return out
 

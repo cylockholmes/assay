@@ -24,6 +24,7 @@ from assay import owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay import params as P
 from assay.modules.web_active import candidate_urls, existing_params, with_param
 from assay.net import Resp, similarity
 

@@ -16,6 +16,7 @@ from assay import owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay import params as P
 from assay.net import Resp, rand_token
 
 SENTINEL_DOMAIN = "example.net"
@@ -77,11 +78,9 @@ class OpenRedirectModule(Module):
         out: List[Finding] = []
         tested: set = set()
         for url in candidate_urls(ctx, wt):
-            params = existing_params(url)
-            probe_params = [p for p in params if p.lower() in
-                            {x.lower() for x in REDIRECT_PARAMS}]
-            if not probe_params:
-                probe_params = REDIRECT_PARAMS[:8] if url == (wt.final_url or wt.url) else []
+            probe_params = P.targets_for(
+                "openredirect", url,
+                fallback=REDIRECT_PARAMS[:8] if url == (wt.final_url or wt.url) else [])
             for p in probe_params:
                 key = (urlsplit(url).path, p)
                 if key in tested:
@@ -286,10 +285,11 @@ class TraversalModule(Module):
         out: List[Finding] = []
         tested: set = set()
         for url in candidate_urls(ctx, wt):
-            params = [p for p in existing_params(url)
-                      if p.lower() in {x.lower() for x in FILE_PARAMS}]
-            if not params and url == (wt.final_url or wt.url):
-                params = FILE_PARAMS[:6] if ctx.cfg.profile != "quick" else []
+            params = P.targets_for(
+                "traversal", url,
+                fallback=(FILE_PARAMS[:6]
+                          if url == (wt.final_url or wt.url)
+                          and ctx.cfg.profile != "quick" else []))
             for p in params:
                 key = (urlsplit(url).path, p)
                 if key in tested:

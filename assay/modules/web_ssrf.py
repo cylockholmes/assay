@@ -24,6 +24,7 @@ from assay import owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay import params as P
 from assay.modules.web_active import candidate_urls, existing_params, with_param
 
 # Parameters that commonly take a URL or hostname the server will fetch.
@@ -56,10 +57,11 @@ class SsrfModule(Module):
             16 if ctx.cfg.profile == "standard" else 40)
 
         for url in candidate_urls(ctx, wt):
-            params = [p for p in existing_params(url)
-                      if p.lower() in {x.lower() for x in SSRF_PARAMS}]
-            if not params and url == (wt.final_url or wt.url):
-                params = SSRF_PARAMS[:6] if ctx.cfg.profile != "quick" else []
+            params = P.targets_for(
+                "ssrf", url,
+                fallback=(SSRF_PARAMS[:6]
+                          if url == (wt.final_url or wt.url)
+                          and ctx.cfg.profile != "quick" else []))
             for p in params:
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:
