@@ -247,8 +247,11 @@ secrets:
     treated as compromised. Move the call server-side so the secret is never
     shipped to browsers.
   notes: >
-    Validate scope with an identity call (for AWS, sts get-caller-identity) and
-    nothing further. Include the response showing the key is active.
+    Validate with an identity call (for AWS, sts get-caller-identity) and
+    nothing further - include the response showing the key is active, then
+    stop. Do not use the credential to reach anything else: on a test meant to
+    be unauthenticated that is a rules violation, and the credential is itself
+    the finding.
 
 archive:
   category: Sensitive Data Exposure
