@@ -1404,5 +1404,241 @@ class ReplaySafetyTests(unittest.TestCase):
         self.assertIn("'10.0.0.1; rm -rf /'", replay)
 
 
+class BypassTests(unittest.TestCase):
+    ORIGIN = "http://target.test:8080"
+
+    def _ctx_with(self, allow):
+        """allow(path, headers, method) -> True when the guard is bypassed."""
+        def route(m, url, h, b):
+            path = urlsplit(url).path
+            if not path.startswith("/admin"):
+                return None
+            if allow(path, h, m):
+                return 200, {"Content-Type": "text/html"}, \
+                    "<html><h1>Admin console</h1>" + ("panel " * 80) + "</html>"
+            return 403, {"Content-Type": "text/html"}, \
+                "<html><h1>Forbidden</h1></html>"
+        return make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/admin"]})
+
+    def test_path_trick_bypass_is_found(self):
+        from assay.modules.web_bypass import ForbiddenBypassModule
+        ctx, _ = self._ctx_with(lambda p, h, m: p != "/admin")
+        found = ForbiddenBypassModule().run_web(ctx, web_target())
+        self.assertTrue(found, "a path-mutation bypass was missed")
+        self.assertEqual(found[0].severity, "high")
+        self.assertEqual(found[0].confidence, "confirmed")
+        self.assertEqual(len(found[0].evidence), 2, "denial and bypass both needed")
+
+    def test_header_trick_bypass_is_found(self):
+        from assay.modules.web_bypass import ForbiddenBypassModule
+        ctx, _ = self._ctx_with(
+            lambda p, h, m: h.get("X-Forwarded-For") == "127.0.0.1")
+        found = ForbiddenBypassModule().run_web(ctx, web_target())
+        self.assertTrue(found)
+        self.assertIn("header", found[0].title)
+
+    def test_consistently_forbidden_path_reports_nothing(self):
+        from assay.modules.web_bypass import ForbiddenBypassModule
+        ctx, _ = self._ctx_with(lambda p, h, m: False)
+        self.assertEqual(ForbiddenBypassModule().run_web(ctx, web_target()), [])
+
+    def test_login_page_returned_with_200_is_not_a_bypass(self):
+        """Plenty of guards answer 200 with a sign-in page."""
+        from assay.modules.web_bypass import ForbiddenBypassModule
+
+        def route(m, url, h, b):
+            if not urlsplit(url).path.startswith("/admin"):
+                return None
+            if urlsplit(url).path == "/admin":
+                return 403, {"Content-Type": "text/html"}, "<h1>Forbidden</h1>"
+            return 200, {"Content-Type": "text/html"}, \
+                "<html><title>Sign in</title><form>" + ("x " * 90) + "</form></html>"
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/admin"]})
+        self.assertEqual(ForbiddenBypassModule().run_web(ctx, web_target()), [])
+
+
+class SstiTests(unittest.TestCase):
+    ORIGIN = "http://target.test:8080"
+
+    def test_evaluated_arithmetic_is_reported(self):
+        from assay.modules.web_inject import SstiModule
+        import re as _re
+
+        def route(m, url, h, b):
+            v = parse_qs(urlsplit(url).query).get("q", [""])[0]
+            # A real Jinja-style engine: evaluate {{a*b}}.
+            out = _re.sub(r"\{\{(\d+)\*(\d+)\}\}",
+                          lambda mm: str(int(mm.group(1)) * int(mm.group(2))), v)
+            return 200, {"Content-Type": "text/html"}, "<p>%s</p>" % out
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/s?q=x"]})
+        found = SstiModule().run_web(ctx, web_target())
+        self.assertTrue(found, "evaluated template expression was missed")
+        self.assertEqual(found[0].severity, "critical")
+
+    def test_echoed_payload_is_not_ssti(self):
+        """Reflection without evaluation is not template injection."""
+        from assay.modules.web_inject import SstiModule
+
+        def route(m, url, h, b):
+            v = parse_qs(urlsplit(url).query).get("q", [""])[0]
+            return 200, {"Content-Type": "text/html"}, "<p>%s</p>" % v
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/s?q=x"]})
+        self.assertEqual(SstiModule().run_web(ctx, web_target()), [])
+
+    def test_page_containing_the_number_by_chance_is_not_ssti(self):
+        from assay.modules.web_inject import SstiModule
+
+        def route(m, url, h, b):
+            return 200, {"Content-Type": "text/html"}, "<p>total 5131 items</p>"
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/s?q=x"]})
+        self.assertEqual(SstiModule().run_web(ctx, web_target()), [])
+
+
+class CrlfTests(unittest.TestCase):
+    ORIGIN = "http://target.test:8080"
+
+    def test_injected_header_is_reported(self):
+        from assay.modules.web_inject import CrlfModule
+        from urllib.parse import unquote
+
+        def route(m, url, h, b):
+            v = unquote(parse_qs(urlsplit(url).query).get("url", [""])[0])
+            hdrs = {"Content-Type": "text/html"}
+            if "\r\n" in v or "\n" in v:
+                for line in v.replace("\r\n", "\n").split("\n")[1:]:
+                    if ":" in line:
+                        k, _, val = line.partition(":")
+                        hdrs[k.strip()] = val.strip()
+            return 200, hdrs, "ok"
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/r?url=x"]})
+        found = CrlfModule().run_web(ctx, web_target())
+        self.assertTrue(found, "header injection was missed")
+        self.assertEqual(found[0].confidence, "confirmed")
+
+    def test_sanitised_input_reports_nothing(self):
+        from assay.modules.web_inject import CrlfModule
+
+        def route(m, url, h, b):
+            return 200, {"Content-Type": "text/html"}, "ok"
+        ctx, _ = make_ctx([route], urls={self.ORIGIN: [self.ORIGIN + "/r?url=x"]})
+        self.assertEqual(CrlfModule().run_web(ctx, web_target()), [])
+
+
+class GatewayTests(unittest.TestCase):
+    """Where all 80/443 traffic is proxied, every address answers."""
+
+    PROXY = "<html><head><title>Gateway</title></head><body>No route.</body></html>"
+
+    def _wt(self, host, body, **kw):
+        from assay.models import WebTarget
+        w = WebTarget(url="https://%s/" % host, host=host, port=443,
+                      scheme="https", status=kw.get("status", 200),
+                      server=kw.get("server", "nginx"), title=kw.get("title", ""),
+                      content_type="text/html")
+        w.body_sample = body
+        return w
+
+    def test_uniform_proxy_response_is_detected_and_filtered(self):
+        from assay import gateway
+        web = [self._wt("10.20.0.%d" % i, self.PROXY) for i in range(1, 41)]
+        web.append(self._wt("10.20.0.90",
+                            "<html>" + "Real application " * 40 + "</html>",
+                            title="Portal"))
+        v = gateway.detect(web)
+        self.assertTrue(v.detected)
+        self.assertEqual([w.host for w in gateway.filter_web(web, v)],
+                         ["10.20.0.90"])
+
+    def test_a_real_load_balanced_pool_is_not_filtered(self):
+        from assay import gateway
+        pool = [self._wt("10.20.1.%d" % i, "<html>" + "Real app " * 50 + "</html>",
+                         title="App") for i in range(1, 7)]
+        pool += [self._wt("10.20.1.%d" % i, "<html>different %d</html>" % i,
+                          title="Other %d" % i) for i in range(20, 40)]
+        self.assertFalse(gateway.detect(pool).detected)
+
+    def test_asserted_mode_needs_far_less_evidence(self):
+        """When the operator says the ports are proxied, stop guessing."""
+        from assay import gateway
+        web = [self._wt("10.0.0.1", self.PROXY), self._wt("10.0.0.2", self.PROXY),
+               self._wt("10.0.0.3", "<html>" + "Real " * 60 + "</html>",
+                        title="App")]
+        self.assertFalse(gateway.detect(web).detected, "too few to infer")
+        v = gateway.detect(web, asserted=True)
+        self.assertTrue(v.detected)
+        self.assertEqual([w.host for w in gateway.filter_web(web, v)], ["10.0.0.3"])
+
+    def test_proxied_ports_are_not_reported_as_exposed_services(self):
+        from assay.config import Config
+        from assay.context import Context
+        from assay.models import Port, Target
+        from assay.modules.host_services import ServiceTriageModule
+
+        class _S:
+            def add_finding(self, f): return True
+        cfg = Config(proxied_ports=[80, 443])
+        ctx = Context(cfg=cfg, store=_S(), http=None, tune={})
+        t = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        t.ports = [Port(port=443, service="https"), Port(port=21, service="ftp")]
+        titles = [f.title for f in ServiceTriageModule().run_host(ctx, t)]
+        self.assertFalse(any("443" in x for x in titles),
+                         "a proxied port was reported as a service")
+        self.assertTrue(any("ftp" in x for x in titles),
+                        "a real service must still be reported")
+
+    def test_too_few_hosts_to_conclude(self):
+        from assay import gateway
+        self.assertFalse(gateway.detect(
+            [self._wt(h, self.PROXY) for h in ("a.tld", "b.tld", "c.tld")]).detected)
+
+    def test_several_ports_on_one_host_are_not_evidence(self):
+        from assay import gateway
+        from assay.models import WebTarget
+        web = []
+        for port in (80, 443, 8080, 8443, 9000, 9443):
+            w = WebTarget(url="https://a.tld:%d/" % port, host="a.tld", port=port,
+                          scheme="https", status=200, content_type="text/html")
+            w.body_sample = self.PROXY
+            web.append(w)
+        self.assertFalse(gateway.detect(web).detected)
+
+
+class TriageStatusTests(unittest.TestCase):
+    def _store(self):
+        import os, tempfile
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        s = Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+        s.start_run("standard", ["t"])
+        for t in ("Exposed .env", "CORS reflect", "Open redirect"):
+            s.add_finding(Finding(title=t, target="https://a/" + t[:3],
+                                  severity="high", confidence="firm", module="m",
+                                  impact="i",
+                                  evidence=[Evidence(kind="http", output="x")]))
+        return s
+
+    def test_status_persists_and_mutes(self):
+        s = self._store()
+        fid = s.findings()[0].fingerprint()
+        s.set_status(fid, "reported", notes="submitted")
+        self.assertEqual(s.status_of(fid), "reported")
+        self.assertEqual(len(s.findings()), 3)
+        self.assertEqual(len(s.findings(include_muted=False)), 2)
+
+    def test_muted_findings_do_not_resurface_in_diff(self):
+        s = self._store()
+        fid = s.findings()[0].fingerprint()
+        title = s.findings()[0].title
+        s.set_status(fid, "duplicate")
+        self.assertNotIn(title, [f.title for f in s.diff()["new_findings"]])
+
+    def test_in_progress_is_not_muted(self):
+        """Marking something as being worked must not hide it."""
+        s = self._store()
+        fid = s.findings()[0].fingerprint()
+        s.set_status(fid, "in-progress")
+        self.assertEqual(len(s.findings(include_muted=False)), 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

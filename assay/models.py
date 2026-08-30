@@ -178,6 +178,8 @@ class Finding:
     score: float = 0.0
     triage: str = TRIAGE_NOTE
     notes: str = ""
+    # Hunter's verdict, persisted across runs. See Store.STATUSES.
+    status: str = "new"
 
     # -- identity ----------------------------------------------------------
     def fingerprint(self) -> str:

@@ -92,6 +92,10 @@ class ServiceTriageModule(Module):
         out: List[Finding] = []
         host = target.ip or target.host
         for port in target.ports:
+            # On a network that proxies these ports for every address, an open
+            # connect is the proxy answering, not a service on this host.
+            if ctx.cfg.is_proxied_port(port.port):
+                continue
             probed = self._probe(ctx, host, port)
             if probed:
                 out.append(probed)

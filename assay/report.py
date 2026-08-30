@@ -222,8 +222,9 @@ def _finding_card(f: Finding, store: Store) -> str:
     ai = store.ai_for(fid)
     try:
         is_new = store.is_new_this_run(fid)
+        status = store.status_of(fid)
     except Exception:
-        is_new = False
+        is_new, status = False, "new"
     ev_html = ""
     for e in f.evidence[:3]:
         blob = e.compact()
@@ -259,45 +260,66 @@ def _finding_card(f: Finding, store: Store) -> str:
     haystack = " ".join([f.title, f.target, f.module, f.category, f.cwe,
                          f.impact, f.detail, " ".join(f.tags)]).lower()
 
+    # Named placeholders, not positional. Twice now a field was added to the
+    # template without its argument (or the reverse), silently shifting every
+    # value after it and crashing the build. With names, editing one side
+    # without the other is impossible to get wrong.
+    fields = {
+        "id": fid,
+        "sev": _e(f.severity),
+        "sev_color": SEV_COLOR.get(f.severity, "#8ab4f8"),
+        "triage": _e(f.triage),
+        "module": _e(f.module),
+        "conf": _e(f.confidence),
+        "status": _e(status),
+        "search": _e(haystack),
+        "title": _e(f.title),
+        "score": "%.0f" % f.score,
+        "target": _e(f.target),
+        "impact": _e(f.impact),
+        "category": _e(f.category),
+        "cwe": _e(f.cwe),
+        "repro": _e(f.repro),
+        "tags": tags,
+        "refs": refs,
+        "new_badge": '<span class="newbadge">new</span>' if is_new else "",
+        "status_badge": ('<span class="statusbadge s-{0}">{0}</span>'.format(_e(status))
+                         if status not in ("new", "") else ""),
+        "detail_row": ('<div class="row"><span class="k">Detail</span>'
+                       '<span>%s</span></div>' % _e(f.detail)) if f.detail else "",
+        "evidence": ('<details><summary>Evidence (%d)</summary>%s</details>'
+                     % (len(f.evidence), ev_html)) if ev_html else "",
+        "ai": ai_html,
+        "draft": ('<details class="draft"><summary>Submission draft</summary>'
+                  '<button class="copy wide" data-copy="%s">copy draft</button>'
+                  '<pre>%s</pre></details>' % (_e(draft), _e(draft))) if draft else "",
+    }
     return (
-        '<article class="card" id="f-%s" data-sev="%s" data-triage="%s" '
-        'data-module="%s" data-conf="%s" data-search="%s" tabindex="-1">'
+        '<article class="card" id="f-{id}" data-sev="{sev}" data-triage="{triage}" '
+        'data-module="{module}" data-conf="{conf}" data-status="{status}" '
+        'data-search="{search}" tabindex="-1">'
         '<div class="card-head">'
-        '<span class="sev" style="background:%s">%s</span>'
-        '<span class="conf">%s</span>'
-        '<h3>%s</h3>%s'
-        '<span class="score" title="priority score">%.0f</span>'
+        '<span class="sev" style="background:{sev_color}">{sev}</span>'
+        '<span class="conf">{conf}</span>'
+        '<h3>{title}</h3>{new_badge}{status_badge}'
+        '<span class="score" title="priority score">{score}</span>'
         '</div>'
-        '<div class="target">%s</div>'
-        '<div class="row"><span class="k">Impact</span><span>%s</span></div>'
-        '%s'
-        '<div class="row"><span class="k">Class</span><span>%s %s '
-        '<span class="modtag">%s</span></span></div>'
+        '<div class="target">{target}</div>'
+        '<div class="row"><span class="k">Impact</span><span>{impact}</span></div>'
+        '{detail_row}'
+        '<div class="row"><span class="k">Class</span><span>{category} {cwe} '
+        '<span class="modtag">{module}</span></span></div>'
         '<div class="row"><span class="k">Repro</span>'
-        '<span class="cmdwrap"><code>%s</code>'
-        '<button class="copy" data-copy="%s">copy</button></span></div>'
-        '<div class="tags">%s %s</div>'
-        '%s'
-        '%s'
-        '%s'
+        '<span class="cmdwrap"><code>{repro}</code>'
+        '<button class="copy" data-copy="{repro}">copy</button></span></div>'
+        '<div class="tags">{tags} {refs}</div>'
+        '{evidence}'
+        '{ai}'
+        '{draft}'
         '</article>'
-        % (f.fingerprint(), _e(f.severity), _e(f.triage), _e(f.module),
-           _e(f.confidence), _e(haystack),
-           SEV_COLOR.get(f.severity, "#8ab4f8"), _e(f.severity),
-           _e(f.confidence), _e(f.title),
-           '<span class="newbadge">new</span>' if is_new else "",
-           f.score, _e(f.target), _e(f.impact),
-           ('<div class="row"><span class="k">Detail</span><span>%s</span></div>' % _e(f.detail))
-           if f.detail else "",
-           _e(f.category), _e(f.cwe), _e(f.module), _e(f.repro), _e(f.repro),
-           tags, refs,
-           ('<details><summary>Evidence (%d)</summary>%s</details>'
-            % (len(f.evidence), ev_html)) if ev_html else "",
-           ai_html,
-           ('<details class="draft"><summary>Submission draft</summary>'
-            '<button class="copy wide" data-copy="%s">copy draft</button>'
-            '<pre>%s</pre></details>' % (_e(draft), _e(draft))) if draft else "")
-    )
+    ).format(**fields)
+
+
 
 
 _HEAD = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -390,6 +412,12 @@ footer{padding:26px 32px;color:var(--dim);font-size:12px;border-top:1px solid va
 .copy:hover{border-color:var(--acc);color:var(--acc)}
 .copy.done{background:#2f7a4d;border-color:#2f7a4d;color:#fff}
 .copy.wide{margin-bottom:8px}
+.statusbadge{border-radius:4px;padding:1px 7px;font-size:10.5px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.05em;background:var(--line);color:var(--dim)}
+.s-reported{background:#2f5f8a;color:#fff}
+.s-duplicate,.s-ignored{background:#5f6368;color:#fff}
+.s-false-positive{background:#7a3510;color:#fff}
+.s-in-progress{background:#8a6a12;color:#fff}
 .newbadge{background:#2f7a4d;color:#fff;border-radius:4px;padding:1px 7px;
   font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
 .modtag{background:var(--line);color:var(--dim);border-radius:4px;padding:1px 6px;font-size:11px}
