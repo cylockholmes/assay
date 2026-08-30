@@ -42,8 +42,11 @@ exposure:
     root, and rotate any credential the file exposed - the file was publicly
     readable and must be treated as compromised.
   notes: >
-    Where the file contains credentials, do not use them beyond the minimum
-    needed to prove they are live. Record the proof and stop.
+    Do NOT use a discovered credential to reach more of the application. On a
+    test meant to be unauthenticated, using found credentials, keys or session
+    tokens to continue testing is a rules violation - the credential is itself
+    the finding and belongs in an information-disclosure report. If you believe
+    the impact needs demonstrating, submit first and ask before going further.
 
 deaddomain:
   category: Using Components with Known Vulnerabilities
@@ -99,7 +102,9 @@ traversal:
     filenames over any filtering of traversal sequences.
   notes: >
     Read only what proves the vulnerability. /etc/passwd or win.ini is
-    sufficient; do not retrieve application secrets or user data.
+    sufficient. Do not use the read to go looking for anything else - using an
+    existing issue to perform reconnaissance is a rules violation, and anything
+    found that way is unlikely to be accepted.
 
 sqli:
   category: SQL Injection
@@ -115,8 +120,9 @@ sqli:
     Use parameterised queries or prepared statements throughout. Input
     validation alone is not sufficient, and neither is escaping.
   notes: >
-    Establish only that injection exists and what privileges it carries.
-    Do not dump tables or read customer data.
+    Establish only that injection exists and what privileges it carries. Do not
+    dump tables, and do not use the injection to enumerate further - using an
+    existing issue for reconnaissance is a rules violation.
 
 reflection:
   category: Cross-Site Scripting
@@ -259,8 +265,10 @@ archive:
     Rotate the credential. Removing it from the current version does not
     invalidate it, and the archived copy remains publicly retrievable.
   notes: >
-    The strength of this submission is proving the credential is STILL VALID.
-    Without that, it is a historical note rather than a finding.
+    The strength of this submission is proving the credential is STILL VALID -
+    but prove it with a single identity call and nothing more. Using a
+    discovered credential to reach further into the application is a rules
+    violation regardless of where you found it; the credential is the finding.
 
 origin:
   category: Security Misconfiguration
@@ -330,3 +338,30 @@ tls:
     Most programs treat TLS hygiene as low value or out of scope on its own.
     Submit only where it is exploitable in context, or bundle it as supporting
     detail on a stronger finding.
+
+idor:
+  category: Broken Access Control
+  cvss: "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"
+  summary: >
+    The '{param}' parameter at {url} addresses an object directly, and a request
+    made as one account returns an object belonging to another.
+  steps:
+    - "Authenticate as the first account and record the identifier it is issued (see Accounts below)."
+    - "Authenticate as the second account, separately, and capture its own request to the same endpoint."
+    - "Replay the second account's request substituting the first account's identifier."
+    - "Observe the first account's object returned to the second account's session."
+    - "Capture the roles and permissions assigned to both accounts."
+  remediation: >
+    Enforce authorization on the object, not on the identifier: check that the
+    authenticated principal owns or is entitled to the requested object on every
+    request, server-side. Unguessable identifiers are not access control.
+  notes: >
+    This report class is rejected without specifics, so before submitting make
+    sure it contains: an application-specific description of where the issue
+    occurs and how it was found - not a generic definition of what IDOR is; a
+    concrete statement of the data actually exposed rather than "sensitive
+    information"; the accounts used and their types, including exact permissions
+    for any account you created or modified; and screenshots verifying each
+    account's roles and permissions, since privileges can change during testing.
+    Reference the application's own documentation on permissions wherever it
+    exists.

@@ -2193,5 +2193,85 @@ class IdorInventoryTests(unittest.TestCase):
         self.assertEqual(IdorInventoryModule().run_web(ctx, web_target()), [])
 
 
+class TrafficTagTests(unittest.TestCase):
+    """Some programmes require automated traffic to be identifiable."""
+
+    def test_tag_is_applied_to_every_request(self):
+        from assay.config import Config
+        cfg = Config(traffic_tag="a1b2c3d4-ENGAGEMENT-01")
+        self.assertEqual(cfg.request_headers()["X-Scan-Tag"], "a1b2c3d4-ENGAGEMENT-01")
+
+    def test_tag_header_name_is_configurable(self):
+        from assay.config import Config
+        cfg = Config(traffic_tag="x", traffic_tag_header="X-Researcher")
+        self.assertEqual(cfg.request_headers()["X-Researcher"], "x")
+        self.assertNotIn("X-Scan-Tag", cfg.request_headers())
+
+    def test_no_tag_adds_no_header(self):
+        from assay.config import Config
+        self.assertNotIn("X-Scan-Tag", Config().request_headers())
+
+
+class CredentialGuardTests(unittest.TestCase):
+    """Enumerating after authenticating is a rules violation on an
+    unauthenticated test, and crawling and fuzzing both count as enumeration.
+    Credentials being present is not by itself consent.
+    """
+
+    def test_credentials_are_detected_in_every_form(self):
+        from assay.config import Config
+        self.assertTrue(Config(basic_auth="u:p").has_credentials)
+        self.assertTrue(Config(cookies="s=1").has_credentials)
+        self.assertTrue(Config(headers={"Authorization": "Bearer x"}).has_credentials)
+        self.assertTrue(Config(headers={"X-Api-Key": "x"}).has_credentials)
+        self.assertFalse(Config(headers={"X-Trace": "1"}).has_credentials)
+        self.assertFalse(Config().has_credentials)
+
+    def test_acknowledgement_is_separate_from_supplying_credentials(self):
+        from assay.config import Config
+        cfg = Config(basic_auth="u:p")
+        self.assertTrue(cfg.has_credentials)
+        self.assertFalse(cfg.auth_authorized,
+                         "supplying credentials must not imply authorisation")
+
+
+class SubmissionTemplateTests(unittest.TestCase):
+    def test_idor_template_demands_what_the_policy_requires(self):
+        from assay import submission
+        t = submission.load_templates()["idor"]
+        notes = t["notes"].lower()
+        for requirement in ("accounts used", "permissions", "screenshots",
+                            "application-specific"):
+            self.assertIn(requirement, notes,
+                          "IDOR template omits: %s" % requirement)
+
+    def test_templates_that_mention_credentials_warn_against_using_them(self):
+        """Using a found credential to reach more of the app is a violation.
+
+        Only templates whose finding *is* a disclosed credential need the
+        warning; a template that merely says not to retrieve credentials is
+        already declining to use one.
+        """
+        from assay import submission
+        needs_warning = ("exposure", "secrets", "archive")
+        for name in needs_warning:
+            notes = " ".join(submission.load_templates()[name]["notes"].split()).lower()
+            self.assertTrue(
+                "do not use" in notes or "not use" in notes
+                or "rotate" in notes or "nothing more" in notes,
+                "%s does not constrain use of the credential" % name)
+
+    def test_every_template_still_well_formed(self):
+        import re
+        from assay import submission
+        vec = re.compile(r"^CVSS:3\.1/AV:[NALP]/AC:[LH]/PR:[NLH]/UI:[NR]/S:[UC]"
+                         r"/C:[NLH]/I:[NLH]/A:[NLH]$")
+        for name, t in submission.load_templates().items():
+            for field in ("category", "cvss", "summary", "steps", "remediation",
+                          "notes"):
+                self.assertIn(field, t, "%s missing %s" % (name, field))
+            self.assertTrue(vec.match(t["cvss"]), "%s bad vector" % name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

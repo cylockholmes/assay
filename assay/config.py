@@ -293,6 +293,15 @@ class Config:
     # HTTP Basic credentials as "user:pass". Applied to every in-scope request
     # and handed to the external tools that accept a header.
     basic_auth: str = ""
+    # Some programmes require automated traffic to carry an identifying header
+    # so it can be attributed to a researcher and a target. Set it and every
+    # request assay makes - and every external tool's - carries it.
+    traffic_tag: str = ""
+    traffic_tag_header: str = "X-Scan-Tag"
+    # Acknowledgement that authenticated enumeration is permitted on this test.
+    # Enumerating after authenticating is a rules violation on a test that is
+    # meant to be unauthenticated, so credentials alone are not enough.
+    auth_authorized: bool = False
 
     burp: BurpConfig = field(default_factory=BurpConfig)
 
@@ -358,6 +367,8 @@ class Config:
             "Accept-Language": "en-US,en;q=0.9",
             "Connection": "close",
         }
+        if self.traffic_tag:
+            h[self.traffic_tag_header] = self.traffic_tag
         if self.basic_auth:
             token = base64.b64encode(
                 self.basic_auth.encode("utf-8")).decode("ascii")
@@ -366,6 +377,13 @@ class Config:
         if self.cookies:
             h["Cookie"] = self.cookies
         return h
+
+    @property
+    def has_credentials(self) -> bool:
+        return bool(self.basic_auth or self.cookies
+                    or any(k.lower() in ("authorization", "x-api-key",
+                                         "x-auth-token", "cookie")
+                           for k in self.headers))
 
     def auth_header(self) -> Optional[str]:
         """The Authorization header value, for passing to external tools."""

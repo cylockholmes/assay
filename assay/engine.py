@@ -744,6 +744,8 @@ class Engine:
     def _tool_headers(self) -> Dict[str, str]:
         """Auth and custom headers to hand to external tools."""
         h: Dict[str, str] = {}
+        if self.cfg.traffic_tag:
+            h[self.cfg.traffic_tag_header] = self.cfg.traffic_tag
         auth = self.cfg.auth_header()
         if auth:
             h["Authorization"] = auth

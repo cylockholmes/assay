@@ -154,6 +154,7 @@ class AIConfig:
     evidence_chars: int = 400
     dry_run: bool = False
     effort: str = "high"
+    inference_geo: str = "us"
     api_key: Optional[str] = None
 
 
@@ -354,6 +355,10 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
                      "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": _user_message(payload)}],
             thinking={"type": "adaptive"},
+            # Some programmes require that data is not processed outside the
+            # United States. Pinning the geography makes that checkable rather
+            # than assumed.
+            inference_geo="us",
             output_config={
                 "effort": cfg.effort,
                 "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
