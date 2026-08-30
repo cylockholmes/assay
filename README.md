@@ -188,6 +188,52 @@ Findings land in three buckets: **CHASE** (verified, real impact), **LOOK**
 
 ---
 
+## Heuristics
+
+Three things happen that a per-check scanner cannot do, because they need the
+whole picture.
+
+**Parameters are classified before anything is injected.** The name and the
+observed value together decide what a parameter carries, and only relevant
+checks spend requests on it — SQL syntax never goes to `redirect=https://…`,
+traversal payloads never go to `page=2`. Where the signals disagree the
+parameter is treated as unknown and every check still runs, so inference
+narrows work when it is confident and gets out of the way when it is not.
+
+One subtlety worth knowing: `next=/dashboard` is classified as a **URL**, not a
+path, even though the value looks like a path. A redirect parameter holding a
+relative path is the most common shape of an open redirect, and reading it as a
+path means the redirect check never runs on it.
+
+**Findings on almost every host are ranked down as environmental.** Two hundred
+hosts each missing a security header is one configuration decision reported two
+hundred times, and it buries the host that differs. Above 60% prevalence (and
+at least five hosts) the finding is collapsed and downranked, with the reason
+written onto the finding. It is not deleted — the fact is still true, and
+occasionally the estate-wide default *is* the finding.
+
+**Chains are correlated locally.** Eight deterministic rules combine findings
+that are unremarkable alone:
+
+| Chain | Why it is worth more than its parts |
+|---|---|
+| Sibling-subdomain CORS + subdomain takeover on that apex | a medium and a high become full authenticated cross-origin read |
+| Disclosed credentials + an administrative surface | the disclosure is not the finding; what the credentials open is |
+| SSRF + internal hosts named in JavaScript | removes the guesswork — there is a list of internal services to aim it at |
+| Reflected input + no CSP on the same origin | the mitigation that would block a payload is absent |
+| Script-readable session cookie + reflection | decides whether an XSS is account takeover or a scoped action |
+| Open redirect on an auth path | the difference between phishing and token theft |
+| Directory listing + retrievable source on the same origin | the listing is the route to the source |
+| Two or more unauthenticated AI services | inference plus its data layer is corpus extraction and poisoning |
+
+These run whether or not AI triage is enabled, and are labelled `correlated` in
+the report to distinguish them from the model's.
+
+**IDOR gets a work queue, not a guess.** Deciding whether object 1004 belongs
+to you needs a second account, so assay does not try. It inventories the
+endpoints, parameter names and observed values that address objects, marks the
+paths that look like access-control boundaries, and hands you the list.
+
 ## Injection points
 
 The active checks are only as good as the parameters they are given, so assay

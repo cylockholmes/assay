@@ -2013,5 +2013,185 @@ class EmptyStateTests(unittest.TestCase):
         store.close()
 
 
+class ParamInferenceTests(unittest.TestCase):
+    """Which checks a parameter earns, from its name and observed value."""
+
+    def test_value_beats_name_when_unambiguous(self):
+        from assay.params import classify
+        self.assertEqual(classify("id", "https://a.tld"), "url")
+        self.assertEqual(classify("id", "/etc/passwd"), "path")
+
+    def test_a_redirect_name_survives_a_relative_value(self):
+        """next=/dashboard is the most common shape of an open redirect.
+
+        Reading it as a path means the redirect check never runs on it.
+        """
+        from assay.params import classify, targets_for
+        self.assertEqual(classify("next", "/dashboard"), "url")
+        self.assertEqual(
+            targets_for("openredirect", "https://t/login?next=/dashboard"), ["next"])
+
+    def test_a_boolean_name_with_a_non_boolean_value_is_not_a_flag(self):
+        """debug=<script> is a reflection candidate, not a switch."""
+        from assay.params import classify, targets_for
+        self.assertEqual(classify("debug", "<script>"), "unknown")
+        self.assertIn("debug",
+                      targets_for("reflection", "https://t/x?debug=%3Cscript%3E"))
+        self.assertEqual(classify("debug", "true"), "bool")
+
+    def test_checks_are_routed_to_plausible_parameters_only(self):
+        from assay.params import targets_for
+        u = ("https://t/x?id=42&url=https://a.tld&file=../../etc/passwd"
+             "&q=hi&debug=true")
+        self.assertEqual(targets_for("ssrf", u), ["url"])
+        self.assertEqual(targets_for("traversal", u), ["file"])
+        self.assertEqual(targets_for("openredirect", u), ["url"])
+        self.assertIn("id", targets_for("sqli", u))
+        self.assertNotIn("url", targets_for("sqli", u))
+
+    def test_unknown_parameters_still_get_every_check(self):
+        """Inference narrows work when confident and gets out of the way."""
+        from assay.params import targets_for
+        u = "https://t/x?wibble=zzz"
+        for check in ("sqli", "ssrf", "traversal", "reflection", "ssti"):
+            self.assertEqual(targets_for(check, u), ["wibble"])
+
+    def test_pagination_is_not_an_idor_candidate(self):
+        from assay.params import idor_candidates
+        got = [n for n, _v, _k in idor_candidates(
+            "https://t/a?user_id=1004&page=2&offset=40&limit=10&invoice=889")]
+        self.assertEqual(sorted(got), ["invoice", "user_id"])
+
+
+class PrevalenceTests(unittest.TestCase):
+    def _f(self, title, host, module, sev="info"):
+        from assay.models import Evidence, Finding
+        f = Finding(title=title, target="https://%s/" % host, module=module,
+                    severity=sev, confidence="confirmed", impact="i",
+                    evidence=[Evidence(kind="http", output="x")])
+        f.compute_score()
+        return f
+
+    def test_a_finding_on_every_host_is_ranked_down(self):
+        from assay.correlate import apply_prevalence, environmental
+        fs = [self._f("Security headers absent", "h%d.t" % i, "headers")
+              for i in range(8)]
+        before = fs[0].score
+        p = environmental(fs)
+        self.assertIn("Security headers absent", p)
+        apply_prevalence(fs, p)
+        self.assertLess(fs[0].score, before)
+        self.assertIn("environmental", fs[0].tags)
+        self.assertIn("environment", fs[0].notes)
+
+    def test_a_small_scope_is_never_collapsed(self):
+        """Three of four is a small sample, not an estate-wide policy."""
+        from assay.correlate import environmental
+        fs = [self._f("Security headers absent", "h%d.t" % i, "headers")
+              for i in range(3)]
+        self.assertEqual(environmental(fs), {})
+
+    def test_a_finding_on_one_host_is_untouched(self):
+        from assay.correlate import apply_prevalence, environmental
+        fs = [self._f("Security headers absent", "h%d.t" % i, "headers")
+              for i in range(8)]
+        rare = self._f("Exposed .env file", "h3.t", "exposure", "critical")
+        fs.append(rare)
+        before = rare.score
+        apply_prevalence(fs, environmental(fs))
+        self.assertEqual(rare.score, before)
+        self.assertNotIn("environmental", rare.tags)
+
+
+class ChainTests(unittest.TestCase):
+    def _f(self, title, target, module, sev="medium", detail=""):
+        from assay.models import Evidence, Finding
+        f = Finding(title=title, target=target, module=module, severity=sev,
+                    confidence="confirmed", impact="i", detail=detail,
+                    evidence=[Evidence(kind="http", output="x")])
+        f.compute_score()
+        return f
+
+    def test_cors_sibling_plus_takeover_on_the_same_apex(self):
+        from assay.correlate import chains
+        fs = [self._f("CORS trusts any subdomain of the parent domain",
+                      "https://api.acme.tld/v1/me", "cors"),
+              self._f("Subdomain takeover: dangling CNAME to Heroku",
+                      "dead.acme.tld", "takeover", "high")]
+        got = chains(fs)
+        self.assertTrue(any("Subdomain takeover into" in c.name for c in got))
+        self.assertEqual(got[0].severity, "critical")
+
+    def test_no_chain_when_the_apex_differs(self):
+        """A takeover on someone else's domain does not chain."""
+        from assay.correlate import chains
+        fs = [self._f("CORS trusts any subdomain of the parent domain",
+                      "https://api.acme.tld/v1/me", "cors"),
+              self._f("Subdomain takeover: dangling CNAME to Heroku",
+                      "dead.other.tld", "takeover", "high")]
+        self.assertFalse(any("Subdomain takeover into" in c.name
+                             for c in chains(fs)))
+
+    def test_reflection_plus_missing_csp_on_the_same_host(self):
+        from assay.correlate import chains
+        fs = [self._f("Input reflected into HTML with tag characters unencoded",
+                      "https://app.t/s", "reflection", "high"),
+              self._f("Security headers absent", "https://app.t/", "headers",
+                      "info", detail="Missing: Content-Security-Policy")]
+        self.assertTrue(any("no Content-Security-Policy" in c.name
+                            for c in chains(fs)))
+
+    def test_reflection_and_csp_on_different_hosts_do_not_chain(self):
+        from assay.correlate import chains
+        fs = [self._f("Input reflected into HTML with tag characters unencoded",
+                      "https://app.t/s", "reflection", "high"),
+              self._f("Security headers absent", "https://other.t/", "headers",
+                      "info", detail="Missing: Content-Security-Policy")]
+        self.assertFalse(any("no Content-Security-Policy" in c.name
+                             for c in chains(fs)))
+
+    def test_an_empty_finding_set_produces_no_chains(self):
+        from assay.correlate import chains
+        self.assertEqual(chains([]), [])
+
+    def test_chains_are_ordered_strongest_first(self):
+        from assay.correlate import chains
+        fs = [self._f("Open redirect via 'redirect_uri' parameter",
+                      "https://sso.t/oauth/authorize?redirect_uri=x",
+                      "openredirect"),
+              self._f("Exposed .env file", "https://p.t/.env", "exposure",
+                      "critical")]
+        got = chains(fs)
+        self.assertTrue(got)
+        order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        self.assertEqual([order[c.severity] for c in got],
+                         sorted(order[c.severity] for c in got))
+
+
+class IdorInventoryTests(unittest.TestCase):
+    ORIGIN = "http://target.test:8080"
+
+    def test_object_references_are_collected_and_deduplicated(self):
+        from assay.modules.web_idor import IdorInventoryModule
+        urls = [self.ORIGIN + "/api/orders/view?order_id=8891",
+                self.ORIGIN + "/api/orders/view?order_id=8892",
+                self.ORIGIN + "/account/profile?user_id=1004",
+                self.ORIGIN + "/search?q=hello&page=2",
+                self.ORIGIN + "/static/app.js?v=3"]
+        ctx, _ = make_ctx([], urls={self.ORIGIN: urls})
+        found = IdorInventoryModule().run_web(ctx, web_target())
+        self.assertTrue(found)
+        body = found[0].evidence[0].output
+        self.assertIn("order_id", body)
+        self.assertIn("user_id", body)
+        self.assertNotIn("page=", body, "pagination is not an object reference")
+        self.assertEqual(body.count("/api/orders/view"), 1, "not deduplicated")
+
+    def test_nothing_reported_when_there_are_no_object_references(self):
+        from assay.modules.web_idor import IdorInventoryModule
+        ctx, _ = make_ctx([], urls={self.ORIGIN: [self.ORIGIN + "/search?q=hi"]})
+        self.assertEqual(IdorInventoryModule().run_web(ctx, web_target()), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
