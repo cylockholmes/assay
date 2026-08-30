@@ -37,6 +37,18 @@ WEB_PORTS = [80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7001, 8081, 9000,
 HTTP_SERVICES = {"http", "https", "http-alt", "https-alt", "http-proxy",
                  "ssl/http", "www", "webcache", "tomcat", "nginx"}
 
+# Services that definitively do not speak HTTP. Everything else gets probed,
+# because a web application on an arbitrary port is exactly what is worth
+# finding - especially on a network where 80 and 443 are proxied noise.
+NON_HTTP_SERVICES = {
+    "ssh", "ftp", "ftp-data", "telnet", "smtp", "smtps", "submission",
+    "domain", "dns", "pop3", "pop3s", "imap", "imaps", "ntp", "snmp",
+    "netbios-ns", "netbios-ssn", "microsoft-ds", "ms-sql-s", "mysql",
+    "postgresql", "oracle-tns", "rsync", "ldap", "ldaps", "kerberos-sec",
+    "vnc", "ms-wbt-server", "sip", "isakmp", "tftp", "nfs", "rpcbind",
+    "mongodb", "redis", "memcached", "irc", "xmpp-client",
+}
+
 TECH_SIGNATURES: List[Tuple[str, str]] = [
     ("WordPress", r"/wp-content/|/wp-includes/|name=[\"']generator[\"'] content=[\"']WordPress"),
     ("Drupal", r"Drupal\.settings|/sites/default/files/|X-Generator: Drupal"),
@@ -323,8 +335,13 @@ class Engine:
         candidates: List[Tuple[Target, Port]] = []
         for t in self.ctx.targets:
             for p in t.ports:
-                if p.service in HTTP_SERVICES or p.is_tls or p.port in WEB_PORTS:
-                    candidates.append((t, p))
+                if p.proto != "tcp":
+                    continue
+                # Probe anything that is not known to speak something else.
+                # A site on 7777 with no service banner was previously invisible.
+                if p.service and p.service in NON_HTTP_SERVICES:
+                    continue
+                candidates.append((t, p))
         if not candidates:
             self.ctx.say("probe", "no HTTP candidates found")
             return
@@ -460,6 +477,11 @@ class Engine:
                 body_sample=r.body[:4000], final_url=r.url or url,
                 redirect_chain=r.history,
             )
+            live, why = gateway.looks_live(
+                r.status, r.body, self.cfg.is_proxied_port(p.port))
+            if not live:
+                self.ctx.journal.note("%s: not a service (%s)" % (url, why))
+                continue
             wt.tech = self._fingerprint(r.body[:200000], r.headers)
             return wt
         return None

@@ -1557,16 +1557,24 @@ class GatewayTests(unittest.TestCase):
                           title="Other %d" % i) for i in range(20, 40)]
         self.assertFalse(gateway.detect(pool).detected)
 
-    def test_asserted_mode_needs_far_less_evidence(self):
-        """When the operator says the ports are proxied, stop guessing."""
+    def test_asserted_mode_is_more_sensitive_but_not_reckless(self):
+        """Asserted lowers the bar; it does not remove it.
+
+        Two matching hosts must never be enough, or a two-node load-balanced
+        pool gets filtered away as though it were the gateway.
+        """
         from assay import gateway
-        web = [self._wt("10.0.0.1", self.PROXY), self._wt("10.0.0.2", self.PROXY),
+        two = [self._wt("10.0.0.1", self.PROXY), self._wt("10.0.0.2", self.PROXY),
                self._wt("10.0.0.3", "<html>" + "Real " * 60 + "</html>",
                         title="App")]
-        self.assertFalse(gateway.detect(web).detected, "too few to infer")
-        v = gateway.detect(web, asserted=True)
-        self.assertTrue(v.detected)
-        self.assertEqual([w.host for w in gateway.filter_web(web, v)], ["10.0.0.3"])
+        self.assertFalse(gateway.detect(two, asserted=True).detected,
+                         "2 matching hosts is not enough evidence")
+
+        three = two + [self._wt("10.0.0.4", self.PROXY)]
+        v = gateway.detect(three, asserted=True)
+        self.assertTrue(v.detected, "3 of 4 should conclude in asserted mode")
+        self.assertEqual([w.host for w in gateway.filter_web(three, v)],
+                         ["10.0.0.3"])
 
     def test_proxied_ports_are_not_reported_as_exposed_services(self):
         from assay.config import Config
@@ -1638,6 +1646,102 @@ class TriageStatusTests(unittest.TestCase):
         fid = s.findings()[0].fingerprint()
         s.set_status(fid, "in-progress")
         self.assertEqual(len(s.findings(include_muted=False)), 3)
+
+
+class LivenessTests(unittest.TestCase):
+    """On a proxied network an open port and an HTTP response prove nothing.
+
+    What still separates a real service from the gateway is the content.
+    """
+
+    def test_gateway_errors_are_not_a_service(self):
+        from assay.gateway import looks_live
+        for status in (502, 503, 504):
+            live, why = looks_live(status, "<html>Service Unavailable</html>",
+                                   proxied_port=True)
+            self.assertFalse(live, "HTTP %d treated as a live service" % status)
+            self.assertIn("backend", why)
+
+    def test_empty_body_is_not_a_service(self):
+        from assay.gateway import looks_live
+        for body in ("", "   ", "\n\n  \t"):
+            self.assertFalse(looks_live(200, body, proxied_port=True)[0])
+
+    def test_real_content_is_a_service(self):
+        from assay.gateway import looks_live
+        live, _ = looks_live(200, "<html><body>Real application</body></html>",
+                             proxied_port=True)
+        self.assertTrue(live)
+
+    def test_a_guarded_endpoint_is_still_a_service(self):
+        """401/403 means something is there and is protecting itself."""
+        from assay.gateway import looks_live
+        self.assertTrue(looks_live(401, "<html>Authentication required</html>",
+                                   proxied_port=True)[0])
+        self.assertTrue(looks_live(403, "<html>Forbidden</html>",
+                                   proxied_port=True)[0])
+
+    def test_no_response_is_not_a_service(self):
+        from assay.gateway import looks_live
+        self.assertFalse(looks_live(0, "", proxied_port=False)[0])
+
+
+class NonStandardPortTests(unittest.TestCase):
+    def test_web_on_an_unrecognised_port_is_probed(self):
+        """A site on 7777 with no service banner used to be invisible."""
+        from assay.engine import NON_HTTP_SERVICES
+        for port, svc in ((7777, ""), (31337, "unknown"), (9443, ""),
+                          (5000, "upnp"), (2375, "")):
+            self.assertFalse(svc and svc in NON_HTTP_SERVICES,
+                             "port %d would be skipped" % port)
+
+    def test_definitively_non_http_services_are_skipped(self):
+        from assay.engine import NON_HTTP_SERVICES
+        for svc in ("ssh", "mysql", "postgresql", "domain", "smtp", "vnc"):
+            self.assertIn(svc, NON_HTTP_SERVICES)
+
+    def test_http_services_are_never_in_the_skip_list(self):
+        from assay.engine import HTTP_SERVICES, NON_HTTP_SERVICES
+        self.assertEqual(HTTP_SERVICES & NON_HTTP_SERVICES, set())
+
+
+class GatewayThresholdTests(unittest.TestCase):
+    def _wt(self, host, body, title=""):
+        from assay.models import WebTarget
+        w = WebTarget(url="https://%s/" % host, host=host, port=443,
+                      scheme="https", status=200, server="nginx", title=title,
+                      content_type="text/html")
+        w.body_sample = body
+        return w
+
+    def test_asserted_mode_does_not_eat_a_two_node_pool(self):
+        """Two identical real servers must not be mistaken for the gateway."""
+        from assay import gateway
+        pool = [self._wt("10.0.0.%d" % i, "<html>" + "Real app " * 40 + "</html>",
+                         title="App") for i in (1, 2)]
+        v = gateway.detect(pool, asserted=True)
+        self.assertFalse(v.detected,
+                         "a 2-node load-balanced pool was filtered as a gateway")
+
+    def test_asserted_mode_still_catches_a_real_gateway(self):
+        from assay import gateway
+        proxy = "<html><title>Gateway</title><body>No route.</body></html>"
+        web = [self._wt("10.0.0.%d" % i, proxy) for i in range(1, 9)]
+        web.append(self._wt("10.0.0.90", "<html>" + "Real " * 60 + "</html>",
+                            title="App"))
+        v = gateway.detect(web, asserted=True)
+        self.assertTrue(v.detected)
+        self.assertEqual([w.host for w in gateway.filter_web(web, v)],
+                         ["10.0.0.90"])
+
+    def test_asserted_is_more_sensitive_than_inferred_but_still_needs_a_majority(self):
+        from assay import gateway
+        proxy = "<html><title>Gateway</title><body>No route.</body></html>"
+        web = [self._wt("10.0.0.%d" % i, proxy) for i in (1, 2, 3)]
+        web.append(self._wt("10.0.0.9", "<html>" + "Real " * 60 + "</html>"))
+        self.assertFalse(gateway.detect(web).detected, "inferred needs 5")
+        self.assertTrue(gateway.detect(web, asserted=True).detected,
+                        "asserted should conclude at 3 of 4")
 
 
 if __name__ == "__main__":
