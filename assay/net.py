@@ -184,7 +184,9 @@ class HttpClient:
         self._local = threading.local()
         self._blocked: set = set()
         self._lock = threading.Lock()
-        self.count = 0
+        self.count = 0                      # responses received
+        self.attempts = 0                   # requests sent, including failures
+        self.failures = 0
         self.journal = None                 # set by the engine
         self.throttle_events = 0
         self._last_throttle = 0.0
@@ -270,6 +272,8 @@ class HttpClient:
         if self.journal is not None:
             self.journal.request(method.upper(), url, hdrs,
                                  data if isinstance(data, str) else "")
+        with self._lock:
+            self.attempts += 1
         host_limiter = self._host_limiter(host)
         for attempt in range(attempts):
             self.limiter.take()
@@ -325,6 +329,8 @@ class HttpClient:
                 if attempt + 1 < attempts:
                     time.sleep(0.4 * (attempt + 1))
 
+        with self._lock:
+            self.failures += 1
         return Resp(url=url, status=0, headers={}, body="", elapsed=0.0,
                     method=method.upper(), error=last_err,
                     request_headers=dict(hdrs),
@@ -338,6 +344,16 @@ class HttpClient:
 
     def post(self, url: str, data=None, **kw) -> Resp:
         return self.request("POST", url, data=data, **kw)
+
+    def close(self) -> None:
+        """Release the per-thread connection pools."""
+        s = getattr(self._local, "session", None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self._local.session = None
 
     def blocked_hosts(self) -> List[str]:
         with self._lock:

@@ -122,9 +122,14 @@ class Engine:
             say("journal", "%d request(s) and %d command(s) recorded - replay.sh"
                 % (self.journal.requests, self.journal.commands))
         self.store.finish_run()
-        say("done", "%d finding(s) in %.0fs, %d requests"
+        say("done", "%d finding(s) in %.0fs, %d request(s)%s"
             % (self.store.counts().get("total", 0), time.time() - self.started,
-               self.http.count))
+               self.http.attempts,
+               " (%d failed)" % self.http.failures if self.http.failures else ""))
+        if self.http.throttle_events:
+            say("pacing", "target throttled us %d time(s); rate was reduced "
+                          "automatically" % self.http.throttle_events)
+        self.http.close()
         blocked = self.http.blocked_hosts()
         if blocked:
             say("scope", "blocked %d out-of-scope host(s): %s"
@@ -392,8 +397,11 @@ class Engine:
                                     {"content_type": wt.content_type,
                                      "final_url": wt.final_url, "length": wt.length})
                 added += 1
-        except Exception:
-            # httpx is an optimisation; fall back to the native probe.
+        except Exception as exc:
+            # httpx is an optimisation, never a requirement - but say so rather
+            # than silently doing the slow thing and looking like a hang.
+            self.ctx.say("probe", "httpx failed (%s); using the native probe"
+                         % type(exc).__name__)
             return 0
         return added
 
@@ -656,5 +664,7 @@ class Engine:
                     services.add(p.service)
         return {"hosts": len(self.ctx.targets), "web": len(self.ctx.web),
                 "tech": sorted(tech), "services": sorted(services),
-                "requests": self.http.count,
+                "requests": self.http.attempts,
+                "failed": self.http.failures,
+                "throttled": self.http.throttle_events,
                 "duration": round(time.time() - self.started, 1)}
