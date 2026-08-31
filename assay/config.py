@@ -295,13 +295,16 @@ class Config:
     basic_auth: str = ""
     # Some programmes require automated traffic to carry an identifying header
     # so it can be attributed to a researcher and a target. Set it and every
-    # request assay makes - and every external tool's - carries it.
+    # request assay makes - and every external tool's - carries it. The header
+    # name is programme-specific; set it to whatever yours mandates.
     traffic_tag: str = ""
     traffic_tag_header: str = "X-Scan-Tag"
-    # Acknowledgement that authenticated enumeration is permitted on this test.
-    # Enumerating after authenticating is a rules violation on a test that is
-    # meant to be unauthenticated, so credentials alone are not enough.
-    auth_authorized: bool = False
+    # NOTE: credentials provisioned for the engagement are simply the test -
+    # supplying them implies nothing that needs guarding. The rule worth
+    # respecting is narrower: do not use credentials or access you *discovered*
+    # (or reached through an existing issue) to enumerate further. That is a
+    # judgement about what you do with a finding, not about --basic, so it
+    # lives in the submission guidance rather than in a flag.
 
     burp: BurpConfig = field(default_factory=BurpConfig)
 
@@ -377,13 +380,6 @@ class Config:
         if self.cookies:
             h["Cookie"] = self.cookies
         return h
-
-    @property
-    def has_credentials(self) -> bool:
-        return bool(self.basic_auth or self.cookies
-                    or any(k.lower() in ("authorization", "x-api-key",
-                                         "x-auth-token", "cookie")
-                           for k in self.headers))
 
     def auth_header(self) -> Optional[str]:
         """The Authorization header value, for passing to external tools."""

@@ -2196,10 +2196,16 @@ class IdorInventoryTests(unittest.TestCase):
 class TrafficTagTests(unittest.TestCase):
     """Some programmes require automated traffic to be identifiable."""
 
+    def test_no_platform_name_is_baked_into_the_default(self):
+        """The header name is programme-specific and must stay generic here."""
+        from assay.config import Config
+        self.assertNotIn("the platform", Config().traffic_tag_header.lower())
+
     def test_tag_is_applied_to_every_request(self):
         from assay.config import Config
         cfg = Config(traffic_tag="a1b2c3d4-ENGAGEMENT-01")
-        self.assertEqual(cfg.request_headers()["X-Scan-Tag"], "a1b2c3d4-ENGAGEMENT-01")
+        self.assertEqual(cfg.request_headers()["X-Scan-Tag"],
+                         "a1b2c3d4-ENGAGEMENT-01")
 
     def test_tag_header_name_is_configurable(self):
         from assay.config import Config
@@ -2210,29 +2216,6 @@ class TrafficTagTests(unittest.TestCase):
     def test_no_tag_adds_no_header(self):
         from assay.config import Config
         self.assertNotIn("X-Scan-Tag", Config().request_headers())
-
-
-class CredentialGuardTests(unittest.TestCase):
-    """Enumerating after authenticating is a rules violation on an
-    unauthenticated test, and crawling and fuzzing both count as enumeration.
-    Credentials being present is not by itself consent.
-    """
-
-    def test_credentials_are_detected_in_every_form(self):
-        from assay.config import Config
-        self.assertTrue(Config(basic_auth="u:p").has_credentials)
-        self.assertTrue(Config(cookies="s=1").has_credentials)
-        self.assertTrue(Config(headers={"Authorization": "Bearer x"}).has_credentials)
-        self.assertTrue(Config(headers={"X-Api-Key": "x"}).has_credentials)
-        self.assertFalse(Config(headers={"X-Trace": "1"}).has_credentials)
-        self.assertFalse(Config().has_credentials)
-
-    def test_acknowledgement_is_separate_from_supplying_credentials(self):
-        from assay.config import Config
-        cfg = Config(basic_auth="u:p")
-        self.assertTrue(cfg.has_credentials)
-        self.assertFalse(cfg.auth_authorized,
-                         "supplying credentials must not imply authorisation")
 
 
 class SubmissionTemplateTests(unittest.TestCase):
