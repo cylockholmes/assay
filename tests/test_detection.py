@@ -2483,5 +2483,93 @@ class UnifiedInputTests(unittest.TestCase):
         self.assertTrue(r.warnings)
 
 
+class MistypedInputTests(unittest.TestCase):
+    """A filename that is not there must not become a scan target.
+
+    Being in the wrong directory produced a scan of one host named
+    'hosts.txt', which resolved to nothing and reported no findings -
+    indistinguishable from a clean result.
+    """
+
+    def test_a_data_file_extension_is_never_a_hostname(self):
+        from assay.targets import classify
+        for name in ("hosts.txt", "scope.json", "targets.csv", "list.yaml"):
+            self.assertEqual(classify(name), "", name)
+
+    def test_a_missing_file_is_reported_not_scanned(self):
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["tinflood-hosts-in-scope.txt"])
+        self.assertEqual(r.targets, [])
+        self.assertTrue(r.skipped)
+        self.assertTrue(any("does not exist" in w for w in r.warnings))
+
+    def test_a_cidr_is_not_mistaken_for_a_path(self):
+        """The slash in 10.20.0.0/24 must not trigger the missing-file check."""
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["10.20.0.0/24,app.example.com"])
+        self.assertEqual(r.targets, ["10.20.0.0/24", "app.example.com"])
+        self.assertEqual(r.skipped, [])
+
+    def test_a_url_is_not_mistaken_for_a_path(self):
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["https://a.example.com/x"])
+        self.assertEqual(r.targets, ["https://a.example.com/x"])
+
+    def test_real_short_tlds_still_parse(self):
+        from assay.targets import classify
+        for host in ("a.co", "example.io", "x.dev"):
+            self.assertEqual(classify(host), "host", host)
+
+
+class InventoryTests(unittest.TestCase):
+    """A clean scan and a scan that reached nothing must not look the same."""
+
+    def _store(self, with_assets=True):
+        import os, tempfile
+        from assay.store import Store
+        s = Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+        s.start_run("standard", ["x"])
+        if with_assets:
+            s.save_host("10.0.0.5", "10.0.0.5", {"ports": [
+                {"port": 22, "service": "ssh", "product": "OpenSSH",
+                 "version": "8.9"},
+                {"port": 443, "service": "https", "product": "nginx",
+                 "version": "1.24"}]})
+            s.save_host("10.0.0.6", "10.0.0.6", {"ports": []})
+            s.save_web("https://10.0.0.5/", "10.0.0.5", 443, 200, "Portal",
+                       "nginx", ["Next.js"], {})
+        return s
+
+    def test_report_lists_hosts_services_and_endpoints(self):
+        import os, tempfile
+        from assay import report
+        s = self._store()
+        html = open(report.build(s, {"hosts": 2, "web": 1, "requests": 10,
+                                     "duration": 5},
+                                 os.path.join(tempfile.mkdtemp(), "r.html"))).read()
+        for expected in ("What was found", "10.0.0.5", "443/https", "nginx",
+                         "Live web endpoints", "Next.js", "22/ssh"):
+            self.assertIn(expected, html, expected)
+
+    def test_report_omits_the_section_when_nothing_was_found(self):
+        import os, tempfile
+        from assay import report
+        s = self._store(with_assets=False)
+        html = open(report.build(s, {"hosts": 0, "web": 0, "requests": 0,
+                                     "duration": 1},
+                                 os.path.join(tempfile.mkdtemp(), "r.html"))).read()
+        self.assertNotIn("What was found", html)
+
+    def test_hosts_with_no_open_ports_are_not_listed_as_services(self):
+        import os, tempfile
+        from assay import report
+        s = self._store()
+        html = open(report.build(s, {"hosts": 2, "web": 1, "requests": 10,
+                                     "duration": 5},
+                                 os.path.join(tempfile.mkdtemp(), "r.html"))).read()
+        row = html[html.index("What was found"):]
+        self.assertNotIn("10.0.0.6", row.split("Live web endpoints")[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

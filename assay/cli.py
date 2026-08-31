@@ -20,7 +20,7 @@ from assay import report as report_mod
 from rich.text import Text
 
 from assay.ui import (Dashboard, SEV_STYLE, console, detail as show_detail,
-                      summary, tool_table)
+                      inventory, summary, tool_table)
 
 EPILOG = """\
 examples:
@@ -511,6 +511,7 @@ def cmd_scan(args) -> int:
             return 2
 
     assets = engine.assets()
+    inventory(engine.store)
     summary(engine.store, assets)
 
     ai_result = None

@@ -279,6 +279,28 @@ Two checks find surface DNS never advertises:
   directly with the right Host header. If the same application answers without
   the edge headers, every control implemented at the edge is bypassable.
 
+## What was found, before what was wrong
+
+Every run lists the asset inventory first — hosts, their open ports with
+service and version, and the live web endpoints with status, title, server and
+detected stack. It appears in the terminal and in the report.
+
+```
+                        Hosts and services
+ host             ip               open  services
+ 174.78.188.100   174.78.188.100      3  22/ssh (OpenSSH 8.9p1), 443/https
+                                         (nginx 1.24.0), 8443/https-alt
+ 174.78.188.101   174.78.188.101      1  3389/ms-wbt-server (Microsoft
+                                         Terminal Services)
+  1 host(s) had no open ports
+```
+
+This exists because a scan that says only *"no findings"* is indistinguishable
+from a scan that never reached the targets — which is exactly how a broken
+target list looks. With the inventory, "there was nothing wrong" and "there was
+nothing there" are different outcomes, and the empty-result message says which
+one happened.
+
 ## Working while it scans
 
 The report is written from the first finding and refreshed every few seconds
