@@ -2384,5 +2384,104 @@ class TargetFileTests(unittest.TestCase):
         self.assertTrue(r.warnings)
 
 
+class UnifiedInputTests(unittest.TestCase):
+    """One argument defines both what is scanned and what may be reached.
+
+    Requiring a target list *and* a separate scope file means keeping two
+    things in step by hand; the moment they diverge, either something goes
+    untested or something receives a request it should not.
+    """
+
+    def _files(self):
+        import json, os, tempfile
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "hosts.txt"), "w") as fh:
+            fh.write("# In Scope\napp.example.com\n*.corp.example.com\n"
+                     "10.20.0.0/24\n\n## Out of Scope\nvpn.example.com\n")
+        burp = {"target": {"scope": {"advanced_mode": True,
+                "include": [{"enabled": True, "file": "^/.*",
+                             "host": r"^app\.example\.com$"}],
+                "exclude": [{"enabled": True, "file": "^/.*",
+                             "host": r"^vpn\.example\.com$"}]}}}
+        with open(os.path.join(d, "scope.json"), "w") as fh:
+            json.dump(burp, fh)
+        return d
+
+    def test_inline_comma_separated(self):
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["10.20.0.0/24,app.example.com"])
+        self.assertEqual(r.targets, ["10.20.0.0/24", "app.example.com"])
+
+    def test_inline_space_separated(self):
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["a.example.com", "b.example.com"])
+        self.assertEqual(r.targets, ["a.example.com", "b.example.com"])
+
+    def test_a_txt_file(self):
+        import os
+        from assay.targets import resolve_inputs
+        r = resolve_inputs([os.path.join(self._files(), "hosts.txt")])
+        self.assertIn("app.example.com", r.targets)
+        self.assertIn("vpn.example.com", r.excluded)
+
+    def test_a_json_file(self):
+        import os
+        from assay.targets import resolve_inputs
+        r = resolve_inputs([os.path.join(self._files(), "scope.json")])
+        self.assertEqual(r.source_format, "burp")
+        self.assertIn("app.example.com", r.targets)
+
+    def test_files_and_inline_values_mix(self):
+        import os
+        from assay.targets import resolve_inputs
+        d = self._files()
+        r = resolve_inputs([os.path.join(d, "scope.json"), "extra.example.com"])
+        self.assertIn("app.example.com", r.targets)
+        self.assertIn("extra.example.com", r.targets)
+        self.assertIn("burp", r.source_format)
+
+    def test_scope_is_derived_and_actually_enforces(self):
+        """Without a separate scope file the scan must still be constrained."""
+        from assay.config import Scope
+        from assay.targets import as_scope, resolve_inputs
+        allow, deny = as_scope(resolve_inputs(["app.example.com"]))
+        s = Scope(allow=allow, deny=deny)
+        self.assertFalse(s.permissive, "a derived scope must not be permissive")
+        self.assertTrue(s.allows("app.example.com"))
+        self.assertFalse(s.allows("evil.example.net"))
+
+    def test_wildcards_widen_scope_without_being_scanned(self):
+        from assay.config import Scope
+        from assay.targets import as_scope, resolve_inputs
+        r = resolve_inputs(["app.example.com,*.corp.example.com"])
+        allow, deny = as_scope(r)
+        s = Scope(allow=allow, deny=deny)
+        self.assertTrue(s.allows("anything.corp.example.com"),
+                        "a wildcard must widen scope")
+        self.assertIn("*.corp.example.com", r.targets)
+
+    def test_exclusions_in_the_input_reach_the_scope(self):
+        import os
+        from assay.config import Scope
+        from assay.targets import as_scope, resolve_inputs
+        r = resolve_inputs([os.path.join(self._files(), "hosts.txt")])
+        allow, deny = as_scope(r)
+        s = Scope(allow=allow, deny=deny)
+        self.assertTrue(s.allows("app.example.com"))
+        self.assertFalse(s.allows("vpn.example.com"))
+
+    def test_a_url_target_puts_its_host_in_scope(self):
+        from assay.config import Scope
+        from assay.targets import as_scope, resolve_inputs
+        allow, deny = as_scope(resolve_inputs(["https://shop.example.com/cart"]))
+        self.assertTrue(Scope(allow=allow, deny=deny).allows("shop.example.com"))
+
+    def test_nothing_recognisable_is_reported(self):
+        from assay.targets import resolve_inputs
+        r = resolve_inputs(["this is just prose"])
+        self.assertEqual(r.targets, [])
+        self.assertTrue(r.warnings)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
