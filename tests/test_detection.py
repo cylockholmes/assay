@@ -2256,5 +2256,133 @@ class SubmissionTemplateTests(unittest.TestCase):
             self.assertTrue(vec.match(t["cvss"]), "%s bad vector" % name)
 
 
+class TargetFileTests(unittest.TestCase):
+    """Scope arrives as a Burp export, a host list, a CSV, or a pasted table.
+
+    A dropped host is a missed finding and a stray one is a request somewhere
+    it should not go, so the parser is tested on the shapes that actually turn
+    up rather than a tidy list.
+    """
+
+    def _parse(self, text):
+        from assay.targets import parse
+        return parse(text)
+
+    # -- classification --------------------------------------------------
+    def test_kinds_are_recognised(self):
+        from assay.targets import classify
+        cases = {"10.0.0.1": "ip", "10.0.0.0/24": "cidr", "example.com": "host",
+                 "*.example.com": "wildcard", "https://a.example.com/x": "url",
+                 "10.0.0.1-10.0.0.5": "range", "not a target": ""}
+        for token, kind in cases.items():
+            self.assertEqual(classify(token), kind, token)
+
+    # -- the bug that ate wildcards ---------------------------------------
+    def test_a_wildcard_keeps_its_asterisk(self):
+        """Bullet-stripping must not turn *.example.com into .example.com."""
+        from assay.targets import _clean
+        self.assertEqual(_clean("*.corp.example.com"), "*.corp.example.com")
+        self.assertEqual(_clean("- api.example.com"), "api.example.com")
+        self.assertEqual(_clean("* legacy.example.com"), "legacy.example.com")
+        r = self._parse("app.example.com\n*.corp.example.com\n")
+        self.assertIn("*.corp.example.com", r.targets)
+
+    # -- sections ----------------------------------------------------------
+    def test_out_of_scope_sections_become_exclusions(self):
+        r = self._parse("# In Scope\napp.example.com\n\n"
+                        "## Out of Scope\nvpn.example.com\n")
+        self.assertEqual(r.targets, ["app.example.com"])
+        self.assertEqual(r.excluded, ["vpn.example.com"])
+
+    def test_a_bang_prefix_excludes_a_single_line(self):
+        r = self._parse("app.example.com\n!vpn.example.com\n")
+        self.assertEqual(r.targets, ["app.example.com"])
+        self.assertEqual(r.excluded, ["vpn.example.com"])
+
+    # -- messy shapes ------------------------------------------------------
+    def test_a_pasted_markdown_table_is_read(self):
+        r = self._parse("| Host | Type |\n| --- | --- |\n"
+                        "| api.example.com | web |\n| 10.30.1.5 | host |\n")
+        self.assertEqual(r.targets, ["api.example.com", "10.30.1.5"])
+
+    def test_a_csv_is_read_and_junk_columns_ignored(self):
+        r = self._parse("host,env,owner\napi.example.com,prod,team-a\n"
+                        "10.40.0.7,prod,team-b\n")
+        self.assertEqual(r.targets, ["api.example.com", "10.40.0.7"])
+
+    def test_ranges_expand(self):
+        r = self._parse("10.0.0.1-10.0.0.4\n")
+        self.assertEqual(r.targets,
+                         ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"])
+        self.assertEqual(self._parse("10.0.0.1-4\n").targets,
+                         ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"])
+
+    def test_an_absurd_range_is_refused_not_expanded(self):
+        r = self._parse("10.0.0.1-10.9.0.1\n")
+        self.assertEqual(r.targets, [])
+        self.assertTrue(r.skipped)
+
+    def test_duplicates_collapse(self):
+        r = self._parse("api.example.com\nAPI.example.com\napi.example.com\n")
+        self.assertEqual(len(r.targets), 1)
+
+    def test_dangerous_entries_are_refused(self):
+        r = self._parse("0.0.0.0/0\nlocalhost\napp.example.com\n")
+        self.assertEqual(r.targets, ["app.example.com"])
+        self.assertEqual(len(r.skipped), 2)
+
+    def test_a_very_large_cidr_warns(self):
+        r = self._parse("10.0.0.0/8\n")
+        self.assertIn("10.0.0.0/8", r.targets)
+        self.assertTrue(any("65,000" in w or "scope" in w for w in r.warnings))
+
+    # -- Burp --------------------------------------------------------------
+    BURP_ADVANCED = ('{"target":{"scope":{"advanced_mode":true,'
+                     '"include":[{"enabled":true,"file":"^/.*","host":"^app\\\\.example\\\\.com$"},'
+                     '{"enabled":true,"file":"^/.*","host":"^.*\\\\.corp\\\\.example\\\\.com$"},'
+                     '{"enabled":false,"file":"^/.*","host":"^off\\\\.example\\\\.com$"}],'
+                     '"exclude":[{"enabled":true,"file":"^/.*","host":"^vpn\\\\.example\\\\.com$"}]}}}')
+
+    def test_burp_advanced_regexes_become_hosts(self):
+        r = self._parse(self.BURP_ADVANCED)
+        self.assertEqual(r.source_format, "burp")
+        self.assertIn("app.example.com", r.targets)
+        self.assertIn("*.corp.example.com", r.targets)
+        self.assertIn("vpn.example.com", r.excluded)
+
+    def test_disabled_burp_entries_are_ignored(self):
+        r = self._parse(self.BURP_ADVANCED)
+        self.assertNotIn("off.example.com", r.targets)
+
+    def test_a_burp_path_exclusion_never_drops_the_host(self):
+        """Burp excludes are path-scoped; assay's scope is host-level.
+
+        Converting one into a host exclusion would silently remove an in-scope
+        target, which is the worst possible failure for a scope file.
+        """
+        raw = ('{"target":{"scope":{"advanced_mode":false,'
+               '"include":[{"enabled":true,"prefix":"https://shop.example.com/"}],'
+               '"exclude":[{"enabled":true,"prefix":"https://shop.example.com/logout"}]}}}')
+        r = self._parse(raw)
+        self.assertFalse(any("shop.example.com" in e for e in r.excluded),
+                         "a path exclusion removed the whole host")
+        self.assertTrue(any("shop.example.com" in t for t in r.targets))
+        self.assertTrue(r.skipped, "the unapplied rule must be reported")
+
+    def test_scope_object_agrees_with_the_target_parser(self):
+        from assay.config import Scope
+        s = Scope(allow=["app.example.com", "*.corp.example.com"],
+                  deny=["vpn.example.com"])
+        self.assertTrue(s.allows("app.example.com"))
+        self.assertTrue(s.allows("anything.corp.example.com"))
+        self.assertFalse(s.allows("vpn.example.com"))
+        self.assertFalse(s.allows("elsewhere.example.net"))
+
+    def test_an_unrecognisable_file_says_so(self):
+        r = self._parse("just some prose with no hosts in it at all\n")
+        self.assertEqual(r.targets, [])
+        self.assertTrue(r.warnings)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -481,6 +481,59 @@ assay scan 10.20.0.0/24 -n CODENAME --scope scope.txt --proxied-ports 80,443
 
 `--no-gateway-filter` disables both if you would rather see everything.
 
+## Getting scope in
+
+`-f` and `--scope` both accept whatever the engagement actually handed you.
+The format is detected; you do not declare it.
+
+| Input | Handled |
+|---|---|
+| **Burp project scope JSON** | advanced mode (host regexes recovered to hostnames and wildcards) and simple mode (URL prefixes). Disabled entries ignored |
+| **Plain host list** | IPs, CIDRs, domains, wildcards, URLs, `host:port` |
+| **IP ranges** | `10.0.0.1-10.0.0.9` and `10.0.0.1-9` expand |
+| **CSV / TSV** | the host column is picked out; other columns ignored |
+| **Pasted tables** | markdown pipes and multi-space columns |
+| **Bullet or numbered lists** | `- host`, `* host`, `1. host` |
+| **Section headings** | anything under *Out of Scope* / *Excluded* / *Do not test* becomes an exclusion |
+| **Per-line exclusion** | a `!` prefix |
+
+Check what it understood before you scan:
+
+```bash
+assay scope scope.txt
+```
+
+```
+  format detected: burp
+
+      target                     kind
+   1  app.example.com            host
+   2  10.20.0.0/24               cidr
+
+  scope only (not directly scannable; use --expand to enumerate)
+    *.corp.example.com
+
+  excluded
+    vpn.example.com
+
+  skipped
+    0.0.0.0/0 (too broad to be a target)
+```
+
+One file can supply both targets and scope — `assay scan -f scope.txt` derives
+the scope from the same file, so nothing has to be kept in step by hand.
+
+Two behaviours worth knowing, because both prevent a silent mistake:
+
+- **A wildcard is scope, not a target.** `*.corp.example.com` is not something
+  you can connect to, so it constrains the scan without being scanned. Add
+  `--expand` to enumerate it into real hosts.
+- **A Burp path exclusion is reported, not applied.** Burp can exclude
+  `https://shop.example.com/logout`; assay's scope is host-level and cannot
+  express "everything but that path". Recording it as a host exclusion would
+  drop the whole target from the scan, so assay tells you the rule could not be
+  applied instead of quietly narrowing your scope.
+
 ## Scope enforcement
 
 Every outbound request — assay's own and every external tool's — is checked
@@ -704,7 +757,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-**155 tests in 43 classes**, all offline. Every detection test asserts **both** directions — the check
+**204 tests**, all offline. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).

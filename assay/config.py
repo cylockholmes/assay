@@ -30,6 +30,16 @@ class ScopeError(Exception):
     pass
 
 
+# Burp scope entries that cannot be expressed host-level, recorded during the
+# most recent parse so the CLI can report them rather than dropping them
+# silently. A path-scoped exclusion is the common case.
+_UNREPRESENTABLE: List[str] = []
+
+
+def unrepresentable_rules() -> List[str]:
+    return list(_UNREPRESENTABLE)
+
+
 @dataclass
 class Scope:
     """Allow/deny lists for hosts, wildcards and CIDRs."""
@@ -90,13 +100,14 @@ class Scope:
             return None
         if not isinstance(doc, dict):
             return None
+        del _UNREPRESENTABLE[:]
         scope = (doc.get("target") or {}).get("scope")
         if scope is None:
             scope = doc.get("scope") if isinstance(doc.get("scope"), dict) else None
         if not isinstance(scope, dict):
             return None
 
-        def convert(entries) -> List[str]:
+        def convert(entries, is_exclude: bool = False) -> List[str]:
             out: List[str] = []
             for e in entries or []:
                 if not isinstance(e, dict) or e.get("enabled") is False:
@@ -104,20 +115,35 @@ class Scope:
                 # Simple mode: a URL prefix.
                 prefix = e.get("prefix")
                 if prefix:
-                    host = urlsplit(prefix).hostname
-                    if host:
-                        out.append(host)
+                    parts = urlsplit(prefix)
+                    host = parts.hostname
+                    if not host:
+                        continue
+                    # Burp excludes are path-scoped; assay's scope is host-level
+                    # and cannot express "everything but /logout". Converting a
+                    # path exclusion into a host exclusion would silently drop
+                    # an in-scope target, so only a whole-host exclusion carries
+                    # across. Narrower ones are reported and ignored.
+                    if is_exclude and parts.path not in ("", "/"):
+                        _UNREPRESENTABLE.append(prefix)
+                        continue
+                    out.append(host)
                     continue
                 # Advanced mode: the host field is a regex.
                 host_rx = e.get("host")
                 if not host_rx:
                     continue
+                if is_exclude:
+                    f = e.get("file")
+                    if f and f not in ("^/.*", "^/", ".*", "^.*$"):
+                        _UNREPRESENTABLE.append("%s %s" % (host_rx, f))
+                        continue
                 plain = cls._plain_host(host_rx)
                 out.append(plain if plain else "re:" + host_rx)
             return out
 
         allow = convert(scope.get("include"))
-        deny = convert(scope.get("exclude"))
+        deny = convert(scope.get("exclude"), is_exclude=True)
         if not allow and not deny:
             return None
         return cls(allow=allow, deny=deny)

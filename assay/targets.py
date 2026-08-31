@@ -1,0 +1,258 @@
+"""Reading targets out of whatever the engagement actually gave you.
+
+Scope arrives in inconsistent shapes: a Burp project scope export, a plain list
+of hosts, a CSV, or a block of text pasted out of a portal complete with
+headings and table pipes. Making the operator reformat that by hand is where
+mistakes enter - a dropped host is a missed finding, and a stray one is a
+request somewhere it should not go.
+
+This normalises all of it, reports what it understood, and refuses to guess
+where guessing would be dangerous.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
+
+# A line that is a section heading rather than a target. Anything under an
+# out-of-scope heading is treated as an exclusion.
+OUT_OF_SCOPE_HEADING = re.compile(
+    r"^\W*(?:out[\s\-_]*of[\s\-_]*scope|excluded?|not[\s\-_]*in[\s\-_]*scope|"
+    r"do[\s\-_]*not[\s\-_]*test|prohibited)\b", re.I)
+IN_SCOPE_HEADING = re.compile(
+    r"^\W*(?:in[\s\-_]*scope|scope|targets?|included?|assets?)\b\W*$", re.I)
+
+# Tokens that look like a host, an address, a range or a URL.
+HOSTLIKE = re.compile(
+    r"^(?:\*\.)?(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?\.)+"
+    r"[A-Za-z]{2,24}\.?$")
+IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+CIDR = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$")
+IPRANGE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3}|\d{1,3})$")
+
+# Cell separators in pasted tables and CSVs.
+SPLIT = re.compile(r"[,;|\t]+|\s{2,}")
+
+# Never scannable, and almost always a paste accident.
+DANGEROUS = {"0.0.0.0/0", "::/0", "*", "*.*", ".", "localhost", "127.0.0.1"}
+
+
+@dataclass
+class ParsedTargets:
+    targets: List[str] = field(default_factory=list)
+    excluded: List[str] = field(default_factory=list)
+    source_format: str = "list"
+    skipped: List[str] = field(default_factory=list)   # (value, reason)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.targets)
+
+
+def _clean(token: str) -> str:
+    t = token.strip().strip("\"'`,;")
+    # Bullets require whitespace after the marker: '- host' is a bullet,
+    # '*.example.com' is a wildcard host and must keep its asterisk.
+    t = re.sub(r"^[-+\u2022]\s+|^\*\s+", "", t)
+    t = re.sub(r"^\d+[.)]\s+", "", t)              # numbered list
+    t = t.strip().rstrip(".")
+    return t
+
+
+def classify(token: str) -> str:
+    """What kind of target is this, if any?"""
+    t = token.strip()
+    if not t:
+        return ""
+    if "://" in t:
+        return "url"
+    if CIDR.match(t):
+        return "cidr"
+    if IPRANGE.match(t):
+        return "range"
+    if IPV4.match(t):
+        try:
+            ipaddress.ip_address(t)
+            return "ip"
+        except ValueError:
+            return ""
+    if ":" in t and t.count(":") >= 2:
+        try:
+            ipaddress.ip_address(t.split("/")[0])
+            return "ipv6"
+        except ValueError:
+            pass
+    host = t.split(":")[0]
+    if HOSTLIKE.match(host):
+        return "wildcard" if host.startswith("*.") else "host"
+    return ""
+
+
+def expand_range(token: str) -> List[str]:
+    """Turn 10.0.0.1-10.0.0.9 or 10.0.0.1-9 into individual addresses."""
+    m = IPRANGE.match(token.strip())
+    if not m:
+        return []
+    start, end = m.group(1), m.group(2)
+    if "." not in end:
+        end = start.rsplit(".", 1)[0] + "." + end
+    try:
+        a, b = ipaddress.ip_address(start), ipaddress.ip_address(end)
+    except ValueError:
+        return []
+    if int(b) < int(a) or int(b) - int(a) > 4096:
+        return []
+    return [str(ipaddress.ip_address(i)) for i in range(int(a), int(b) + 1)]
+
+
+def from_burp(raw: str) -> Optional[ParsedTargets]:
+    """Derive scannable targets from a Burp project scope export."""
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    scope = (doc.get("target") or {}).get("scope")
+    if not isinstance(scope, dict):
+        scope = doc.get("scope") if isinstance(doc.get("scope"), dict) else None
+    if not isinstance(scope, dict):
+        return None
+
+    out = ParsedTargets(source_format="burp")
+    for key, bucket in (("include", out.targets), ("exclude", out.excluded)):
+        for e in scope.get(key) or []:
+            if not isinstance(e, dict) or e.get("enabled") is False:
+                continue
+            prefix = e.get("prefix")
+            if prefix:
+                parts = urlsplit(prefix)
+                if not parts.hostname:
+                    continue
+                # A path-scoped Burp exclusion cannot be expressed against a
+                # host-level target list. Recording it as a host exclusion
+                # would drop an in-scope target entirely, so report instead.
+                if key == "exclude" and parts.path not in ("", "/"):
+                    out.skipped.append(
+                        "%s (excludes a path, not a host - assay's scope is "
+                        "host-level, so this rule cannot be applied)" % prefix)
+                    continue
+                port = ":%d" % parts.port if parts.port else ""
+                bucket.append("%s://%s%s/" % (parts.scheme or "https",
+                                              parts.hostname, port))
+                continue
+            host = _host_from_regex(e.get("host") or "")
+            if host:
+                bucket.append(host)
+            elif e.get("host"):
+                out.skipped.append("%s (host pattern too general to scan)"
+                                   % e.get("host"))
+    return out
+
+
+def _host_from_regex(pattern: str) -> str:
+    """Recover a hostname from Burp's advanced-mode regex, where possible."""
+    p = (pattern or "").strip()
+    if not p:
+        return ""
+    p = p.lstrip("^").rstrip("$")
+    wildcard = False
+    for lead in (r".*\.", r"[^.]*\.", r".*"):
+        if p.startswith(lead):
+            p = p[len(lead):]
+            wildcard = True
+            break
+    p = p.replace(r"\.", ".").replace(r"\-", "-")
+    # Anything with regex metacharacters left is not a literal host.
+    if re.search(r"[\\\[\]\(\)\|\+\?\*\{\}]", p):
+        return ""
+    if not p or not HOSTLIKE.match(p):
+        return ""
+    return ("*." + p) if wildcard else p
+
+
+def parse(raw: str) -> ParsedTargets:
+    """Read targets from any of the shapes scope actually arrives in."""
+    burp = from_burp(raw)
+    if burp is not None:
+        return burp
+
+    out = ParsedTargets()
+    excluding = False
+    seen: Set[str] = set()
+
+    for line in raw.splitlines():
+        line = line.rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+
+        # Comments, but '#' can also start a markdown heading we care about.
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if OUT_OF_SCOPE_HEADING.match(heading):
+                excluding = True
+            elif IN_SCOPE_HEADING.match(heading):
+                excluding = False
+            continue
+        if OUT_OF_SCOPE_HEADING.match(stripped):
+            excluding = True
+            continue
+        if IN_SCOPE_HEADING.match(stripped):
+            excluding = False
+            continue
+        # Markdown table rule.
+        if re.match(r"^\|?[\s:\-|]+\|?$", stripped):
+            continue
+
+        # An explicit per-line exclusion marker wins over the section.
+        line_excluded = excluding
+        if stripped[0] in "!" or stripped.startswith("- !"):
+            line_excluded = True
+            stripped = stripped.lstrip("!-").strip()
+
+        for token in SPLIT.split(stripped):
+            tok = _clean(token)
+            if not tok:
+                continue
+            if tok.lower() in DANGEROUS:
+                out.skipped.append("%s (too broad to be a target)" % tok)
+                continue
+            kind = classify(tok)
+            if not kind:
+                continue
+            if kind == "range":
+                expanded = expand_range(tok)
+                if not expanded:
+                    out.skipped.append("%s (range too large or malformed)" % tok)
+                    continue
+                for ip in expanded:
+                    if ip not in seen:
+                        seen.add(ip)
+                        (out.excluded if line_excluded else out.targets).append(ip)
+                continue
+            key = tok.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            (out.excluded if line_excluded else out.targets).append(tok)
+
+    if any(classify(t) == "cidr" and int(t.split("/")[1]) < 16
+           for t in out.targets if CIDR.match(t)):
+        out.warnings.append(
+            "a CIDR larger than /16 is present - that is over 65,000 hosts, so "
+            "confirm it is really in scope before scanning it")
+    if not out.targets:
+        out.warnings.append("no targets recognised in this file")
+    return out
+
+
+def load(path: str) -> ParsedTargets:
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return parse(fh.read())
