@@ -639,17 +639,44 @@ class Engine:
                      % (found, leads))
 
     def _source_params(self) -> None:
-        """Ask arjun for parameters no page ever emits."""
+        """Ask arjun for parameters no page ever emits.
+
+        Each call can take minutes (arjun_params has a 300s timeout), and this
+        used to run every (origin, url) pair one at a time with no progress
+        output in between -- on a large target list that reads as a frozen
+        dashboard for tens of minutes even though it is working. Run the
+        calls concurrently and report as they land.
+        """
         budget = 4 if self.cfg.profile == "standard" else 12
-        enriched = 0
+        tasks: List[Tuple[str, str]] = []
         for origin, bucket in self.ctx.urls.items():
             # Prefer parameterless URLs - those are the ones a crawl cannot help.
-            targets = [u for u in bucket if "?" not in u][:budget]
-            for i, u in enumerate(targets):
-                names = tools.arjun_params(u, self.tune)
+            for u in [b for b in bucket if "?" not in b][:budget]:
+                tasks.append((origin, u))
+        if not tasks:
+            return
+        self.ctx.say("urls", "arjun: checking %d endpoint(s) for hidden params"
+                     % len(tasks))
+        enriched = done = 0
+        with ThreadPoolExecutor(max_workers=min(6, self.tune["concurrency"])) as pool:
+            futs = {pool.submit(tools.arjun_params, u, self.tune): (origin, u)
+                    for origin, u in tasks}
+            for fut in as_completed(futs):
+                origin, u = futs[fut]
+                done += 1
+                if done % 10 == 0 or done == len(tasks):
+                    self.ctx.say("urls", "arjun: %d/%d checked" % (done, len(tasks)))
+                try:
+                    names = fut.result()
+                except Exception:
+                    continue
                 if not names:
                     continue
-                idx = bucket.index(u)
+                bucket = self.ctx.urls[origin]
+                try:
+                    idx = bucket.index(u)
+                except ValueError:
+                    continue
                 bucket[idx] = urlsrc.with_params(u, names[:8])
                 enriched += 1
         if enriched:
