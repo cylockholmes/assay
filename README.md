@@ -30,11 +30,9 @@ Then open a new shell (or `source ~/.bashrc`) so `~/.local/bin` and
 assay doctor
 ```
 
-Set up your scope and run the first scan:
+Run the first scan. The target is also the scope:
 
 ```bash
-cp scope.example.txt scope.txt
-nano scope.txt          # paste the program's in-scope hosts
 assay scan 10.20.0.0/24 -n "CODENAME" --open
 ```
 
@@ -73,7 +71,7 @@ assay install              # install everything missing, after confirming
 ### Everyday commands
 
 ```bash
-assay scan <target> -n NAME --scope scope.txt --open   # scan
+assay scan <target> -n NAME --open                      # scan
 assay diff -o ./assay-out                              # what changed since last run
 assay show 3                                           # finding #3 in full
 assay submit 3                                         # submission draft
@@ -289,7 +287,7 @@ the last host is swept. Scroll position and filters survive the refresh, and
 auto-refresh can be paused from the page.
 
 ```bash
-assay scan 10.20.0.0/24 -n "ZESTY WOMBAT" --scope scope.txt --open
+assay scan 10.20.0.0/24 -n "ZESTY WOMBAT" --open
 ```
 
 The report itself is a triage surface, not a document: search, severity and
@@ -476,7 +474,7 @@ On top of that, assay identifies the gateway's default page two ways:
   filtering a real pool away is worse than the noise it saves.
 
 ```bash
-assay scan 10.20.0.0/24 -n CODENAME --scope scope.txt --proxied-ports 80,443
+assay scan 10.20.0.0/24 -n CODENAME --proxied-ports 80,443
 ```
 
 `--no-gateway-filter` disables both if you would rather see everything.
@@ -658,7 +656,7 @@ list. If anything survives, the run aborts and prints the residue — it does no
 send.
 
 ```bash
-assay scan target.tld --scope scope.txt --ai --ai-dry-run   # write payload, send nothing
+assay scan target.tld --ai --ai-dry-run   # write the payload, send nothing
 cat assay-out/ai-payload.json                                # read exactly what would go
 assay ai --out ./assay-out                                    # send it
 ```
