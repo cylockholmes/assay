@@ -256,42 +256,67 @@ def proxy_args(tool: str, proxy: Optional[str]) -> List[str]:
 
 
 def nmap_port_args(spec: str) -> List[str]:
-    """Translate a port spec, including 'top-N+extra,ports' forms."""
+    """Translate the base of a port spec ('top-N+extra,ports' forms included).
+
+    Only ever returns one port-selection method. nmap treats --top-ports and
+    -p given together as an INTERSECTION, not a union (nmap/nmap#447), so any
+    extra ports outside the top-N list would silently vanish if appended here.
+    Extra ports are scanned separately -- see nmap_extra_port_args().
+    """
     if spec == "all":
         return ["-p-"]
-    extra = ""
-    if "+" in spec:
-        spec, _, extra = spec.partition("+")
-    if spec == "top-100":
-        args = ["--top-ports", "100"]
-    elif spec == "top-1000":
-        args = ["--top-ports", "1000"]
-    else:
-        return ["-p", ",".join(x for x in (spec, extra) if x)]
-    # nmap accepts --top-ports alongside -p; the union is scanned.
-    return args + (["-p", extra] if extra else [])
+    base = spec.partition("+")[0]
+    if base == "top-100":
+        return ["--top-ports", "100"]
+    if base == "top-1000":
+        return ["--top-ports", "1000"]
+    return ["-p", base]
+
+
+def nmap_extra_port_args(spec: str) -> Optional[List[str]]:
+    """Ports appended after '+' in a 'top-N+extra,ports' spec, as -p args."""
+    if "+" not in spec or spec == "all":
+        return None
+    extra = spec.partition("+")[2]
+    return ["-p", extra] if extra else None
+
+
+def _merge_ports(dest: Dict[str, List[Port]], src: Dict[str, List[Port]]) -> None:
+    for host, ports in src.items():
+        existing = dest.setdefault(host, [])
+        seen = {(p.port, p.proto) for p in existing}
+        for p in ports:
+            if (p.port, p.proto) not in seen:
+                existing.append(p)
+                seen.add((p.port, p.proto))
 
 
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
               out_dir: str = ".") -> Dict[str, List[Port]]:
     """Service/version scan. Returns host -> open ports."""
-    xml_path = os.path.join(out_dir, "raw", "nmap.xml")
-    os.makedirs(os.path.dirname(xml_path), exist_ok=True)
-    cmd = [
+    base_args = [
         "nmap", "-Pn", "-sV", "--version-intensity", "5",
         "-T3" if tune.get("constrained") else "-T4",
         "--max-retries", "2", "--host-timeout", "20m",
         "--min-rate", str(tune.get("nmap_min_rate", 300)),
-        "-oX", xml_path,
     ]
-    cmd += nmap_port_args(port_spec)
-    cmd += hosts
-    # nmap runs inside WSL under the bridge, so -oX must name a path it can see.
-    cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
-    proc = run(cmd, timeout=timeout)
-    if not os.path.exists(xml_path):
-        return {}
-    return parse_nmap_xml(xml_path)
+
+    def _run(port_args: List[str], xml_name: str) -> Dict[str, List[Port]]:
+        xml_path = os.path.join(out_dir, "raw", xml_name)
+        os.makedirs(os.path.dirname(xml_path), exist_ok=True)
+        cmd = list(base_args) + ["-oX", xml_path] + port_args + hosts
+        # nmap runs inside WSL under the bridge, so -oX must name a path it can see.
+        cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
+        run(cmd, timeout=timeout)
+        if not os.path.exists(xml_path):
+            return {}
+        return parse_nmap_xml(xml_path)
+
+    results = _run(nmap_port_args(port_spec), "nmap.xml")
+    extra_args = nmap_extra_port_args(port_spec)
+    if extra_args:
+        _merge_ports(results, _run(extra_args, "nmap-extra.xml"))
+    return results
 
 
 def nmap_script_scan(host: str, ports: List[int], scripts: List[str],
@@ -383,20 +408,33 @@ def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
 
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                timeout: float = 900.0) -> Dict[str, List[int]]:
+    # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
+    # on naabu to union -top-ports with a -p list in one invocation is
+    # unverified, and nmap's equivalent combination turned out to be an
+    # intersection (nmap/nmap#447), silently dropping the extra ports.
     base, _, extra = port_spec.partition("+")
     spec = {"top-100": ["-top-ports", "100"],
             "top-1000": ["-top-ports", "1000"],
             "all": ["-p", "-"]}.get(base, ["-p", base])
+
+    def _run(port_args: List[str]) -> Dict[str, List[int]]:
+        cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
+               "-c", str(tune.get("concurrency", 10))] + port_args + ["-list", "-"]
+        found: Dict[str, List[int]] = {}
+        for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
+            h = obj.get("host") or obj.get("ip")
+            p = obj.get("port")
+            if h and p:
+                found.setdefault(str(h), []).append(int(p))
+        return found
+
+    found = _run(spec)
     if extra:
-        spec += ["-p", extra]
-    cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
-           "-c", str(tune.get("concurrency", 10))] + spec + ["-list", "-"]
-    found: Dict[str, List[int]] = {}
-    for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
-        h = obj.get("host") or obj.get("ip")
-        p = obj.get("port")
-        if h and p:
-            found.setdefault(str(h), []).append(int(p))
+        for h, ports in _run(["-p", extra]).items():
+            existing = found.setdefault(h, [])
+            for p in ports:
+                if p not in existing:
+                    existing.append(p)
     return found
 
 

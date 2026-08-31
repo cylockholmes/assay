@@ -1829,15 +1829,31 @@ class AiSurfaceTests(unittest.TestCase):
     def test_ai_ports_are_always_scanned(self):
         """11434 and 8265 are outside nmap's top-1000; a default scan misses them."""
         from assay.engine import AI_PORTS, Engine
-        from assay.tools import nmap_port_args
+        from assay.tools import nmap_extra_port_args, nmap_port_args
         for profile_spec in ("top-100", "top-1000"):
             spec = Engine._with_ai_ports(profile_spec)
-            args = " ".join(nmap_port_args(spec))
+            # --top-ports and -p combined in one nmap call is an intersection,
+            # not a union (nmap/nmap#447), so the AI ports must show up in the
+            # separate extra-ports invocation rather than the base one.
+            args = " ".join(nmap_port_args(spec) + (nmap_extra_port_args(spec) or []))
             for port in (11434, 8265, 6333):
                 self.assertIn(str(port), args,
                               "port %d absent from %s" % (port, profile_spec))
         self.assertEqual(Engine._with_ai_ports("all"), "all",
                          "a full scan needs no additions")
+
+    def test_nmap_never_combines_top_ports_with_dash_p(self):
+        """nmap treats --top-ports + -p as an intersection, not a union (nmap/nmap#447)."""
+        from assay.engine import Engine
+        from assay.tools import nmap_extra_port_args, nmap_port_args
+        for profile_spec in ("top-100", "top-1000"):
+            spec = Engine._with_ai_ports(profile_spec)
+            base = nmap_port_args(spec)
+            self.assertNotIn("-p", base,
+                             "base args must not mix --top-ports with -p: %s" % base)
+            extra = nmap_extra_port_args(spec)
+            self.assertEqual(extra[0], "-p")
+            self.assertNotIn("--top-ports", extra)
 
     def test_service_ports_are_covered_by_discovery(self):
         from assay.engine import AI_PORTS, WEB_PORTS
