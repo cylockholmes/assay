@@ -256,3 +256,79 @@ def parse(raw: str) -> ParsedTargets:
 def load(path: str) -> ParsedTargets:
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         return parse(fh.read())
+
+
+def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
+    """Read targets from anything the operator typed or pointed at.
+
+    One argument covers every case, because requiring a target list *and* a
+    separate scope file means keeping two things in step by hand, and the
+    moment they diverge either something goes untested or something gets a
+    request it should not have.
+
+      assay scan 10.20.0.0/24,app.example.com
+      assay scan targets.txt
+      assay scan burp-scope.json
+      assay scan a.example.com b.example.com
+
+    A value that names an existing file is read as one; anything else is
+    treated as an inline list, split on commas or whitespace.
+    """
+    import os
+
+    merged = ParsedTargets()
+    formats: List[str] = []
+    seen: Set[str] = set()
+
+    def absorb(part: ParsedTargets) -> None:
+        for t in part.targets:
+            if t.lower() not in seen:
+                seen.add(t.lower())
+                merged.targets.append(t)
+        merged.excluded += [e for e in part.excluded if e not in merged.excluded]
+        merged.skipped += part.skipped
+        merged.warnings += [w for w in part.warnings if w not in merged.warnings]
+        formats.append(part.source_format)
+
+    for value in values:
+        value = (value or "").strip()
+        if not value:
+            continue
+        if os.path.isfile(value):
+            try:
+                absorb(load(value))
+            except OSError as exc:
+                merged.warnings.append("cannot read %s: %s" % (value, exc))
+            continue
+        # Inline: commas or whitespace, so both shell styles work.
+        absorb(parse(value.replace(",", "\n")))
+
+    merged.warnings = [w for w in merged.warnings
+                       if w != "no targets recognised in this file"]
+    if not merged.targets:
+        merged.warnings.append(
+            "nothing recognisable as a target - pass hosts, IPs or CIDRs "
+            "directly, or a path to a host list or Burp scope export")
+    merged.source_format = "+".join(sorted(set(formats))) or "none"
+    return merged
+
+
+def as_scope(parsed: ParsedTargets) -> "Tuple[List[str], List[str]]":
+    """Allow/deny lists implied by what was parsed.
+
+    Wildcards belong in the allow list even though they are not scannable:
+    they are how a programme says 'anything under here', and dropping them
+    would put a discovered subdomain out of scope.
+    """
+    allow = list(parsed.targets)
+    for t in parsed.targets:
+        if "://" in t:
+            host = urlsplit(t).hostname
+            if host and host not in allow:
+                allow.append(host)
+    deny: List[str] = []
+    for e in parsed.excluded:
+        host = urlsplit(e).hostname if "://" in e else e
+        if host and host not in deny:
+            deny.append(host)
+    return allow, deny

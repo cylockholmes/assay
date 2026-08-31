@@ -53,8 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- scan --------------------------------------------------------------
     s = sub.add_parser("scan", help="run a scan", formatter_class=argparse.RawDescriptionHelpFormatter)
-    s.add_argument("targets", nargs="*", help="hosts, CIDRs or URLs")
-    s.add_argument("-f", "--targets-file", help="file with one target per line")
+    s.add_argument("targets", nargs="*", metavar="TARGET",
+                   help="what to scan, and by default the scope too: hosts, "
+                        "IPs, CIDRs or URLs (comma or space separated), or the "
+                        "path to a host list, CSV or Burp scope export. Mix "
+                        "freely.")
+    s.add_argument("-f", "--targets-file", help=argparse.SUPPRESS)
     s.add_argument("-p", "--profile", choices=sorted(PROFILES), default="standard")
     s.add_argument("-o", "--out", default="./assay-out",
                    help="root output directory; each engagement gets its own subfolder")
@@ -62,7 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="engagement codename - names the output folder and the report")
     s.add_argument("--flat", action="store_true",
                    help="write straight into --out instead of a per-engagement subfolder")
-    s.add_argument("--scope", help="scope file (allow list; '!' prefix excludes)")
+    s.add_argument("--scope", metavar="FILE_OR_LIST",
+                   help="override the scope, when what may be reached differs "
+                        "from what is being scanned. Defaults to the targets.")
 
     s.add_argument("-c", "--concurrency", type=int, help="worker threads (auto by default)")
     s.add_argument("-r", "--rate", type=float, help="global requests/second ceiling")
@@ -228,7 +234,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sc = sub.add_parser("scope",
                         help="show what assay reads from a scope or target file")
-    sc.add_argument("path", help="Burp scope JSON, host list, CSV, or pasted table")
+    sc.add_argument("input", nargs="+", metavar="TARGET",
+                    help="the same thing you would pass to scan: inline hosts, "
+                         "or a host list, CSV or Burp scope export")
 
     sub.add_parser("modules", help="list detection modules")
     return p
@@ -296,57 +304,65 @@ def open_run(path: str, what: str = "results"):
 
 
 def make_config(args) -> Config:
-    targets: List[str] = list(getattr(args, "targets", []) or [])
-    if getattr(args, "targets_file", None):
-        from assay import targets as tload
-        try:
-            parsed = tload.load(args.targets_file)
-        except OSError as exc:
-            console.print("[red]cannot read target file:[/red] %s" % exc)
-            raise SystemExit(2)
+    from assay import targets as tload
 
-        # A wildcard is scope, not something you can connect to. Keep it out of
-        # the scan list and say so, rather than failing to resolve it later.
-        wildcards = [x for x in parsed.targets if x.startswith("*.")]
-        scannable = [x for x in parsed.targets if not x.startswith("*.")]
-        targets += scannable
-
-        console.print("  [dim]%s: %d target(s) from a %s file[/dim]"
-                      % (os.path.basename(args.targets_file), len(scannable),
-                         parsed.source_format))
-        if wildcards:
-            console.print("  [dim]%d wildcard(s) kept as scope only (%s) - "
-                          "add --expand to enumerate them[/dim]"
-                          % (len(wildcards), ", ".join(wildcards[:3])))
-        if parsed.excluded:
-            console.print("  [dim]%d excluded by the file[/dim]" % len(parsed.excluded))
-        for s in parsed.skipped[:5]:
-            console.print("  [yellow]skipped[/yellow] %s" % s)
-        for w in parsed.warnings:
-            console.print("  [yellow]%s[/yellow]" % w)
-
-        # The file's own scope survives even when no --scope is given.
-        if not getattr(args, "scope", None) and (parsed.targets or parsed.excluded):
-            args._file_scope = (parsed.targets + wildcards, parsed.excluded)
-    if not targets:
-        console.print("[red]no targets given[/red]  (positional args or -f file)")
+    raw = list(getattr(args, "targets", []) or [])
+    if getattr(args, "targets_file", None):          # historical alias
+        raw.append(args.targets_file)
+    if not raw:
+        console.print("[red]nothing to scan.[/red]")
+        console.print("  [dim]assay scan 10.20.0.0/24,app.example.com[/dim]")
+        console.print("  [dim]assay scan targets.txt[/dim]")
+        console.print("  [dim]assay scan burp-scope.json[/dim]")
         raise SystemExit(2)
 
-    scope = Scope()
-    fs = getattr(args, "_file_scope", None)
-    if fs:
-        scope = Scope(allow=list(fs[0]), deny=list(fs[1]))
+    parsed = tload.resolve_inputs(raw)
+
+    # A wildcard constrains the scan without being scannable itself.
+    wildcards = [x for x in parsed.targets if x.startswith("*.")]
+    targets = [x for x in parsed.targets if not x.startswith("*.")]
+
+    allow, deny = tload.as_scope(parsed)
+    scope = Scope(allow=allow, deny=deny)
+    scope_source = "the targets"
+
+    # --scope only matters when reachable differs from scanned.
     if getattr(args, "scope", None):
-        try:
-            scope = Scope.from_file(args.scope)
-        except OSError as exc:
-            console.print("[red]cannot read scope file:[/red] %s" % exc)
-            raise SystemExit(2)
-        from assay.config import unrepresentable_rules
-        for rule in unrepresentable_rules()[:5]:
-            console.print("  [yellow]scope rule not applied[/yellow] %s "
-                          "[dim](path-scoped; assay's scope is host-level)[/dim]"
-                          % rule)
+        if os.path.isfile(args.scope):
+            try:
+                scope = Scope.from_file(args.scope)
+            except OSError as exc:
+                console.print("[red]cannot read scope file:[/red] %s" % exc)
+                raise SystemExit(2)
+            from assay.config import unrepresentable_rules
+            for rule in unrepresentable_rules()[:5]:
+                console.print("  [yellow]scope rule not applied[/yellow] %s "
+                              "[dim](path-scoped; assay's scope is host-level)[/dim]"
+                              % rule)
+        else:
+            override = tload.parse(args.scope.replace(",", "\n"))
+            a, d = tload.as_scope(override)
+            scope = Scope(allow=a, deny=d)
+        scope_source = args.scope
+
+    if not targets:
+        console.print("[red]nothing scannable in that input.[/red]")
+        for w in parsed.warnings:
+            console.print("  [yellow]%s[/yellow]" % w)
+        raise SystemExit(2)
+
+    console.print("  [dim]%d target(s) from %s; scope from %s[/dim]"
+                  % (len(targets), parsed.source_format, scope_source))
+    if wildcards:
+        console.print("  [dim]%d wildcard(s) in scope but not scanned (%s) - "
+                      "--expand enumerates them[/dim]"
+                      % (len(wildcards), ", ".join(wildcards[:3])))
+    if deny:
+        console.print("  [dim]%d exclusion(s) applied[/dim]" % len(deny))
+    for sk in parsed.skipped[:5]:
+        console.print("  [yellow]skipped[/yellow] %s" % sk)
+    for w in parsed.warnings:
+        console.print("  [yellow]%s[/yellow]" % w)
 
     tune = env.autotune()
     cfg = Config(
@@ -1251,15 +1267,11 @@ def cmd_diff(args) -> int:
 
 def cmd_scope(args) -> int:
     from assay import targets as tload
-    from assay.config import Scope, unrepresentable_rules
+    from assay.config import Scope
     from rich.table import Table
-    try:
-        parsed = tload.load(args.path)
-    except OSError as exc:
-        console.print("[red]cannot read file:[/red] %s" % exc)
-        return 2
+    parsed = tload.resolve_inputs(args.input)
 
-    console.print("\n  format detected: [bold]%s[/bold]" % parsed.source_format)
+    console.print("\n  read as: [bold]%s[/bold]" % parsed.source_format)
     wild = [t for t in parsed.targets if t.startswith("*.")]
     scannable = [t for t in parsed.targets if not t.startswith("*.")]
 
@@ -1292,8 +1304,20 @@ def cmd_scope(args) -> int:
     for w in parsed.warnings:
         console.print("\n  [yellow]%s[/yellow]" % w)
 
-    console.print("\n  [dim]scan these with:[/dim]  assay scan -f %s --scope %s"
-                  % (args.path, args.path))
+    allow, deny = tload.as_scope(parsed)
+    s = Scope(allow=allow, deny=deny)
+    console.print("\n  [bold]resulting scope[/bold]  %d allowed, %d denied%s"
+                  % (len(allow), len(deny),
+                     "" if not s.permissive else "  [yellow](permissive!)[/yellow]"))
+    probe = [t for t in scannable[:2]] + ["example.invalid"]
+    for h in probe:
+        host = h.split("://")[-1].split("/")[0].split(":")[0]
+        ok = s.allows(host)
+        console.print("    %s %s" % ("[green]allow[/green]" if ok
+                                     else "[red]block[/red]", host))
+
+    console.print("\n  [dim]scan it with:[/dim]  assay scan %s"
+                  % " ".join(args.input))
     return 0
 
 

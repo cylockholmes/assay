@@ -35,7 +35,7 @@ Set up your scope and run the first scan:
 ```bash
 cp scope.example.txt scope.txt
 nano scope.txt          # paste the program's in-scope hosts
-assay scan 10.20.0.0/24 -n "CODENAME" --scope scope.txt --open
+assay scan 10.20.0.0/24 -n "CODENAME" --open
 ```
 
 `--open` launches the report as soon as it starts filling in, and it keeps
@@ -481,58 +481,74 @@ assay scan 10.20.0.0/24 -n CODENAME --scope scope.txt --proxied-ports 80,443
 
 `--no-gateway-filter` disables both if you would rather see everything.
 
-## Getting scope in
+## Targets and scope are one argument
 
-`-f` and `--scope` both accept whatever the engagement actually handed you.
-The format is detected; you do not declare it.
+You give assay one thing. It is both what gets scanned and, by default, what
+may be reached.
+
+```bash
+assay scan 10.20.0.0/24,app.example.com      # inline, comma separated
+assay scan a.example.com b.example.com       # or space separated
+assay scan targets.txt                       # a host list
+assay scan burp-scope.json                   # a Burp scope export
+assay scan burp-scope.json extra.example.com # mix them
+```
+
+A value that names an existing file is read as one; anything else is an inline
+list. The format is detected, not declared:
 
 | Input | Handled |
 |---|---|
 | **Burp project scope JSON** | advanced mode (host regexes recovered to hostnames and wildcards) and simple mode (URL prefixes). Disabled entries ignored |
-| **Plain host list** | IPs, CIDRs, domains, wildcards, URLs, `host:port` |
+| **Host list** | IPs, CIDRs, domains, wildcards, URLs, `host:port` |
 | **IP ranges** | `10.0.0.1-10.0.0.9` and `10.0.0.1-9` expand |
-| **CSV / TSV** | the host column is picked out; other columns ignored |
-| **Pasted tables** | markdown pipes and multi-space columns |
-| **Bullet or numbered lists** | `- host`, `* host`, `1. host` |
-| **Section headings** | anything under *Out of Scope* / *Excluded* / *Do not test* becomes an exclusion |
-| **Per-line exclusion** | a `!` prefix |
+| **CSV / TSV** | the host column is picked out |
+| **Pasted tables** | markdown pipes, multi-space columns |
+| **Lists** | `- host`, `* host`, `1. host` |
+| **Headings** | anything under *Out of Scope* / *Excluded* / *Do not test* becomes an exclusion |
+| **Per line** | a `!` prefix excludes |
 
-Check what it understood before you scan:
+Check what it understood before you run anything:
 
 ```bash
-assay scope scope.txt
+assay scope 10.20.0.0/24,app.example.com,*.corp.example.com
 ```
 
 ```
-  format detected: burp
-
-      target                     kind
-   1  app.example.com            host
-   2  10.20.0.0/24               cidr
+  read as: list
+      target           kind
+   1  10.20.0.0/24     cidr
+   2  app.example.com  host
 
   scope only (not directly scannable; use --expand to enumerate)
     *.corp.example.com
 
-  excluded
-    vpn.example.com
-
-  skipped
-    0.0.0.0/0 (too broad to be a target)
+  resulting scope  3 allowed, 0 denied
+    allow 10.20.0.0
+    allow app.example.com
+    block example.invalid
 ```
 
-One file can supply both targets and scope — `assay scan -f scope.txt` derives
-the scope from the same file, so nothing has to be kept in step by hand.
+`--scope` still exists, for the case it is actually for: when what may be
+reached differs from what is being scanned. It takes the same formats.
 
-Two behaviours worth knowing, because both prevent a silent mistake:
+```bash
+assay scan app.example.com --scope programme-scope.json
+```
 
-- **A wildcard is scope, not a target.** `*.corp.example.com` is not something
-  you can connect to, so it constrains the scan without being scanned. Add
-  `--expand` to enumerate it into real hosts.
+Three behaviours worth knowing, because each prevents a silent mistake:
+
+- **Scope is enforced by default.** There is no unscoped mode. Scanning
+  `app.example.com` will not follow a redirect to somewhere else, without you
+  having to remember a second file.
+- **A wildcard is scope, not a target.** `*.corp.example.com` cannot be
+  connected to, so it widens what is in scope without being scanned. `--expand`
+  enumerates it into real hosts.
 - **A Burp path exclusion is reported, not applied.** Burp can exclude
   `https://shop.example.com/logout`; assay's scope is host-level and cannot
   express "everything but that path". Recording it as a host exclusion would
-  drop the whole target from the scan, so assay tells you the rule could not be
-  applied instead of quietly narrowing your scope.
+  drop the whole target, so assay says the rule could not be applied rather
+  than quietly shrinking your scope.
 
 ## Scope enforcement
 
@@ -757,7 +773,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-**204 tests**, all offline. Every detection test asserts **both** directions — the check
+**214 tests**, all offline. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).
