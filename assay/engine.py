@@ -124,6 +124,12 @@ class Engine:
             self._stage_urls()
         # Content discovery runs after the other URL sources so it can add to
         # the same pool, and before the checks that consume it.
+        if self.cfg.opts.get("content_discovery") and self.ctx.web:
+            if not self.ctx.has("ffuf"):
+                self.ctx.say("probe", "content discovery skipped: ffuf not installed")
+            elif not tools.default_wordlist():
+                self.ctx.say("probe", "content discovery skipped: no wordlist found "
+                                      "(install seclists or dirb)")
         self._stage_modules("probe")
         self._stage_modules("analyze")
         if self.cfg.opts.get("active_web"):
