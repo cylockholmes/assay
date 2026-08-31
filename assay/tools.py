@@ -123,6 +123,25 @@ def _record(cmd: Sequence[str]) -> None:
             pass
 
 
+def _record_failure(cmd: Sequence[str], detail: str) -> None:
+    """Surface a nonzero exit or launch failure in activity.log.
+
+    A tool that exits nonzero (wrong flag for its installed version, missing
+    binary, etc.) previously vanished as a silent empty result -- the caller
+    saw "found nothing" with no way to tell that from "actually found
+    nothing". This makes that distinguishable without having to run the
+    command by hand.
+    """
+    if JOURNAL is None:
+        return
+    lines = [ln for ln in (detail or "").strip().splitlines() if ln.strip()]
+    tail = " | ".join(lines[-2:]) if lines else "(no output)"
+    try:
+        JOURNAL.note("FAILED  %s -- %s" % (cmd[0] if cmd else "?", tail[:300]))
+    except Exception:
+        pass
+
+
 def bridge(cmd: Sequence[str]) -> List[str]:
     """Prepend the WSL prefix when assay is hosted on Windows.
 
@@ -164,6 +183,8 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
             argv, input=stdin, capture_output=True, text=True,
             timeout=timeout, cwd=cwd,
         )
+        if p.returncode != 0:
+            _record_failure(cmd, p.stderr)
         return Proc(rc=p.returncode, out=p.stdout, err=p.stderr, cmd=list(cmd))
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout or ""
@@ -172,6 +193,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         return Proc(rc=-1, out=out, err="timeout after %ss" % timeout,
                     cmd=list(cmd), timed_out=True)
     except (OSError, ValueError) as exc:
+        _record_failure(cmd, str(exc))
         return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
 
 
@@ -180,12 +202,17 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     """Yield stdout lines as they arrive. Keeps peak memory flat."""
     env.augment_path()
     _record(cmd)
+    # A real file rather than a pipe for stderr: a chatty tool could otherwise
+    # fill a pipe's OS buffer and deadlock while we're only draining stdout.
+    stderr_buf = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
         proc = subprocess.Popen(
             bridge(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            stdout=subprocess.PIPE, stderr=stderr_buf, text=True, bufsize=1,
         )
-    except OSError:
+    except OSError as exc:
+        _record_failure(cmd, str(exc))
+        stderr_buf.close()
         return
     if stdin and proc.stdin:
         try:
@@ -204,6 +231,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        if proc.returncode:
+            stderr_buf.seek(0)
+            _record_failure(cmd, stderr_buf.read())
+        stderr_buf.close()
 
 
 def stream_json(cmd: Sequence[str], timeout: float = 900.0,
@@ -418,8 +449,16 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
             "all": ["-p", "-"]}.get(base, ["-p", base])
 
     def _run(port_args: List[str]) -> Dict[str, List[int]]:
+        # No -list/-host flag: naabu reads targets from stdin by default when
+        # neither is given. "-list -" does NOT mean "read stdin" here -- naabu
+        # 2.4.0 takes it literally and tries to open a file named "-", failing
+        # with "[FTL] Could not run enumeration: open -: no such file or
+        # directory" on stderr, which stream_json() never surfaces since it
+        # only looks for JSON on stdout. That silently turned every naabu scan
+        # into a no-op, and _stage_portscan() then trusted the empty result
+        # and returned without ever falling back to nmap.
         cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
-               "-c", str(tune.get("concurrency", 10))] + port_args + ["-list", "-"]
+               "-c", str(tune.get("concurrency", 10))] + port_args
         found: Dict[str, List[int]] = {}
         for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
             h = obj.get("host") or obj.get("ip")

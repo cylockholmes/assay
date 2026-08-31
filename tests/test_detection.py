@@ -1855,6 +1855,28 @@ class AiSurfaceTests(unittest.TestCase):
             self.assertEqual(extra[0], "-p")
             self.assertNotIn("--top-ports", extra)
 
+    def test_naabu_never_passes_list_dash_for_stdin(self):
+        """naabu 2.4.0 takes '-list -' literally and tries to open a file
+        named '-', failing with [FTL] Could not run enumeration: open -: no
+        such file or directory. It reads stdin by default with no -list/-host
+        flag at all, so that flag must never be emitted."""
+        from assay import tools
+        seen_cmds = []
+        original = tools.stream_json
+
+        def fake_stream_json(cmd, timeout=900.0, stdin=""):
+            seen_cmds.append(list(cmd))
+            return iter(())
+
+        tools.stream_json = fake_stream_json
+        try:
+            tools.naabu_scan(["10.0.0.1"], "top-1000", {})
+        finally:
+            tools.stream_json = original
+        self.assertTrue(seen_cmds)
+        for cmd in seen_cmds:
+            self.assertNotIn("-list", cmd, "naabu command must not pass -list: %s" % cmd)
+
     def test_service_ports_are_covered_by_discovery(self):
         from assay.engine import AI_PORTS, WEB_PORTS
         from assay.modules.ai_surface import load_services
