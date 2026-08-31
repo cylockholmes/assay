@@ -59,6 +59,8 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     if chains:
         parts.append(_chains_section(chains, findings))
 
+    parts.append(_inventory(store))
+
     for bucket in ("CHASE", "LOOK", "NOTE"):
         items = buckets.get(bucket) or []
         if not items:
@@ -119,6 +121,69 @@ def _live_script() -> str:
 })();
 </script>
 """
+
+
+def _inventory(store: Store) -> str:
+    """Hosts, services and live endpoints - what was found, before what was wrong.
+
+    Without this a clean scan and a scan that never reached anything look
+    identical in the report.
+    """
+    import json as _json
+    hosts = store.host_rows()
+    web = store.web_rows()
+    if not hosts and not web:
+        return ""
+
+    out = ['<section class="bucket"><h2>What was found <span class="count">'
+           '%d host(s), %d endpoint(s)</span></h2>'
+           '<p class="blurb">The asset inventory, independent of any finding.</p>'
+           % (len(hosts), len(web))]
+
+    rows = []
+    for h in hosts:
+        try:
+            ports = (_json.loads(h["data"] or "{}") or {}).get("ports") or []
+        except ValueError:
+            ports = []
+        if not ports:
+            continue
+        svc = []
+        for p in sorted(ports, key=lambda x: x.get("port", 0)):
+            label = "%s/%s" % (p.get("port"), p.get("service") or "?")
+            prod = " ".join(x for x in (p.get("product"), p.get("version")) if x)
+            svc.append("%s%s" % (label, " (%s)" % _e(prod) if prod else ""))
+        rows.append("<tr><td>%s</td><td>%s</td><td class=\"num\">%d</td>"
+                    "<td>%s</td></tr>"
+                    % (_e(h["host"]), _e(h["ip"] or "-"), len(ports),
+                       ", ".join(svc)))
+    if rows:
+        out.append('<div class="tw"><table><thead><tr><th>host</th><th>ip</th>'
+                   '<th>open</th><th>services</th></tr></thead><tbody>%s'
+                   '</tbody></table></div>' % "".join(rows))
+
+    wrows = []
+    for w in web:
+        try:
+            tech = ", ".join(_json.loads(w["tech"] or "[]")[:5])
+        except ValueError:
+            tech = ""
+        code = w["status"] or 0
+        cls = ("ok" if 200 <= code < 300 else
+               "warn" if code in (401, 403) else "dim")
+        wrows.append('<tr><td><a href="%s" target="_blank" rel="noreferrer '
+                     'noopener">%s</a></td><td class="num %s">%d</td>'
+                     '<td>%s</td><td>%s</td><td>%s</td></tr>'
+                     % (_e(w["url"]), _e(w["url"]), cls, code,
+                        _e((w["title"] or "")[:70]), _e(w["server"] or ""),
+                        _e(tech)))
+    if wrows:
+        out.append('<h3>Live web endpoints</h3>'
+                   '<div class="tw"><table><thead><tr><th>url</th><th>code</th>'
+                   '<th>title</th><th>server</th><th>tech</th></tr></thead>'
+                   '<tbody>%s</tbody></table></div>' % "".join(wrows))
+    out.append("</section>")
+    return "".join(out)
 
 
 def _toolbar(modules: List[str], total: int) -> str:
@@ -420,6 +485,9 @@ footer{padding:26px 32px;color:var(--dim);font-size:12px;border-top:1px solid va
 .s-duplicate,.s-ignored{background:#5f6368;color:#fff}
 .s-false-positive{background:#7a3510;color:#fff}
 .s-in-progress{background:#8a6a12;color:#fff}
+td.ok{color:#2f7a4d;font-weight:600}
+td.warn{color:#8a6a12;font-weight:600}
+td.dim{color:var(--dim)}
 .newbadge{background:#2f7a4d;color:#fff;border-radius:4px;padding:1px 7px;
   font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
 .modtag{background:var(--line);color:var(--dim);border-radius:4px;padding:1px 6px;font-size:11px}

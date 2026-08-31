@@ -152,6 +152,84 @@ class Dashboard:
 # --------------------------------------------------------------------------
 
 
+def inventory(store: Store, limit_hosts: int = 60) -> None:
+    """What was found, before what was wrong with it.
+
+    A scan that reports "no findings" and nothing else is indistinguishable
+    from a scan that never reached the targets - which is exactly how a broken
+    target list looks. Listing the hosts, their open services and the live web
+    endpoints separates "there was nothing wrong" from "there was nothing
+    there".
+    """
+    import json as _json
+
+    hosts = store.host_rows()
+    web = store.web_rows()
+    if not hosts and not web:
+        return
+
+    if hosts:
+        t = Table(box=ROUNDED, expand=True, title="Hosts and services",
+                  title_style="bold")
+        t.add_column("host", overflow="fold")
+        t.add_column("ip", style="dim", overflow="fold")
+        t.add_column("open", width=5, justify="right", style="dim")
+        t.add_column("services", overflow="fold")
+        shown = 0
+        for r in hosts:
+            try:
+                data = _json.loads(r["data"] or "{}")
+            except ValueError:
+                data = {}
+            ports = data.get("ports") or []
+            if not ports:
+                continue
+            desc = []
+            for p in sorted(ports, key=lambda x: x.get("port", 0)):
+                bits = [str(p.get("port"))]
+                svc = p.get("service") or ""
+                prod = " ".join(x for x in (p.get("product"), p.get("version")) if x)
+                if svc:
+                    bits.append("/" + svc)
+                label = "".join(bits)
+                if prod:
+                    label += " (%s)" % prod[:38]
+                desc.append(label)
+            t.add_row(r["host"], r["ip"] or "-", str(len(ports)), ", ".join(desc))
+            shown += 1
+            if shown >= limit_hosts:
+                break
+        if shown:
+            console.print(t)
+            silent = len(hosts) - shown
+            if silent > 0:
+                console.print("  [dim]%d host(s) had no open ports[/dim]" % silent)
+
+    if web:
+        t = Table(box=ROUNDED, expand=True, title="Live web endpoints",
+                  title_style="bold")
+        t.add_column("url", overflow="fold", style="cyan")
+        t.add_column("code", width=4, justify="right")
+        t.add_column("title", overflow="fold")
+        t.add_column("server", overflow="fold", style="dim")
+        t.add_column("tech", overflow="fold", style="dim")
+        for r in web[:limit_hosts]:
+            try:
+                tech = ", ".join(_json.loads(r["tech"] or "[]")[:4])
+            except ValueError:
+                tech = ""
+            code = r["status"] or 0
+            style = ("green" if 200 <= code < 300 else
+                     "yellow" if code in (401, 403) else
+                     "cyan" if 300 <= code < 400 else "dim")
+            t.add_row(r["url"], Text(str(code), style=style),
+                      (r["title"] or "")[:60], r["server"] or "", tech)
+        console.print(t)
+        if len(web) > limit_hosts:
+            console.print("  [dim]... and %d more endpoint(s)[/dim]"
+                          % (len(web) - limit_hosts))
+
+
 def summary(store: Store, assets: Dict, limit: int = 25) -> None:
     counts = store.counts()
     findings = store.findings(limit=limit)
@@ -167,9 +245,23 @@ def summary(store: Store, assets: Dict, limit: int = 25) -> None:
     t.add_column("score", width=5, justify="right", style="dim")
 
     if not findings:
-        console.print(Panel("No findings. Either the surface is clean, or the scope "
-                            "blocked everything - check 'assay doctor' and the scope file.",
-                            border_style="yellow"))
+        hosts = len([h for h in store.host_rows()])
+        web = len(store.web_rows())
+        if web or hosts:
+            console.print(Panel(
+                "No findings, but the scan did reach the targets: %d host(s) and "
+                "%d live web endpoint(s) are listed above. Nothing matched a "
+                "check - which on a hardened estate is a real result, not a "
+                "failure." % (hosts, web),
+                border_style="yellow"))
+        else:
+            console.print(Panel(
+                "Nothing was reached. No host answered and no endpoint was "
+                "found, so there was nothing to test.\n\n"
+                "Check in this order: [bold]assay scope <your input>[/bold] to "
+                "confirm the targets parsed; whether the hosts are reachable "
+                "from here; and [bold]assay doctor[/bold] for missing tools.",
+                border_style="red"))
         return
 
     for i, f in enumerate(findings, 1):

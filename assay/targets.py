@@ -38,6 +38,17 @@ IPRANGE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3}
 # Cell separators in pasted tables and CSVs.
 SPLIT = re.compile(r"[,;|\t]+|\s{2,}")
 
+# Extensions that are never a real TLD. Without this, "hosts.txt" satisfies the
+# hostname pattern and a mistyped filename becomes a scan target that silently
+# resolves to nothing.
+DATA_EXT = {"txt", "json", "csv", "tsv", "lst", "list", "md", "yaml", "yml",
+            "xml", "scope", "log", "bak", "old", "conf", "cfg", "ini", "dat",
+            "out", "tmp"}
+
+# A value meant as a filename: has a path separator, or a data-file extension.
+LOOKS_LIKE_PATH = re.compile(
+    r"[/\\]|\.(?:txt|json|csv|tsv|lst|list|md|yaml|yml|xml|scope)$", re.I)
+
 # Never scannable, and almost always a paste accident.
 DANGEROUS = {"0.0.0.0/0", "::/0", "*", "*.*", ".", "localhost", "127.0.0.1"}
 
@@ -90,6 +101,8 @@ def classify(token: str) -> str:
             pass
     host = t.split(":")[0]
     if HOSTLIKE.match(host):
+        if host.rsplit(".", 1)[-1].lower() in DATA_EXT:
+            return ""
         return "wildcard" if host.startswith("*.") else "host"
     return ""
 
@@ -299,6 +312,19 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
                 absorb(load(value))
             except OSError as exc:
                 merged.warnings.append("cannot read %s: %s" % (value, exc))
+            continue
+        # A value that is plainly meant to be a file but is not one would
+        # otherwise be silently accepted as a hostname, and the scan would run
+        # against a target that does not exist. Being in the wrong directory
+        # should say so, not quietly produce a scan of nothing.
+        # Only for values that are not already a valid target: a CIDR contains
+        # a slash and a hostname can end in anything, so the path heuristic must
+        # never override a successful classification.
+        if not classify(value.split(",")[0].strip()) and LOOKS_LIKE_PATH.search(value):
+            merged.warnings.append(
+                "%s looks like a file but does not exist here (cwd: %s)"
+                % (value, os.getcwd()))
+            merged.skipped.append("%s (no such file)" % value)
             continue
         # Inline: commas or whitespace, so both shell styles work.
         absorb(parse(value.replace(",", "\n")))
