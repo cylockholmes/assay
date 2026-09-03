@@ -2609,5 +2609,46 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("10.0.0.6", row.split("Live web endpoints")[0])
 
 
+class UnregisteredDomainRefTests(unittest.TestCase):
+    """refs_from_html() used to prepend '//' to every raw src/href value
+    before parsing it, which made urlsplit read a bare relative filename's
+    own name as its hostname -- "es-module-shims.js" came out with hostname
+    "es-module-shims.js", and registrable() turned that into apex domain
+    "es-module-shims.js" since ".js" looks like a two-label TLD, same as any
+    other bundler chunk name. That produced "critical: stored XSS equivalent"
+    findings for the site's own local assets. It also broke genuine
+    protocol-relative references ("//cdn.example.com/x.js") by doubling
+    their leading slashes down to four, so real foreign hosts went
+    undetected the whole time this bug existed.
+    """
+
+    def test_relative_script_src_is_not_treated_as_a_foreign_host(self):
+        from assay import domains
+        html = (
+            '<script src="es-module-shims.js"></script>'
+            '<script src="/static/chunk-4clctaj7.js"></script>'
+            '<script src="../shared/main-avxaiibk.js"></script>'
+            '<link rel="stylesheet" href="styles-sgxtug7q.css">'
+            '<link rel="icon" href="favicon.ico">'
+        )
+        refs = domains.refs_from_html(html, "app.example.com")
+        self.assertEqual(refs, {}, "relative same-origin refs must not be "
+                                    "read as foreign domains: %s" % refs)
+
+    def test_protocol_relative_script_src_is_detected(self):
+        from assay import domains
+        html = '<script src="//cdn.evil-cdn.tld/lib.js"></script>'
+        refs = domains.refs_from_html(html, "app.example.com")
+        self.assertIn("evil-cdn.tld", refs)
+        self.assertIn("script", refs["evil-cdn.tld"])
+
+    def test_absolute_script_src_is_still_detected(self):
+        from assay import domains
+        html = '<script src="https://cdn.evil-cdn.tld/lib.js"></script>'
+        refs = domains.refs_from_html(html, "app.example.com")
+        self.assertIn("evil-cdn.tld", refs)
+        self.assertIn("script", refs["evil-cdn.tld"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
