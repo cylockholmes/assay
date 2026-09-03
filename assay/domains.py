@@ -202,7 +202,19 @@ def refs_from_html(body: str, base_host: str) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = {}
     for kind, rx in REF_PATTERNS:
         for raw in rx.findall(body[:400000]):
-            host = urlsplit(raw if raw.startswith("http") else "//" + raw).hostname
+            raw = raw.strip()
+            # Only an absolute (scheme://host/...) or protocol-relative
+            # (//host/...) reference names a foreign host. Anything else -
+            # "chunk.js", "/api/tokens", "../shared/util.js" - resolves
+            # against the page's own origin and has no host of its own.
+            # Blindly prepending "//" to every raw value (as this used to)
+            # made urlsplit read a bare filename's own name as its hostname
+            # (e.g. "es-module-shims.js" -> hostname "es-module-shims.js"),
+            # and simultaneously broke genuine "//cdn.example.com/x.js"
+            # refs by doubling their leading slashes.
+            if not (raw.startswith("http") or raw.startswith("//")):
+                continue
+            host = urlsplit(raw).hostname
             apex = registrable(host or "")
             if not apex or apex == registrable(base_host) or apex in IGNORE_APEXES:
                 continue
