@@ -297,7 +297,7 @@ class Engine:
                 self.ctx.say("ports", "naabu found %d distinct open port(s); "
                                       "nmap -sV on those only" % len(open_ports))
                 spec = ",".join(str(p) for p in open_ports)
-                hosts = sorted(swept.keys()) or hosts
+                hosts = self._resolve_swept_hosts(self.ctx.targets, swept.keys()) or hosts
             else:
                 self.ctx.say("ports", "naabu found nothing open")
                 return
@@ -322,6 +322,32 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in ports]})
         self.ctx.say("ports", "%d open port(s) across %d host(s)" % (found, len(results)))
+
+    @staticmethod
+    def _resolve_swept_hosts(targets: List[Target], swept_keys) -> List[str]:
+        """Map naabu's result keys back to the target hostnames the rest of
+        the engine matches against.
+
+        naabu's JSON keys results by whatever it resolved each host to --
+        its own "ip" field in practice; naabu 2.4.0's JSON carries no "host"
+        key at all. Handing those keys straight to nmap_scan() as the next
+        host list, then matching nmap's results back to Target objects by
+        t.host, silently dropped any host whose nmap XML hostname (reverse
+        DNS, when it round-trips at all) didn't literally equal the naabu
+        key -- e.g. naabu found mta2/mta3/vass.y12.doe.gov's open ports
+        keyed by IP, nothing downstream ever mapped those IPs back to the
+        targets, and their entire port lists vanished. Resolve every swept
+        key back to the target's own .host up front, so nmap always runs
+        against (and results always match against) the same identifiers
+        the rest of the engine uses.
+        """
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        resolved = set()
+        for key in swept_keys:
+            t = by_host.get(key) or by_ip.get(key)
+            resolved.add(t.host if t else key)
+        return sorted(resolved)
 
     @staticmethod
     def _with_ai_ports(spec: str) -> str:

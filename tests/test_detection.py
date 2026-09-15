@@ -2609,6 +2609,48 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("10.0.0.6", row.split("Live web endpoints")[0])
 
 
+class SweptHostResolutionTests(unittest.TestCase):
+    """naabu's JSON results are keyed by whatever it resolved each host to
+    (its own "ip" field, in practice -- naabu 2.4.0's JSON carries no "host"
+    key at all). Engine._stage_portscan() used to hand those raw keys
+    straight to nmap_scan() as its next host list, then matched nmap's
+    results back to Target objects by t.host -- silently dropping any host
+    whose nmap XML hostname didn't literally equal the naabu key. That is
+    exactly what happened to mta2/mta3/vass.y12.doe.gov in a real scan:
+    naabu found their open ports (including port 25/smtp) keyed by IP,
+    nothing downstream ever mapped those IPs back to the targets, and their
+    entire port lists vanished from the report despite nmap having found
+    them."""
+
+    def test_ip_keyed_naabu_result_resolves_to_the_original_hostname(self):
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="mta2.y12.doe.gov", host="mta2.y12.doe.gov",
+                          ip="134.167.1.64"),
+                   Target(raw="mta3.y12.doe.gov", host="mta3.y12.doe.gov",
+                          ip="134.167.1.65")]
+        # naabu's JSON keys these by IP, not by the hostname assay gave it.
+        resolved = Engine._resolve_swept_hosts(targets, ["134.167.1.64", "134.167.1.65"])
+        self.assertEqual(resolved, ["mta2.y12.doe.gov", "mta3.y12.doe.gov"])
+
+    def test_hostname_keyed_naabu_result_passes_through(self):
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="app.example.com", host="app.example.com",
+                          ip="10.0.0.5")]
+        resolved = Engine._resolve_swept_hosts(targets, ["app.example.com"])
+        self.assertEqual(resolved, ["app.example.com"])
+
+    def test_unmatched_key_is_kept_rather_than_dropped(self):
+        """A key that matches no known target is still carried through --
+        losing it silently would be worse than scanning an unexpected host."""
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="app.example.com", host="app.example.com")]
+        resolved = Engine._resolve_swept_hosts(targets, ["10.9.9.9"])
+        self.assertEqual(resolved, ["10.9.9.9"])
+
+
 class UnregisteredDomainRefTests(unittest.TestCase):
     """refs_from_html() used to prepend '//' to every raw src/href value
     before parsing it, which made urlsplit read a bare relative filename's
