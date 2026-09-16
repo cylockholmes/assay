@@ -183,6 +183,9 @@ class TlsModule(Module):
         # SANs are recon gold: they name sibling hosts that are in scope.
         extra = [s for s in sans if s.lower() not in (host.lower(), "*." + host.lower())]
         if len(extra) > 1:
+            shown = ", ".join(extra[:20])
+            if len(extra) > 20:
+                shown += ", +%d more" % (len(extra) - 20)
             out.append(Finding(
                 title="Certificate SANs disclose %d additional hostnames" % len(extra),
                 target=where,
@@ -196,6 +199,12 @@ class TlsModule(Module):
                     "may be in scope and are often internal-only hosts that were never "
                     "meant to be enumerable - feed them back into the scan."
                 ),
+                # The names themselves are the point of this finding, so they
+                # go in detail (shown inline everywhere - the card body, and
+                # `assay show`) rather than only in evidence, which needs an
+                # extra expand step the terminal dashboard does not even
+                # offer.
+                detail=shown,
                 repro="openssl s_client -connect %s:%d | openssl x509 -noout -text | grep DNS:"
                       % (host, port),
                 tags=["tls", "recon"],
