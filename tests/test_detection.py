@@ -2609,6 +2609,115 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("10.0.0.6", row.split("Live web endpoints")[0])
 
 
+_NMAP_XML_SAMPLE = """<?xml version="1.0"?>
+<nmaprun>
+<host><status state="up"/>
+<address addr="134.167.1.64" addrtype="ipv4"/>
+<hostnames><hostname name="mta2.y12.doe.gov" type="PTR"/></hostnames>
+<ports><port protocol="tcp" portid="25">
+<state state="open"/><service name="smtp" product="IronPort smtpd"/>
+</port></ports></host>
+<host><status state="up"/>
+<address addr="134.167.1.92" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="443">
+<state state="open"/><service name="https" product=""/>
+</port></ports></host>
+</nmaprun>
+"""
+
+
+class ParseNmapXmlTests(unittest.TestCase):
+    """parse_nmap_xml() used to key its result by the reverse-DNS hostname
+    whenever nmap resolved one, discarding the address entirely. A target
+    given as a bare IP is matched back to its Target by IP, never by a
+    reverse-DNS name it never asked for -- so a host with a resolvable PTR
+    record had its entire port list keyed under a string nothing else in the
+    pipeline recognised, and silently vanished (mta2/mta3/vass.y12.doe.gov's
+    port 25/smtp results in a real scan, among others)."""
+
+    def _write_sample(self) -> str:
+        import os, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "nmap.xml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_NMAP_XML_SAMPLE)
+        return path
+
+    def test_keyed_by_address_even_when_a_hostname_resolves(self):
+        from assay import tools
+        path = self._write_sample()
+        result = tools.parse_nmap_xml(path)
+        self.assertIn("134.167.1.64", result,
+                      "must be keyed by the scanned address, not the PTR name")
+        self.assertNotIn("mta2.y12.doe.gov", result)
+        host = result["134.167.1.64"]
+        self.assertEqual([p.port for p in host.ports], [25])
+        self.assertEqual(host.hostnames, ["mta2.y12.doe.gov"])
+
+    def test_host_with_no_resolvable_hostname_still_keyed_by_address(self):
+        from assay import tools
+        path = self._write_sample()
+        result = tools.parse_nmap_xml(path)
+        self.assertIn("134.167.1.92", result)
+        self.assertEqual(result["134.167.1.92"].hostnames, [])
+        self.assertEqual([p.port for p in result["134.167.1.92"].ports], [443])
+
+
+class HostnameDiscoveryTests(unittest.TestCase):
+    """A bare-IP target whose port scan turns up a reverse-DNS hostname
+    should have that hostname added to scope and given a full scan of its
+    own -- it was discovered by testing an already-in-scope IP, not pulled
+    from an unrelated source."""
+
+    def test_discovered_hostname_on_an_ip_target_is_a_candidate(self):
+        from assay.config import Scope
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="134.167.1.64", host="134.167.1.64",
+                          ip="134.167.1.64",
+                          discovered_hostnames=["mta2.y12.doe.gov"])]
+        scope = Scope(allow=["134.167.1.64"])
+        candidates = Engine._hostname_discovery_candidates(targets, scope)
+        self.assertEqual(candidates, {"mta2.y12.doe.gov": "134.167.1.64"})
+
+    def test_discovered_hostname_on_a_hostname_target_is_not_a_candidate(self):
+        """A target already given as a hostname has nothing to 'discover' --
+        only a bare-IP target's reverse-DNS result is new information."""
+        from assay.config import Scope
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="app.example.com", host="app.example.com",
+                          ip="10.0.0.5",
+                          discovered_hostnames=["other-name.example.com"])]
+        scope = Scope(allow=["app.example.com"])
+        candidates = Engine._hostname_discovery_candidates(targets, scope)
+        self.assertEqual(candidates, {})
+
+    def test_already_known_hostname_is_not_re_added(self):
+        from assay.config import Scope
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [
+            Target(raw="10.0.0.5", host="10.0.0.5", ip="10.0.0.5",
+                  discovered_hostnames=["app.example.com"]),
+            Target(raw="app.example.com", host="app.example.com"),
+        ]
+        scope = Scope(allow=["10.0.0.5", "app.example.com"])
+        candidates = Engine._hostname_discovery_candidates(targets, scope)
+        self.assertEqual(candidates, {})
+
+    def test_explicit_deny_rule_is_never_overridden(self):
+        """Discovery extends scope; it must never fight an exclusion the
+        user set on purpose."""
+        from assay.config import Scope
+        from assay.engine import Engine
+        from assay.models import Target
+        targets = [Target(raw="10.0.0.5", host="10.0.0.5", ip="10.0.0.5",
+                          discovered_hostnames=["staging.example.com"])]
+        scope = Scope(allow=["10.0.0.5"], deny=["staging.example.com"])
+        candidates = Engine._hostname_discovery_candidates(targets, scope)
+        self.assertEqual(candidates, {})
+
+
 class SweptHostResolutionTests(unittest.TestCase):
     """naabu's JSON results are keyed by whatever it resolved each host to
     (its own "ip" field, in practice -- naabu 2.4.0's JSON carries no "host"
