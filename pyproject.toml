@@ -24,4 +24,4 @@ assay = "assay.cli:main"
 packages = ["assay", "assay.modules"]
 
 [tool.setuptools.package-data]
-assay = ["data/*.yaml"]
+assay = ["data/*.yaml", "data/*.xsl"]

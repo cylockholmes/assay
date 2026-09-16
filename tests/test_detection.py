@@ -2626,6 +2626,101 @@ _NMAP_XML_SAMPLE = """<?xml version="1.0"?>
 """
 
 
+class NmapReportSectionTests(unittest.TestCase):
+    """The report's Nmap tab: absent with nothing to show, present with the
+    raw command/XML embedded (escaped, since it lands inside plain HTML) and
+    the vendored NmapView.xsl embedded (verbatim, since a <script> block is
+    raw text and re-escaping it would corrupt what .textContent reads back)."""
+
+    def _report_with_raw(self, xml_name="nmap.xml", write_replay=True):
+        import os, tempfile
+        from assay import report
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        out_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
+        with open(os.path.join(out_dir, "raw", xml_name), "w", encoding="utf-8") as fh:
+            fh.write(_NMAP_XML_SAMPLE)
+        if write_replay:
+            with open(os.path.join(out_dir, "replay.sh"), "w", encoding="utf-8") as fh:
+                fh.write("#!/usr/bin/env bash\n"
+                        "nmap -Pn -sV --top-ports 1000 134.167.1.64 134.167.1.92\n"
+                        "httpx -silent -json -list -\n")
+        s = Store(os.path.join(out_dir, "assay.db"))
+        s.start_run("standard", ["134.167.1.64"])
+        s.add_finding(Finding(
+            title="x", target="x", severity="low", confidence="confirmed",
+            module="m", category="c", cwe="", impact="i", detail="d", repro="r",
+            evidence=[Evidence(kind="http", label="e", output="e")]))
+        out_path = os.path.join(out_dir, "r.html")
+        html = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
+                                     "duration": 1.0}, out_path)).read()
+        return html, out_dir
+
+    def test_section_absent_when_no_raw_nmap_data(self):
+        import os, tempfile
+        from assay import report
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        out_dir = tempfile.mkdtemp()
+        s = Store(os.path.join(out_dir, "assay.db"))
+        s.start_run("standard", ["t"])
+        s.add_finding(Finding(
+            title="x", target="x", severity="low", confidence="confirmed",
+            module="m", category="c", cwe="", impact="i", detail="d", repro="r",
+            evidence=[Evidence(kind="http", label="e", output="e")]))
+        html = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
+                                     "duration": 1.0},
+                                 os.path.join(out_dir, "r.html"))).read()
+        # "nmap-data" alone also matches the always-present CSS selector for
+        # this section, so check for the section element specifically.
+        self.assertNotIn('id="nmap-data"', html)
+
+    def test_section_present_with_raw_command_and_xml(self):
+        html, _ = self._report_with_raw()
+        self.assertIn('id="nmap-data"', html)
+        self.assertIn("nmap -Pn -sV --top-ports 1000", html)
+        self.assertNotIn("httpx", html.split('id="nmap-data"')[1].split("</section>")[0])
+        # the same XML lands twice: escaped inside a normal <pre> for
+        # display, and verbatim inside a <script id="nv-xml-..."> block for
+        # the client-side XSLT transform to read via .textContent.
+        self.assertIn("&lt;hostname name=", html, "the <pre> copy must be HTML-escaped")
+        pre_block = html.split("<pre>")[1].split("</pre>")[0]
+        self.assertNotIn("<hostname name=", pre_block)
+        script_block = html.split('id="nv-xml-nmap-xml"')[1].split("</script>")[0]
+        self.assertIn("<hostname name=", script_block,
+                      "the <script> copy must be verbatim, not escaped")
+
+    def test_vendored_xsl_is_embedded_unescaped_for_script_textcontent(self):
+        html, _ = self._report_with_raw()
+        self.assertIn('id="nv-xsl"', html)
+        # a real fragment of NmapView.xsl's own markup, verbatim (not
+        # &lt;-escaped) -- it must read back correctly via .textContent
+        self.assertIn("<xsl:stylesheet", html)
+
+    def test_xml_embedded_for_client_side_transform(self):
+        html, _ = self._report_with_raw()
+        self.assertIn('id="nv-xml-nmap-xml"', html)
+        self.assertIn("mta2.y12.doe.gov", html)
+
+    def test_both_base_and_extra_scans_get_separate_raw_blocks(self):
+        import os
+        html, out_dir = self._report_with_raw()
+        with open(os.path.join(out_dir, "raw", "nmap-extra.xml"), "w",
+                 encoding="utf-8") as fh:
+            fh.write(_NMAP_XML_SAMPLE)
+        from assay import report
+        from assay.store import Store
+        s = Store(os.path.join(out_dir, "assay.db"))
+        html2 = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
+                                      "duration": 1.0},
+                                  os.path.join(out_dir, "r.html"))).read()
+        self.assertIn('id="nv-xml-nmap-xml"', html2)
+        self.assertIn('id="nv-xml-nmap-extra-xml"', html2)
+        self.assertIn("base scan", html2)
+        self.assertIn("AI/ML port scan", html2)
+
+
 class ParseNmapXmlTests(unittest.TestCase):
     """parse_nmap_xml() used to key its result by the reverse-DNS hostname
     whenever nmap resolved one, discarding the address entirely. A target
