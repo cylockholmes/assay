@@ -92,6 +92,9 @@ REGISTRY: Dict[str, ToolSpec] = {
                                   "out-of-band callbacks for blind SSRF/RCE/XXE",
                                   "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
                                   go="github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"),
+    "xsltproc": ToolSpec("xsltproc",
+                         "renders nmap XML into NmapView's standalone HTML dashboard",
+                         "sudo apt install -y xsltproc", apt="xsltproc"),
 }
 
 
@@ -334,7 +337,7 @@ def _merge_nmap_hosts(dest: Dict[str, NmapHost], src: Dict[str, NmapHost]) -> No
 
 
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
-              out_dir: str = ".") -> Dict[str, NmapHost]:
+              out_dir: str = ".", xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
     """Service/version scan. Returns scanned address -> NmapHost.
 
     Always keyed by the address nmap actually scanned, never by a
@@ -343,6 +346,12 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
     matches these results back to a Target, or its entire port list
     silently disappears. Any hostname nmap did resolve is carried on
     NmapHost.hostnames instead, for the caller to act on deliberately.
+
+    xml_prefix names the raw XML file(s) this call writes (<prefix>.xml,
+    <prefix>-extra.xml for the AI-ports follow-up). A caller that invokes
+    this more than once per run (e.g. a follow-up scan of hostnames
+    discovered via reverse DNS) must pass a distinct prefix each time, or a
+    later call silently overwrites an earlier one's raw XML on disk.
     """
     base_args = [
         "nmap", "-Pn", "-sV", "--version-intensity", "5",
@@ -362,11 +371,136 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
             return {}
         return parse_nmap_xml(xml_path)
 
-    results = _run(nmap_port_args(port_spec), "nmap.xml")
+    results = _run(nmap_port_args(port_spec), "%s.xml" % xml_prefix)
     extra_args = nmap_extra_port_args(port_spec)
     if extra_args:
-        _merge_nmap_hosts(results, _run(extra_args, "nmap-extra.xml"))
+        _merge_nmap_hosts(results, _run(extra_args, "%s-extra.xml" % xml_prefix))
     return results
+
+
+# --------------------------------------------------------------------------
+# NmapView (https://nmapview.github.io) -- an XSLT stylesheet that renders
+# nmap's own XML into a standalone HTML dashboard via xsltproc.
+# --------------------------------------------------------------------------
+
+NMAPVIEW_XSL_URL = "https://github.com/dreizehnutters/NmapView/releases/latest/download/NmapView.xsl"
+_VENDORED_NMAPVIEW_XSL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "NmapView.xsl")
+
+
+def fetch_nmapview_xsl(dest_path: str, timeout: float = 15.0) -> str:
+    """Get a working copy of NmapView.xsl at dest_path.
+
+    Tries a fresh download from the NmapView release first, so a fix or
+    feature upstream is picked up without waiting for assay's own vendored
+    copy to be updated by hand. Falls back to the copy vendored with assay
+    (for an engagement with no network path to GitHub) when the download
+    fails, times out, or the download tool is not installed.
+
+    Returns dest_path on success from either source, or "" if neither
+    produced a usable file.
+    """
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    proc = run(["curl", "-fsSL", "-o", dest_path, NMAPVIEW_XSL_URL], timeout=timeout)
+    if proc.ok and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1000:
+        return dest_path
+    if os.path.exists(_VENDORED_NMAPVIEW_XSL):
+        try:
+            shutil.copyfile(_VENDORED_NMAPVIEW_XSL, dest_path)
+            return dest_path
+        except OSError:
+            pass
+    return ""
+
+
+def merge_nmap_xml_files(paths: List[str], out_path: str) -> bool:
+    """Combine one or more nmap XML runs into a single <nmaprun> document,
+    joining on each <host>'s address.
+
+    A run can produce several XML files (a base scan, an AI/ML-ports
+    follow-up, a separate follow-up scan of hostnames discovered via
+    reverse DNS) - a beautifier that expects one scan should see the union
+    of all of them, not just whichever file happens to be first.
+    """
+    paths = [p for p in paths if os.path.exists(p)]
+    if not paths:
+        return False
+    if len(paths) == 1:
+        try:
+            shutil.copyfile(paths[0], out_path)
+            return True
+        except OSError:
+            return False
+    try:
+        base_tree = ET.parse(paths[0])
+    except (ET.ParseError, OSError):
+        return False
+    base_root = base_tree.getroot()
+
+    def _addr(host_el) -> Optional[str]:
+        for a in host_el.findall("address"):
+            if a.get("addrtype") in ("ipv4", "ipv6"):
+                return a.get("addr")
+        return None
+
+    by_addr = {_addr(h): h for h in base_root.findall("host") if _addr(h)}
+    for p in paths[1:]:
+        try:
+            extra_root = ET.parse(p).getroot()
+        except (ET.ParseError, OSError):
+            continue
+        for h in extra_root.findall("host"):
+            addr = _addr(h)
+            existing = by_addr.get(addr) if addr else None
+            if existing is None:
+                base_root.append(h)
+                if addr:
+                    by_addr[addr] = h
+                continue
+            src_ports = h.find("ports")
+            if src_ports is None:
+                continue
+            dst_ports = existing.find("ports")
+            if dst_ports is None:
+                existing.append(src_ports)
+                continue
+            for port_el in src_ports.findall("port"):
+                dst_ports.append(port_el)
+    try:
+        base_tree.write(out_path, encoding="utf-8", xml_declaration=True)
+        return True
+    except OSError:
+        return False
+
+
+def nmapview_render(xml_path: str, xsl_path: str, out_path: str,
+                    timeout: float = 90.0) -> bool:
+    """Render nmap XML into NmapView's standalone HTML dashboard."""
+    proc = run(["xsltproc", "-o", out_path, xsl_path, xml_path], timeout=timeout)
+    return proc.ok and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
+
+
+def build_nmapview_report(xml_paths: List[str], out_dir: str,
+                          timeout: float = 90.0) -> str:
+    """One-shot pipeline: fetch NmapView.xsl, merge the given XML files, and
+    render the result. Returns the rendered HTML's path on success, or "".
+
+    Meant to be called once per run, after the last nmap invocation has
+    written its XML - not from the report renderer, which can be invoked
+    repeatedly while a live scan is still going and should not repeat this
+    every time it is.
+    """
+    raw_dir = os.path.join(out_dir, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+    xsl_path = fetch_nmapview_xsl(os.path.join(raw_dir, "NmapView.xsl"))
+    if not xsl_path:
+        return ""
+    merged_path = os.path.join(raw_dir, "nmap-merged.xml")
+    if not merge_nmap_xml_files(xml_paths, merged_path):
+        return ""
+    out_path = os.path.join(raw_dir, "nmapview.html")
+    return out_path if nmapview_render(merged_path, xsl_path, out_path,
+                                       timeout=timeout) else ""
 
 
 def nmap_script_scan(host: str, ports: List[int], scripts: List[str],

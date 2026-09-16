@@ -120,6 +120,7 @@ class Engine:
         if self.cfg.portscan:
             self._stage_portscan()
             self._stage_discover_hostnames()
+            self._stage_nmapview()
         self._stage_probe()
         if self.cfg.module_enabled("crawl"):
             self._stage_urls()
@@ -283,13 +284,16 @@ class Engine:
         targets = [t for t in self.ctx.targets if t.kind != "url"]
         self._portscan(targets)
 
-    def _portscan(self, targets: List[Target]) -> None:
+    def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
         targets, populating t.ports (and t.discovered_hostnames) in place.
 
         Shared by the initial port scan and by _stage_discover_hostnames(),
         so a hostname discovered via reverse DNS gets exactly the same scan
-        as every other target instead of a special-cased shortcut.
+        as every other target instead of a special-cased shortcut. Each
+        caller passes its own xml_prefix -- nmap_scan() always writes to
+        <prefix>.xml, and a second call in the same run with the same
+        prefix would silently overwrite the first's raw XML on disk.
         """
         hosts = [t.host for t in targets]
         if not hosts:
@@ -321,7 +325,8 @@ class Engine:
             return
 
         self.ctx.say("ports", "nmap -sV %s across %d host(s)" % (spec, len(hosts)))
-        results = tools.nmap_scan(hosts, spec, self.tune, out_dir=self.cfg.out_dir)
+        results = tools.nmap_scan(hosts, spec, self.tune, out_dir=self.cfg.out_dir,
+                                  xml_prefix=xml_prefix)
         by_host = {t.host: t for t in targets}
         by_ip = {t.ip: t for t in targets if t.ip}
         found = 0
@@ -371,7 +376,35 @@ class Engine:
                               "scanned IPs, added to scope: %s"
                      % (len(names), ", ".join(names[:8])
                         + (", ..." if len(names) > 8 else "")))
-        self._portscan(new_targets)
+        self._portscan(new_targets, xml_prefix="nmap-discovered")
+
+    # -- stage 2c: NmapView beautified render -------------------------------
+    def _stage_nmapview(self) -> None:
+        """Render every nmap XML this run produced into a standalone,
+        double-clickable HTML dashboard via NmapView + xsltproc.
+
+        Runs once, after the last nmap invocation (the initial scan and any
+        reverse-DNS-discovered follow-up) has written its XML - not from the
+        report renderer, which can run repeatedly during a live scan and
+        should not repeat this download-and-render every time it does.
+        """
+        if not self.ctx.has("xsltproc"):
+            self.ctx.say("ports", "NmapView render skipped: xsltproc not installed")
+            return
+        raw_dir = os.path.join(self.cfg.out_dir, "raw")
+        candidates = [os.path.join(raw_dir, name) for name in (
+            "nmap.xml", "nmap-extra.xml",
+            "nmap-discovered.xml", "nmap-discovered-extra.xml")]
+        xml_paths = [p for p in candidates if os.path.exists(p)]
+        if not xml_paths:
+            return
+        self.ctx.say("ports", "rendering NmapView dashboard from %d nmap XML file(s)"
+                     % len(xml_paths))
+        out_path = tools.build_nmapview_report(xml_paths, self.cfg.out_dir)
+        if out_path:
+            self.ctx.say("ports", "NmapView dashboard: %s" % out_path)
+        else:
+            self.ctx.say("ports", "NmapView render failed - see activity.log")
 
     @staticmethod
     def _hostname_discovery_candidates(targets: List[Target],

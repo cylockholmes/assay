@@ -2627,12 +2627,16 @@ _NMAP_XML_SAMPLE = """<?xml version="1.0"?>
 
 
 class NmapReportSectionTests(unittest.TestCase):
-    """The report's Nmap tab: absent with nothing to show, present with the
-    raw command/XML embedded (escaped, since it lands inside plain HTML) and
-    the vendored NmapView.xsl embedded (verbatim, since a <script> block is
-    raw text and re-escaping it would corrupt what .textContent reads back)."""
+    """The report's Nmap section: absent with nothing to show, present with
+    the raw command/XML (HTML-escaped, since it lands in plain <pre>
+    content) and a link to the pre-rendered NmapView beautified report when
+    Engine._stage_nmapview() has produced one. The beautified render itself
+    is a real standalone file opened in its own tab (raw/nmapview.html),
+    not something reproduced inside this page - see build_nmapview_report()
+    in tools.py."""
 
-    def _report_with_raw(self, xml_name="nmap.xml", write_replay=True):
+    def _report_with_raw(self, xml_name="nmap.xml", write_replay=True,
+                         with_nmapview_html=False):
         import os, tempfile
         from assay import report
         from assay.models import Evidence, Finding
@@ -2646,6 +2650,10 @@ class NmapReportSectionTests(unittest.TestCase):
                 fh.write("#!/usr/bin/env bash\n"
                         "nmap -Pn -sV --top-ports 1000 134.167.1.64 134.167.1.92\n"
                         "httpx -silent -json -list -\n")
+        if with_nmapview_html:
+            with open(os.path.join(out_dir, "raw", "nmapview.html"), "w",
+                     encoding="utf-8") as fh:
+                fh.write("<!doctype html><title>NmapView</title>rendered")
         s = Store(os.path.join(out_dir, "assay.db"))
         s.start_run("standard", ["134.167.1.64"])
         s.add_finding(Finding(
@@ -2681,27 +2689,22 @@ class NmapReportSectionTests(unittest.TestCase):
         self.assertIn('id="nmap-data"', html)
         self.assertIn("nmap -Pn -sV --top-ports 1000", html)
         self.assertNotIn("httpx", html.split('id="nmap-data"')[1].split("</section>")[0])
-        # the same XML lands twice: escaped inside a normal <pre> for
-        # display, and verbatim inside a <script id="nv-xml-..."> block for
-        # the client-side XSLT transform to read via .textContent.
-        self.assertIn("&lt;hostname name=", html, "the <pre> copy must be HTML-escaped")
+        # the raw XML lands in a normal <pre>, so it must be HTML-escaped.
+        self.assertIn("&lt;hostname name=", html)
         pre_block = html.split("<pre>")[1].split("</pre>")[0]
         self.assertNotIn("<hostname name=", pre_block)
-        script_block = html.split('id="nv-xml-nmap-xml"')[1].split("</script>")[0]
-        self.assertIn("<hostname name=", script_block,
-                      "the <script> copy must be verbatim, not escaped")
 
-    def test_vendored_xsl_is_embedded_unescaped_for_script_textcontent(self):
-        html, _ = self._report_with_raw()
-        self.assertIn('id="nv-xsl"', html)
-        # a real fragment of NmapView.xsl's own markup, verbatim (not
-        # &lt;-escaped) -- it must read back correctly via .textContent
-        self.assertIn("<xsl:stylesheet", html)
+    def test_no_beautified_link_without_a_rendered_file(self):
+        html, _ = self._report_with_raw(with_nmapview_html=False)
+        section = html.split('id="nmap-data"')[1].split("</section>")[0]
+        self.assertNotIn("raw/nmapview.html", section)
+        self.assertIn("not available yet", section)
 
-    def test_xml_embedded_for_client_side_transform(self):
-        html, _ = self._report_with_raw()
-        self.assertIn('id="nv-xml-nmap-xml"', html)
-        self.assertIn("mta2.y12.doe.gov", html)
+    def test_beautified_link_present_once_rendered(self):
+        html, _ = self._report_with_raw(with_nmapview_html=True)
+        section = html.split('id="nmap-data"')[1].split("</section>")[0]
+        self.assertIn('href="raw/nmapview.html"', section)
+        self.assertIn('target="_blank"', section)
 
     def test_both_base_and_extra_scans_get_separate_raw_blocks(self):
         import os
@@ -2715,10 +2718,137 @@ class NmapReportSectionTests(unittest.TestCase):
         html2 = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
                                       "duration": 1.0},
                                   os.path.join(out_dir, "r.html"))).read()
-        self.assertIn('id="nv-xml-nmap-xml"', html2)
-        self.assertIn('id="nv-xml-nmap-extra-xml"', html2)
         self.assertIn("base scan", html2)
         self.assertIn("AI/ML port scan", html2)
+
+
+class MergeNmapXmlFilesTests(unittest.TestCase):
+    """merge_nmap_xml_files() combines a run's several nmap XML files (base
+    scan, AI/ML-ports follow-up, reverse-DNS-discovered-hosts follow-up)
+    into one document for NmapView to render, joining on each host's
+    address so a host scanned twice gets the union of its ports rather than
+    only whichever file happened to be merged in last."""
+
+    def _write(self, tmp_dir, name, xml):
+        import os
+        path = os.path.join(tmp_dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+        return path
+
+    def test_single_file_is_copied_through(self):
+        import os, tempfile
+        from assay import tools
+        tmp = tempfile.mkdtemp()
+        src = self._write(tmp, "a.xml", _NMAP_XML_SAMPLE)
+        out = os.path.join(tmp, "merged.xml")
+        self.assertTrue(tools.merge_nmap_xml_files([src], out))
+        result = tools.parse_nmap_xml(out)
+        self.assertIn("134.167.1.64", result)
+        self.assertIn("134.167.1.92", result)
+
+    def test_same_host_in_both_files_gets_union_of_ports(self):
+        import os, tempfile
+        from assay import tools
+        tmp = tempfile.mkdtemp()
+        base = self._write(tmp, "base.xml", """<?xml version="1.0"?>
+<nmaprun><host><status state="up"/>
+<address addr="10.0.0.5" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="443">
+<state state="open"/><service name="https"/></port></ports>
+</host></nmaprun>""")
+        extra = self._write(tmp, "extra.xml", """<?xml version="1.0"?>
+<nmaprun><host><status state="up"/>
+<address addr="10.0.0.5" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="11434">
+<state state="open"/><service name="http"/></port></ports>
+</host></nmaprun>""")
+        out = os.path.join(tmp, "merged.xml")
+        self.assertTrue(tools.merge_nmap_xml_files([base, extra], out))
+        result = tools.parse_nmap_xml(out)
+        self.assertEqual(len(result), 1, "one host, not two entries for it")
+        ports = sorted(p.port for p in result["10.0.0.5"].ports)
+        self.assertEqual(ports, [443, 11434])
+
+    def test_host_only_in_second_file_is_appended(self):
+        import os, tempfile
+        from assay import tools
+        tmp = tempfile.mkdtemp()
+        base = self._write(tmp, "base.xml", """<?xml version="1.0"?>
+<nmaprun><host><status state="up"/>
+<address addr="10.0.0.5" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="443">
+<state state="open"/><service name="https"/></port></ports>
+</host></nmaprun>""")
+        extra = self._write(tmp, "extra.xml", """<?xml version="1.0"?>
+<nmaprun><host><status state="up"/>
+<address addr="10.0.0.9" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="22">
+<state state="open"/><service name="ssh"/></port></ports>
+</host></nmaprun>""")
+        out = os.path.join(tmp, "merged.xml")
+        self.assertTrue(tools.merge_nmap_xml_files([base, extra], out))
+        result = tools.parse_nmap_xml(out)
+        self.assertEqual(set(result.keys()), {"10.0.0.5", "10.0.0.9"})
+
+    def test_missing_files_are_skipped_not_fatal(self):
+        import os, tempfile
+        from assay import tools
+        tmp = tempfile.mkdtemp()
+        src = self._write(tmp, "a.xml", _NMAP_XML_SAMPLE)
+        out = os.path.join(tmp, "merged.xml")
+        self.assertTrue(tools.merge_nmap_xml_files(
+            [os.path.join(tmp, "does-not-exist.xml"), src], out))
+
+    def test_no_existing_files_fails_cleanly(self):
+        import os, tempfile
+        from assay import tools
+        tmp = tempfile.mkdtemp()
+        out = os.path.join(tmp, "merged.xml")
+        self.assertFalse(tools.merge_nmap_xml_files(
+            [os.path.join(tmp, "nope.xml")], out))
+
+
+class NmapXmlPrefixTests(unittest.TestCase):
+    """A run that calls nmap_scan() more than once (the initial port scan,
+    then a follow-up for reverse-DNS-discovered hostnames) must not have the
+    second call silently overwrite the first's raw XML -- xml_prefix keeps
+    their output files distinct."""
+
+    def test_default_prefix_is_nmap(self):
+        from assay import tools
+        seen = []
+        original = tools.run
+
+        def fake_run(cmd, timeout=300.0, stdin="", cwd=None):
+            seen.append(list(cmd))
+            return tools.Proc(rc=1, out="", err="", cmd=list(cmd))
+
+        tools.run = fake_run
+        try:
+            tools.nmap_scan(["10.0.0.5"], "top-1000", {})
+        finally:
+            tools.run = original
+        oX_values = [cmd[cmd.index("-oX") + 1] for cmd in seen if "-oX" in cmd]
+        self.assertTrue(any(v.endswith("nmap.xml") for v in oX_values))
+
+    def test_custom_prefix_changes_the_output_filenames(self):
+        from assay import tools
+        seen = []
+        original = tools.run
+
+        def fake_run(cmd, timeout=300.0, stdin="", cwd=None):
+            seen.append(list(cmd))
+            return tools.Proc(rc=1, out="", err="", cmd=list(cmd))
+
+        tools.run = fake_run
+        try:
+            tools.nmap_scan(["10.0.0.5"], "top-1000", {}, xml_prefix="nmap-discovered")
+        finally:
+            tools.run = original
+        oX_values = [cmd[cmd.index("-oX") + 1] for cmd in seen if "-oX" in cmd]
+        self.assertTrue(any(v.endswith("nmap-discovered.xml") for v in oX_values))
+        self.assertFalse(any(v.endswith(("/nmap.xml",)) for v in oX_values))
 
 
 class ParseNmapXmlTests(unittest.TestCase):
@@ -2755,6 +2885,46 @@ class ParseNmapXmlTests(unittest.TestCase):
         self.assertIn("134.167.1.92", result)
         self.assertEqual(result["134.167.1.92"].hostnames, [])
         self.assertEqual([p.port for p in result["134.167.1.92"].ports], [443])
+
+
+class TlsSanDisclosureTests(unittest.TestCase):
+    """The 'Certificate SANs disclose N additional hostnames' finding named
+    a count but never the names themselves anywhere the terminal dashboard
+    or `assay show` actually display -- they were evidence-only, and the
+    terminal's summary table has no evidence-expand step at all (that is an
+    HTML-report-only feature), so the names were effectively invisible."""
+
+    def test_disclosed_hostnames_are_in_detail_not_just_evidence(self):
+        from assay.modules.tls import TlsModule
+        cert = {
+            "subject": [[("commonName", "app.example.com")]],
+            "issuer": [[("commonName", "Some CA")]],
+            "subjectAltName": [
+                ("DNS", "app.example.com"),
+                ("DNS", "internal-admin.example.com"),
+                ("DNS", "staging.example.com"),
+                ("DNS", "db-01.example.com"),
+                ("DNS", "vpn.example.com"),
+            ],
+        }
+        findings = TlsModule()._cert_findings("app.example.com", 443, cert)
+        san = next(f for f in findings if "SANs disclose" in f.title)
+        self.assertIn("internal-admin.example.com", san.detail)
+        self.assertIn("staging.example.com", san.detail)
+        self.assertIn("db-01.example.com", san.detail)
+        self.assertIn("vpn.example.com", san.detail)
+
+    def test_long_san_list_is_capped_in_detail_with_a_remainder_count(self):
+        from assay.modules.tls import TlsModule
+        cert = {
+            "subject": [[("commonName", "app.example.com")]],
+            "issuer": [[("commonName", "Some CA")]],
+            "subjectAltName": [("DNS", "app.example.com")] +
+                [("DNS", "host%d.example.com" % i) for i in range(30)],
+        }
+        findings = TlsModule()._cert_findings("app.example.com", 443, cert)
+        san = next(f for f in findings if "SANs disclose" in f.title)
+        self.assertIn("+10 more", san.detail)
 
 
 class HostnameDiscoveryTests(unittest.TestCase):
