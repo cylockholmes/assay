@@ -174,6 +174,20 @@ class Scope:
             return True
         return self._matches(host, self.allow, self._allow_nets)
 
+    def denied(self, host: str) -> bool:
+        """True only when a deny rule explicitly excludes this host.
+
+        Distinct from `not allows(host)`, which is also true for a host that
+        simply isn't on the allow list yet -- a caller that wants to extend
+        scope with a newly discovered name needs to tell "never add this" (a
+        real deny match) apart from "not added yet" before appending to
+        `allow`.
+        """
+        if not host:
+            return True
+        host = host.strip().lower().rstrip(".")
+        return self._matches(host, self.deny, self._deny_nets)
+
     def check(self, host: str) -> None:
         if not self.allows(host):
             raise ScopeError("out of scope: %s" % host)

@@ -312,19 +312,38 @@ def nmap_extra_port_args(spec: str) -> Optional[List[str]]:
     return ["-p", extra] if extra else None
 
 
-def _merge_ports(dest: Dict[str, List[Port]], src: Dict[str, List[Port]]) -> None:
-    for host, ports in src.items():
-        existing = dest.setdefault(host, [])
-        seen = {(p.port, p.proto) for p in existing}
-        for p in ports:
+@dataclass
+class NmapHost:
+    """One scanned address's open ports and the hostname(s) nmap's own
+    reverse-DNS lookup found for it while scanning."""
+    ports: List[Port] = field(default_factory=list)
+    hostnames: List[str] = field(default_factory=list)
+
+
+def _merge_nmap_hosts(dest: Dict[str, NmapHost], src: Dict[str, NmapHost]) -> None:
+    for addr, nh in src.items():
+        existing = dest.setdefault(addr, NmapHost())
+        seen = {(p.port, p.proto) for p in existing.ports}
+        for p in nh.ports:
             if (p.port, p.proto) not in seen:
-                existing.append(p)
+                existing.ports.append(p)
                 seen.add((p.port, p.proto))
+        for name in nh.hostnames:
+            if name not in existing.hostnames:
+                existing.hostnames.append(name)
 
 
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
-              out_dir: str = ".") -> Dict[str, List[Port]]:
-    """Service/version scan. Returns host -> open ports."""
+              out_dir: str = ".") -> Dict[str, NmapHost]:
+    """Service/version scan. Returns scanned address -> NmapHost.
+
+    Always keyed by the address nmap actually scanned, never by a
+    reverse-DNS name alone: a target given as a bare IP whose reverse DNS
+    resolves to some hostname must still be found by that IP by whoever
+    matches these results back to a Target, or its entire port list
+    silently disappears. Any hostname nmap did resolve is carried on
+    NmapHost.hostnames instead, for the caller to act on deliberately.
+    """
     base_args = [
         "nmap", "-Pn", "-sV", "--version-intensity", "5",
         "-T3" if tune.get("constrained") else "-T4",
@@ -332,7 +351,7 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
         "--min-rate", str(tune.get("nmap_min_rate", 300)),
     ]
 
-    def _run(port_args: List[str], xml_name: str) -> Dict[str, List[Port]]:
+    def _run(port_args: List[str], xml_name: str) -> Dict[str, NmapHost]:
         xml_path = os.path.join(out_dir, "raw", xml_name)
         os.makedirs(os.path.dirname(xml_path), exist_ok=True)
         cmd = list(base_args) + ["-oX", xml_path] + port_args + hosts
@@ -346,7 +365,7 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
     results = _run(nmap_port_args(port_spec), "nmap.xml")
     extra_args = nmap_extra_port_args(port_spec)
     if extra_args:
-        _merge_ports(results, _run(extra_args, "nmap-extra.xml"))
+        _merge_nmap_hosts(results, _run(extra_args, "nmap-extra.xml"))
     return results
 
 
@@ -394,8 +413,15 @@ def parse_nse_xml(path: str) -> Dict[int, Dict[str, str]]:
     return out
 
 
-def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
-    out: Dict[str, List[Port]] = {}
+def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
+    """Parse nmap's XML into scanned address -> NmapHost.
+
+    Keyed by the numeric address nmap scanned (always present - nmap resolves
+    a hostname target to an address before it ever probes a port), not by a
+    reverse-DNS name. See nmap_scan()'s docstring for why that distinction
+    matters.
+    """
+    out: Dict[str, NmapHost] = {}
     try:
         tree = ET.parse(path)
     except (ET.ParseError, OSError):
@@ -406,8 +432,9 @@ def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
             if a.get("addrtype") in ("ipv4", "ipv6"):
                 addr = a.get("addr", "")
                 break
-        names = [h.get("name", "") for h in host_el.findall("hostnames/hostname")]
-        key = names[0] if names and names[0] else addr
+        names = [h.get("name", "") for h in host_el.findall("hostnames/hostname")
+                 if h.get("name")]
+        key = addr or (names[0] if names else "")
         if not key:
             continue
         ports: List[Port] = []
@@ -427,8 +454,12 @@ def parse_nmap_xml(path: str) -> Dict[str, List[Port]]:
                 extra={"extrainfo": (svc.get("extrainfo", "") if svc is not None else ""),
                        "ip": addr},
             ))
-        if ports:
-            out[key] = ports
+        if ports or names:
+            existing = out.setdefault(key, NmapHost())
+            existing.ports.extend(ports)
+            for n in names:
+                if n not in existing.hostnames:
+                    existing.hostnames.append(n)
     return out
 
 

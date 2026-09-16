@@ -24,7 +24,7 @@ from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
 from assay.burp import BurpBridge
-from assay.config import Config
+from assay.config import Config, Scope
 from assay.context import Context
 from assay.models import Finding, Port, Target, WebTarget, host_port_from_url, normalize_url
 from assay.net import HttpClient, build_baseline
@@ -119,6 +119,7 @@ class Engine:
             self._stage_recon()
         if self.cfg.portscan:
             self._stage_portscan()
+            self._stage_discover_hostnames()
         self._stage_probe()
         if self.cfg.module_enabled("crawl"):
             self._stage_urls()
@@ -279,7 +280,18 @@ class Engine:
 
     # -- stage 2: port scan ----------------------------------------------
     def _stage_portscan(self) -> None:
-        hosts = [t.host for t in self.ctx.targets if t.kind != "url"]
+        targets = [t for t in self.ctx.targets if t.kind != "url"]
+        self._portscan(targets)
+
+    def _portscan(self, targets: List[Target]) -> None:
+        """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
+        targets, populating t.ports (and t.discovered_hostnames) in place.
+
+        Shared by the initial port scan and by _stage_discover_hostnames(),
+        so a hostname discovered via reverse DNS gets exactly the same scan
+        as every other target instead of a special-cased shortcut.
+        """
+        hosts = [t.host for t in targets]
         if not hosts:
             return
         spec = self.cfg.opts.get("port_spec", "top-1000")
@@ -297,7 +309,7 @@ class Engine:
                 self.ctx.say("ports", "naabu found %d distinct open port(s); "
                                       "nmap -sV on those only" % len(open_ports))
                 spec = ",".join(str(p) for p in open_ports)
-                hosts = self._resolve_swept_hosts(self.ctx.targets, swept.keys()) or hosts
+                hosts = self._resolve_swept_hosts(targets, swept.keys()) or hosts
             else:
                 self.ctx.say("ports", "naabu found nothing open")
                 return
@@ -310,18 +322,82 @@ class Engine:
 
         self.ctx.say("ports", "nmap -sV %s across %d host(s)" % (spec, len(hosts)))
         results = tools.nmap_scan(hosts, spec, self.tune, out_dir=self.cfg.out_dir)
-        by_host = {t.host: t for t in self.ctx.targets}
-        by_ip = {t.ip: t for t in self.ctx.targets if t.ip}
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
         found = 0
-        for key, ports in results.items():
-            t = by_host.get(key) or by_ip.get(key)
+        for addr, nh in results.items():
+            # Address first: it is always the literal thing nmap scanned, so
+            # it is the unambiguous match for a target given as a bare IP.
+            # Falling back to hostname covers a target given as a hostname
+            # whose .ip somehow never got resolved.
+            t = by_ip.get(addr) or by_host.get(addr)
             if t is None:
                 continue
-            t.ports = ports
-            found += len(ports)
+            t.ports = nh.ports
+            t.discovered_hostnames = [n for n in nh.hostnames if n and n != t.host]
+            found += len(nh.ports)
             self.store.save_host(t.host, t.ip or "", {
-                "ports": [p.__dict__ for p in ports]})
+                "ports": [p.__dict__ for p in nh.ports]})
         self.ctx.say("ports", "%d open port(s) across %d host(s)" % (found, len(results)))
+
+    # -- stage 2b: hostnames nmap's reverse DNS resolved -------------------
+    def _stage_discover_hostnames(self) -> None:
+        """Give a reverse-DNS-resolved hostname the same full scan as any
+        other target, and add it to scope.
+
+        A bare-IP target's port scan can still turn up a hostname (nmap
+        resolves reverse DNS for every address it scans) - that name was
+        discovered by testing an already-in-scope IP, not pulled from an
+        unrelated source, so it gets added to scope and a full port scan of
+        its own rather than being left as a footnote in the port table. An
+        explicit deny rule is still honored: a name that matches one is
+        skipped, never force-added.
+        """
+        candidates = self._hostname_discovery_candidates(self.ctx.targets, self.cfg.scope)
+        if not candidates:
+            return
+
+        new_targets: List[Target] = []
+        for name, ip in sorted(candidates.items()):
+            if not self.cfg.scope.allows(name):
+                self.cfg.scope.allow.append(name)
+            t = Target(raw=name, host=name, ip=ip, resolved=[ip],
+                       tags=["reverse-dns"])
+            self.ctx.targets.append(t)
+            new_targets.append(t)
+
+        names = [t.host for t in new_targets]
+        self.ctx.say("recon", "%d hostname(s) resolved via reverse DNS from "
+                              "scanned IPs, added to scope: %s"
+                     % (len(names), ", ".join(names[:8])
+                        + (", ..." if len(names) > 8 else "")))
+        self._portscan(new_targets)
+
+    @staticmethod
+    def _hostname_discovery_candidates(targets: List[Target],
+                                       scope: Scope) -> Dict[str, str]:
+        """Which reverse-DNS-discovered hostnames are new, and what IP each
+        came from.
+
+        Only a bare-IP target's discovered_hostnames are eligible - a target
+        already given as a hostname has nothing to discover about itself.
+        Already-known hosts are skipped (nothing to add), and a name an
+        explicit deny rule excludes is skipped too: discovery extends scope,
+        it never overrides an exclusion the user set on purpose.
+        """
+        known = {t.host for t in targets}
+        candidates: Dict[str, str] = {}
+        for t in targets:
+            if not t.is_ip or not t.discovered_hostnames:
+                continue
+            for name in t.discovered_hostnames:
+                name = name.strip().lower().rstrip(".")
+                if not name or name in known or name in candidates:
+                    continue
+                if scope.denied(name):
+                    continue
+                candidates[name] = t.ip or t.host
+        return candidates
 
     @staticmethod
     def _resolve_swept_hosts(targets: List[Target], swept_keys) -> List[str]:

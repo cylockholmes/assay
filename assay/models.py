@@ -60,6 +60,11 @@ class Target:
     resolved: List[str] = field(default_factory=list)
     ports: List["Port"] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    # Hostnames nmap's reverse DNS resolved for this target while scanning
+    # it. Only meaningful for an IP-specified target -- a name discovered
+    # this way is itself given a full scan and added to scope; see
+    # Engine._stage_discover_hostnames().
+    discovered_hostnames: List[str] = field(default_factory=list)
 
     @property
     def is_ip(self) -> bool:
