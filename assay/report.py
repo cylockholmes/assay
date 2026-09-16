@@ -10,8 +10,9 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from assay.models import Finding
 from assay.store import Store
@@ -60,6 +61,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
         parts.append(_chains_section(chains, findings))
 
     parts.append(_inventory(store))
+    parts.append(_nmap_section(os.path.dirname(os.path.abspath(out_path))))
 
     for bucket in ("CHASE", "LOOK", "NOTE"):
         items = buckets.get(bucket) or []
@@ -184,6 +186,120 @@ def _inventory(store: Store) -> str:
                    '<tbody>%s</tbody></table></div>' % "".join(wrows))
     out.append("</section>")
     return "".join(out)
+
+
+# --------------------------------------------------------------------------
+# Nmap raw + NmapView-beautified data
+# --------------------------------------------------------------------------
+
+_NMAP_XSL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "NmapView.xsl")
+_NMAP_XML_CAP = 3_000_000   # a scan across many hosts can produce a large XML file
+_NMAP_XSL_CAP = 2_000_000   # generous headroom over NmapView.xsl's actual size
+
+
+def _read_capped(path: str, cap: int) -> Tuple[str, bool]:
+    """Returns (content, truncated). An empty, non-truncated result means
+    the file does not exist or could not be read."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = fh.read(cap + 1)
+    except OSError:
+        return "", False
+    return (data[:cap], True) if len(data) > cap else (data, False)
+
+
+def _script_safe(text: str) -> str:
+    """Content embedded verbatim inside a non-JS <script type="..."> block is
+    NOT HTML-entity-decoded by the parser (script is a raw-text element
+    regardless of type) - only the literal closing sequence can break it, so
+    that is the only thing that needs neutralizing before embedding."""
+    return re.sub(r"(?i)</script", "<\\/script", text)
+
+
+def _nmap_commands(out_dir: str) -> List[str]:
+    """The exact nmap invocation(s) this run made, pulled from replay.sh."""
+    path = os.path.join(out_dir, "replay.sh")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    return [ln.rstrip("\n") for ln in lines if ln.strip().startswith("nmap ")]
+
+
+def _nmap_section(out_dir: str) -> str:
+    """Raw nmap XML and the command(s) that produced it, plus the same data
+    rendered by NmapView (https://nmapview.github.io) client-side.
+
+    NmapView is an XSLT stylesheet; the transform runs in the viewer's own
+    browser via XSLTProcessor, so no server-side XSLT library is needed here
+    regardless of what happens to be installed. NmapView's own CSS/JS
+    (Bootstrap, DataTables, Plotly) load from a CDN, so the beautified tab
+    needs internet access on the viewing machine to render styled - the raw
+    tab (commands + XML text) always works fully offline, matching the rest
+    of this report.
+    """
+    files = []
+    for name, label in (("nmap.xml", "base scan"), ("nmap-extra.xml", "AI/ML port scan")):
+        path = os.path.join(out_dir, "raw", name)
+        if os.path.exists(path):
+            files.append((name, label, path))
+    if not files:
+        return ""
+
+    xsl, xsl_truncated = _read_capped(_NMAP_XSL_PATH, _NMAP_XSL_CAP)
+
+    commands = _nmap_commands(out_dir)
+    cmd_block = "".join(
+        '<div class="cmdwrap"><code>%s</code>'
+        '<button class="copy" data-copy="%s">copy</button></div>'
+        % (_e(c), _e(c)) for c in commands)
+
+    raw_blocks = []
+    xml_scripts = []
+    for name, label, path in files:
+        content, truncated = _read_capped(path, _NMAP_XML_CAP)
+        if not content:
+            continue
+        raw_blocks.append(
+            '<details%s><summary>%s (%s)%s</summary><pre>%s</pre></details>'
+            % (" open" if name == "nmap.xml" else "", _e(label), _e(name),
+               " - truncated" if truncated else "", _e(content)))
+        if not truncated:      # a truncated file is not well-formed XML; skip it for the transform
+            xml_scripts.append(
+                '<script type="application/xml" id="nv-xml-%s" hidden>%s</script>'
+                % (_e(name).replace(".", "-"), _script_safe(content)))
+
+    beautified_pane = (
+        '<p class="dim">Renders via <a href="https://nmapview.github.io" '
+        'target="_blank" rel="noopener">NmapView</a> (Bootstrap/DataTables/Plotly '
+        'from a CDN) - needs internet access on this machine to display styled; '
+        'the Raw tab above always works offline.</p>'
+        '<iframe id="nv-frame" sandbox="allow-scripts allow-same-origin" '
+        'style="width:100%;height:85vh;border:1px solid var(--line);'
+        'border-radius:8px;background:#fff"></iframe>'
+    ) if (xsl and not xsl_truncated and xml_scripts) else (
+        '<p class="dim">Not available: %s.</p>' % (
+            "the vendored NmapView.xsl is missing" if not xsl or xsl_truncated
+            else "no valid raw XML to render"))
+
+    return (
+        '<section class="bucket" id="nmap-data">'
+        '<h2>Nmap scan data <span class="count">%d file(s)</span></h2>'
+        '<p class="blurb">The exact command(s) run and the raw XML nmap returned, '
+        'plus a beautified read of the same data.</p>'
+        '<div class="nv-tabs">'
+        '<button class="nv-tab on" data-nv-tab="raw">Raw</button>'
+        '<button class="nv-tab" data-nv-tab="beautified">Beautified (NmapView)</button>'
+        '</div>'
+        '<div class="nv-pane" data-nv-pane="raw">%s%s</div>'
+        '<div class="nv-pane" data-nv-pane="beautified" hidden>%s</div>'
+        '%s%s'
+        '</section>'
+    ) % (len(files), cmd_block, "".join(raw_blocks), beautified_pane,
+         ('<script type="application/xml" id="nv-xsl" hidden>%s</script>'
+          % _script_safe(xsl)) if xsl and not xsl_truncated else "",
+         "".join(xml_scripts))
 
 
 def _toolbar(modules: List[str], total: int) -> str:
@@ -506,6 +622,17 @@ td.dim{color:var(--dim)}
 .draft pre{max-height:420px}
 kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
   padding:1px 5px;font-size:11px;font-family:ui-monospace,monospace}
+
+/* ---------- nmap data ---------- */
+.nv-tabs{display:flex;gap:6px;margin-bottom:14px}
+.nv-tab{background:var(--card);color:var(--dim);border:1px solid var(--line);border-radius:6px;
+  padding:6px 14px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.nv-tab:hover{border-color:var(--acc);color:var(--fg)}
+.nv-tab.on{background:var(--acc);border-color:var(--acc);color:#0b0d10;font-weight:600}
+.nv-pane .cmdwrap{margin-bottom:8px}
+.nv-pane pre{max-height:480px}
+#nmap-data details{margin-top:10px}
+#nmap-data summary{font-size:12.5px}
 </style></head><body><main>"""
 
 _SCRIPT = """
@@ -623,6 +750,78 @@ _SCRIPT = """
   });
 
   apply();
+})();
+
+(function () {
+  var section = document.getElementById('nmap-data');
+  if (!section) return;
+  var tabs = section.querySelectorAll('.nv-tab');
+  var panes = section.querySelectorAll('.nv-pane');
+  var rendered = false;
+
+  function activate(name) {
+    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.nvTab === name); });
+    panes.forEach(function (p) { p.hidden = p.dataset.nvPane !== name; });
+    if (name === 'beautified') renderBeautified();
+  }
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () { activate(b.dataset.nvTab); });
+  });
+
+  function mergeNmapRuns(base, extra) {
+    var baseRoot = base.documentElement;
+    var byAddr = {};
+    Array.prototype.forEach.call(baseRoot.children, function (h) {
+      if (h.tagName !== 'host') return;
+      var a = h.querySelector('address');
+      if (a) byAddr[a.getAttribute('addr')] = h;
+    });
+    Array.prototype.forEach.call(extra.documentElement.children, function (h) {
+      if (h.tagName !== 'host') return;
+      var a = h.querySelector('address');
+      var addr = a && a.getAttribute('addr');
+      var existing = addr && byAddr[addr];
+      if (!existing) { baseRoot.appendChild(base.importNode(h, true)); return; }
+      var srcPorts = h.querySelector('ports');
+      var dstPorts = existing.querySelector('ports');
+      if (!srcPorts) return;
+      if (!dstPorts) { existing.appendChild(base.importNode(srcPorts, true)); return; }
+      Array.prototype.forEach.call(srcPorts.querySelectorAll('port'), function (p) {
+        dstPorts.appendChild(base.importNode(p, true));
+      });
+    });
+  }
+
+  function renderBeautified() {
+    if (rendered) return;
+    rendered = true;
+    var frame = document.getElementById('nv-frame');
+    if (!frame) return;
+    try {
+      var xslEl = document.getElementById('nv-xsl');
+      var xmlEls = Array.prototype.slice.call(
+        section.querySelectorAll('script[id^="nv-xml-"]'));
+      if (!xslEl || !xmlEls.length) throw new Error('missing embedded scan data');
+      var parser = new DOMParser();
+      var xsl = parser.parseFromString(xslEl.textContent, 'application/xml');
+      var merged = parser.parseFromString(xmlEls[0].textContent, 'application/xml');
+      for (var i = 1; i < xmlEls.length; i++) {
+        mergeNmapRuns(merged, parser.parseFromString(xmlEls[i].textContent, 'application/xml'));
+      }
+      if (!window.XSLTProcessor) throw new Error('this browser has no XSLTProcessor');
+      var xp = new XSLTProcessor();
+      xp.importStylesheet(xsl);
+      var out = xp.transformToDocument(merged);
+      frame.srcdoc = new XMLSerializer().serializeToString(out);
+    } catch (e) {
+      var msg = document.createElement('p');
+      msg.className = 'dim';
+      msg.textContent = 'Could not render the beautified view (' +
+        (e && e.message ? e.message : 'unknown error') +
+        '). The Raw tab above has the same data.';
+      frame.replaceWith(msg);
+    }
+  }
 })();
 </script>
 """
