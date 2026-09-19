@@ -71,10 +71,10 @@ class InventoryModule(Module):
 
     def _write_report_data(self, ctx: Context, rows: List[Dict],
                            matches_by_key: Dict[str, List[cve_mod.CveMatch]]) -> None:
-        payload = []
+        items = []
         for row in rows:
             matches = matches_by_key.get(_row_key(row), [])
-            payload.append({
+            items.append({
                 "name": row["name"],
                 "version": row["version"],
                 "category": row["category"],
@@ -83,12 +83,15 @@ class InventoryModule(Module):
                 "cves": [{"id": m.cve_id, "severity": m.severity, "score": m.score,
                          "summary": m.summary, "url": m.url} for m in matches],
             })
+        # cve_checked distinguishes "ran and found nothing" from "did not run
+        # (--no-passive)" - the report needs that to word its footnote right.
+        doc = {"cve_checked": bool(ctx.cfg.passive), "items": items}
         raw_dir = os.path.join(ctx.cfg.out_dir, "raw")
         try:
             os.makedirs(raw_dir, exist_ok=True)
             with open(os.path.join(raw_dir, "software-inventory.json"), "w",
                      encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2)
+                json.dump(doc, fh, indent=2)
         except OSError:
             pass
 

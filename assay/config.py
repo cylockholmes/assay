@@ -304,9 +304,9 @@ class Config:
     retries: int = 1
 
     # behaviour switches
-    passive: bool = False                   # allow third-party OSINT sources
+    passive: bool = True                    # allow third-party OSINT sources
     portscan: bool = True
-    expand: bool = False                    # grow the target list via recon
+    expand: bool = True                     # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain
     aggressive: bool = False                # enable checks that mutate state

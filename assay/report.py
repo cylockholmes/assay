@@ -206,9 +206,11 @@ def _software_section(out_dir: str) -> str:
     path = os.path.join(out_dir, "raw", "software-inventory.json")
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            rows = json.load(fh)
+            doc = json.load(fh)
     except (OSError, ValueError):
         return ""
+    rows = doc.get("items") or []
+    cve_checked = bool(doc.get("cve_checked"))
     if not rows:
         return ""
 
@@ -235,14 +237,18 @@ def _software_section(out_dir: str) -> str:
             % (_e(r.get("name", "")), _e(r.get("version") or "?"),
                _e(r.get("category", "")), _e(where_txt), cve_html))
 
-    cve_note = (
-        '<p class="blurb">%d known CVE match(es) via NVD keyword search. A match is '
-        'a text match on name and version, not a confirmed CPE match - verify the '
-        'specific CVE applies before reporting it.</p>' % cve_total
-        if cve_total else
-        '<p class="blurb">No known-CVE cross-reference was run for this scan - add '
-        '<code>--passive</code> to check detected versions against NVD.</p>'
-    )
+    if cve_total:
+        cve_note = (
+            '<p class="blurb">%d known CVE match(es) via NVD keyword search. A match '
+            'is a text match on name and version, not a confirmed CPE match - verify '
+            'the specific CVE applies before reporting it.</p>' % cve_total)
+    elif cve_checked:
+        cve_note = ('<p class="blurb">Checked against NVD - no known CVEs matched '
+                   'any detected version.</p>')
+    else:
+        cve_note = ('<p class="blurb">No known-CVE cross-reference was run for this '
+                   'scan (<code>--no-passive</code> was set) - drop it to check '
+                   'detected versions against NVD.</p>')
     return (
         '<section class="bucket" id="software-inventory">'
         '<h2>Software inventory <span class="count">%d item(s)</span></h2>'

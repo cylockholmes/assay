@@ -37,7 +37,7 @@ examples:
   assay install --dry-run                       # preview external tool install
   assay install -y                              # install everything missing
   assay scan 10.0.0.0/24 --basic admin:admin    # behind HTTP Basic auth
-  assay scan target.tld --expand --passive      # grow the surface first
+  assay scan target.tld --no-passive             # stay off third-party lookups
 """
 
 
@@ -98,8 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="do not record activity.log / replay.sh")
 
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
-    s.add_argument("--passive", action="store_true",
-                   help="allow third-party OSINT sources (off by default)")
+    s.add_argument("--no-passive", action="store_true",
+                   help="do not query third-party OSINT/CVE sources (on by default)")
     s.add_argument("--aggressive", action="store_true",
                    help="enable checks that may change state")
     s.add_argument("--only", help="comma-separated module allow list")
@@ -121,9 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "to whatever yours mandates (default X-Scan-Tag)")
 
     g = s.add_argument_group("surface expansion and blind checks")
-    g.add_argument("--expand", action="store_true",
-                   help="grow the target list: permutations, DNS resolution, "
-                        "and (with --passive) CT logs and subdomain sources")
+    g.add_argument("--no-expand", action="store_true",
+                   help="do not grow the target list beyond what was given "
+                        "(on by default: permutations, DNS resolution, and, "
+                        "unless --no-passive, CT logs and subdomain sources)")
     g.add_argument("--oob-domain", default="", metavar="DOMAIN",
                    help="collaborator domain for blind SSRF payloads; without it "
                         "assay uses interactsh-client when installed")
@@ -382,9 +383,9 @@ def make_config(args) -> Config:
         codename=getattr(args, "codename", "") or "",
         timeout=args.timeout,
         retries=args.retries,
-        passive=args.passive,
+        passive=not getattr(args, "no_passive", False),
         portscan=not args.no_portscan,
-        expand=getattr(args, "expand", False),
+        expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",
         aggressive=args.aggressive,

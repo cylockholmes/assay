@@ -240,7 +240,7 @@ draws from four sources rather than a crawl alone:
 | Source | Tool | Touches |
 |---|---|---|
 | Linked now | katana, or a native link pass | target |
-| Ever linked | `gau` / `waybackurls` | third-party archives — `--passive` only |
+| Ever linked | `gau` / `waybackurls` | third-party archives — on by default, `--no-passive` disables |
 | Known to the client | native JS endpoint extraction | target |
 | Accepted but never emitted | `arjun` | target |
 
@@ -265,10 +265,10 @@ and noisy enough to deserve being a deliberate choice.
 
 ## Surface expansion
 
-`--expand` grows the target list before scanning it: environment permutations
-(`dev-`, `staging-`, `api-`, …) resolved against DNS, plus CT logs and
-subdomain sources when `--passive` is set. Wildcard DNS is fingerprinted and
-its hits discarded.
+On by default (`--no-expand` to turn it off), assay grows the target list
+before scanning it: environment permutations (`dev-`, `staging-`, `api-`, …)
+resolved against DNS, plus CT logs and subdomain sources unless `--no-passive`
+is set. Wildcard DNS is fingerprinted and its hits discarded.
 
 Two checks find surface DNS never advertises:
 
@@ -311,12 +311,12 @@ source and commercial alike. It is written regardless of whether anything
 looks vulnerable, because "what is actually running, by name and version" is
 the asset inventory a client's security team usually does not have.
 
-With `--passive`, each distinct product/version also gets checked against
-NVD's public CVE database (`services.nvd.nist.gov`, no API key required,
-though `NVD_API_KEY` speeds it up). A hit becomes a `tentative`-confidence
-finding — NVD's keyword search is a text match, not a confirmed CPE match, so
-it means "go verify this," not "this is exploitable." Same third-party-traffic
-rule as the Wayback Machine lookups: it only runs when you opt in.
+By default, each distinct product/version also gets checked against NVD's
+public CVE database (`services.nvd.nist.gov`, no API key required, though
+`NVD_API_KEY` speeds it up) — `--no-passive` turns this off along with every
+other third-party lookup. A hit becomes a `tentative`-confidence finding —
+NVD's keyword search is a text match, not a confirmed CPE match, so it means
+"go verify this," not "this is exploitable."
 
 ## Working while it scans
 
@@ -725,12 +725,12 @@ All optional. `assay doctor` shows which are present and what each buys you.
 | `naabu` | port scan | fast sweep first, so nmap only version-scans ports known to be open | nmap does the whole range — much slower on a /24 |
 | `httpx` | probe | bulk HTTP probing once there are 25+ candidates | native probe: same fields, slower |
 | `katana` | URL sourcing | JS-aware crawl — the main source of parameters | single-page link pass; **active checks lose most of their reach** |
-| `gau` / `waybackurls` | URL sourcing | every URL the host ever served (`--passive` only) | you only see what is linked today |
+| `gau` / `waybackurls` | URL sourcing | every URL the host ever served (on by default, `--no-passive` disables) | you only see what is linked today |
 | `arjun` | URL sourcing | parameters the server accepts but no page emits | hidden parameters stay untested |
 | `ffuf` + `seclists` | content discovery | unlinked endpoints — admin panels, backups, old API versions | that surface stays invisible |
 | `nuclei` | external | CVE and misconfiguration volume | stage skipped entirely |
 | `dnsx` | recon | bulk resolution and CNAME chains for takeover | threaded `getaddrinfo`, plus `dig` |
-| `subfinder` | recon | passive subdomain enumeration (`--passive`) | falls back to certificate transparency via crt.sh |
+| `subfinder` | recon | passive subdomain enumeration (on by default, `--no-passive` disables) | falls back to certificate transparency via crt.sh |
 | `interactsh-client` | active | automatic OOB callback correlation for blind SSRF | ledger mode — payloads still fire, you correlate in Collaborator |
 
 Nothing is installed that assay does not call: a test fails if a registered
@@ -875,9 +875,10 @@ that:
 - **Checks stop at proof.** The Docker module reads `/version` and never creates
   a container; the Elasticsearch check reads cluster health and stops. Findings
   demonstrate the primitive; they do not exercise it.
-- **Third-party lookups are opt-in.** Archive and certificate-transparency
-  queries tell someone other than your target what you are looking at, so they
-  only run under `--passive`.
+- **Third-party lookups are on by default, and one flag turns them off.**
+  Archive, certificate-transparency and NVD CVE queries tell someone other
+  than your target what you are looking at; `--no-passive` disables all of
+  them at once.
 - **AI triage is off unless you ask for it**, sends pseudonymised data only, and
   aborts rather than transmitting anything that fails the redaction check.
 
