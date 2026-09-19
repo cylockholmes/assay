@@ -787,8 +787,12 @@ _CONTENT_WORDLIST_TIERS = {
         "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
     ),
     "deep": (
-        "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt",
+        # raft-large-words.txt (~350k) before directory-list-2.3-big.txt
+        # (~1.27M): the latter is real but turns "deep = an overnight pass"
+        # into multiple days per host at any sane rate limit, so it is a
+        # fallback here, not the preferred deep-tier list.
         "/usr/share/seclists/Discovery/Web-Content/raft-large-words.txt",
+        "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt",
         "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
     ),
 }

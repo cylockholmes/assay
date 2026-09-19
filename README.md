@@ -146,12 +146,6 @@ Two things trip people up:
    added to Burp's Java trust store (`cacerts`). Import the CA with `keytool`,
    or point Burp at a `cacerts` bundle that already contains it.
 
-### Updating
-
-```bash
-git pull && ./install.sh
-```
-
 ---
 
 ## What makes it quiet
@@ -649,8 +643,14 @@ Override any of it: `--concurrency 4 --rate 10`.
 | Profile | Ports | Roughly | Use for |
 |---|---|---|---|
 | `quick` | top 100 | ~2 min/target | Triaging a fresh target list |
-| `standard` | top 1000 | ~10 min/target | Default |
-| `deep` | all | hours | An overnight pass on a shortlist |
+| `standard` | top 1000 | ~10-20 min/target | Default |
+| `deep` | all | hours per target, more with a large web surface | An overnight pass on a shortlist |
+
+"Roughly" is doing real work in that table: `--passive` and `--expand` run by
+default now, and both content discovery and subdomain brute-forcing scale
+their wordlist with the profile, so `standard`/`deep` cost more than they did
+before third-party lookups and bigger wordlists were the default. `--no-passive
+--no-expand` gets back closer to the old numbers.
 
 ---
 
@@ -719,8 +719,8 @@ assay orchestrates these when present and degrades gracefully when not —
 `assay doctor` shows what's missing and what each one buys you.
 
 `nmap` · `naabu` · `httpx` · `nuclei` · `katana` · `subfinder` · `dnsx` ·
-`tlsx` · `ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` ·
-`interactsh-client` · `puredns` · `testssl.sh` · `gowitness`
+`ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` · `interactsh-client` ·
+`xsltproc`
 
 ### What each tool is for
 
@@ -739,6 +739,7 @@ All optional. `assay doctor` shows which are present and what each buys you.
 | `dnsx` (+ `seclists` for the wordlist) | recon | bulk resolution and CNAME chains for takeover; also drives subdomain brute-forcing (gobuster `dns` mode / Sublist3r-equivalent — 5,000 words on `standard`, 110,000 on `deep`) | threaded `getaddrinfo`, plus `dig`; brute-forcing needs `dnsx` specifically, so it is skipped without it |
 | `subfinder` | recon | passive subdomain enumeration (on by default, `--no-passive` disables) | falls back to certificate transparency via crt.sh |
 | `interactsh-client` | active | automatic OOB callback correlation for blind SSRF | ledger mode — payloads still fire, you correlate in Collaborator |
+| `xsltproc` | after port scan | renders the beautified [NmapView](https://nmapview.github.io) dashboard from the run's nmap XML | the report links only to the raw XML, not the rendered view |
 
 Nothing is installed that assay does not call: a test fails if a registered
 tool is never invoked, because an unused tool still costs build time on a small
@@ -803,7 +804,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 | A02 Cryptographic Failures | Certificate validity, self-signed, legacy TLS, exposed `.htpasswd` |
 | A03 Injection | SQL injection (error differential + boolean inference), reflected-input context analysis, traversal oracles |
 | A05 Misconfiguration | 36 exposure signatures (VCS, `.env`, actuator, heapdump, `web.config`, source maps, backups), directory listing, GraphQL introspection, HTTP methods |
-| A06 Vulnerable Components | nuclei CVE templates, version fingerprinting |
+| A06 Vulnerable Components | nuclei CVE templates, version fingerprinting, software/version inventory cross-referenced against NVD |
 | A07 Auth Failures | WordPress user enumeration, XML-RPC amplification, default-login templates |
 | A08 Integrity Failures | Java RMI, JDWP, deserialization templates |
 | A10 SSRF | Out-of-band SSRF with callback correlation, in-band fetch-error oracle, internal host discovery, Host/proxy-header injection |
@@ -817,7 +818,7 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 .venv/bin/python -m tests.test_detection
 ```
 
-**214 tests**, all offline. Every detection test asserts **both** directions — the check
+**284 tests**, all offline. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).
