@@ -3435,7 +3435,7 @@ class WordlistTieringTests(unittest.TestCase):
             tools.default_wordlist("standard"),
             "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt")
 
-    def test_deep_profile_prefers_the_biggest_content_wordlist(self):
+    def test_deep_profile_prefers_a_bigger_content_wordlist_over_medium(self):
         from assay import tools
         self._only([
             "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
@@ -3444,6 +3444,20 @@ class WordlistTieringTests(unittest.TestCase):
         self.assertEqual(
             tools.default_wordlist("deep"),
             "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt")
+
+    def test_deep_profile_prefers_raft_large_over_the_1_2m_word_list(self):
+        """directory-list-2.3-big.txt is ~1.27M words - real, but at any sane
+        rate limit that is days per host, not the "hours" deep promises.
+        raft-large-words.txt (~350k) wins when both are installed, which is
+        the common case since the seclists apt package ships the whole tree."""
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/Web-Content/raft-large-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt",
+        ])
+        self.assertEqual(
+            tools.default_wordlist("deep"),
+            "/usr/share/seclists/Discovery/Web-Content/raft-large-words.txt")
 
     def test_falls_back_to_dirb_when_seclists_is_missing(self):
         from assay import tools
