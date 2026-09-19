@@ -110,6 +110,27 @@ def permute(known: Iterable[str], apex: str, cap: int = 400) -> List[str]:
     return sorted(out)[:cap]
 
 
+def wordlist_subdomains(apex: str, wordlist_path: str, cap: int = 150000) -> List[str]:
+    """Real wordlist-driven subdomain brute-forcing - the same technique as
+    gobuster's dns mode or Sublist3r's brute-force pass. Generating the
+    candidate names is the only part worth doing by hand; resolving them at
+    volume is dnsx's job, via resolve_bulk() below.
+    """
+    out: List[str] = []
+    try:
+        with open(wordlist_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                word = line.strip()
+                if not word or word.startswith("#"):
+                    continue
+                out.append("%s.%s" % (word, apex))
+                if len(out) >= cap:
+                    break
+    except OSError:
+        return []
+    return out
+
+
 def resolve_bulk(hosts: List[str], workers: int = 16) -> Dict[str, str]:
     """Resolve many names. Uses dnsx when available, else threaded getaddrinfo."""
     if not hosts:

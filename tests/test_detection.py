@@ -3389,5 +3389,141 @@ class SoftwareInventorySectionTests(unittest.TestCase):
         self.assertIn("1 known CVE match(es)", section)
 
 
+class WordlistTieringTests(unittest.TestCase):
+    """tools.default_wordlist()/dns_wordlist(): the content-discovery and
+    DNS-brute-force wordlists scale with the profile's own time budget -
+    'quick' stays on the small list, 'standard'/'deep' reach for a bigger
+    one when it is actually installed, and everything falls back cleanly
+    when SecLists is missing.
+
+    os.path.exists is monkeypatched to a fixed set of "present" paths for
+    the duration of each test - the real SecLists tree is not expected to
+    exist in a test environment, and never should for this suite to stay
+    offline.
+    """
+
+    def setUp(self):
+        import os
+        self._orig_exists = os.path.exists
+
+    def tearDown(self):
+        import os
+        os.path.exists = self._orig_exists
+
+    def _only(self, present):
+        import os
+        present = set(present)
+        os.path.exists = lambda p: p in present
+
+    def test_quick_profile_gets_the_small_content_wordlist(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
+        ])
+        self.assertEqual(
+            tools.default_wordlist("quick"),
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt")
+
+    def test_standard_profile_prefers_a_bigger_content_wordlist(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
+        ])
+        self.assertEqual(
+            tools.default_wordlist("standard"),
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt")
+
+    def test_deep_profile_prefers_the_biggest_content_wordlist(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt",
+        ])
+        self.assertEqual(
+            tools.default_wordlist("deep"),
+            "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt")
+
+    def test_falls_back_to_dirb_when_seclists_is_missing(self):
+        from assay import tools
+        self._only(["/usr/share/dirb/wordlists/common.txt"])
+        self.assertEqual(tools.default_wordlist("deep"),
+                         "/usr/share/dirb/wordlists/common.txt")
+
+    def test_no_content_wordlist_anywhere_returns_none(self):
+        from assay import tools
+        self._only([])
+        self.assertIsNone(tools.default_wordlist("standard"))
+
+    def test_quick_profile_has_no_dns_bruteforce_wordlist(self):
+        """Quick stays fast: DNS brute-forcing is what standard/deep buy."""
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt",
+        ])
+        self.assertIsNone(tools.dns_wordlist("quick"))
+
+    def test_standard_profile_gets_the_5000_word_dns_list(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+        ])
+        self.assertEqual(
+            tools.dns_wordlist("standard"),
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt")
+
+    def test_deep_profile_prefers_the_110000_word_dns_list(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt",
+        ])
+        self.assertEqual(
+            tools.dns_wordlist("deep"),
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt")
+
+    def test_deep_falls_back_to_the_5000_word_list_if_110000_is_absent(self):
+        from assay import tools
+        self._only([
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+        ])
+        self.assertEqual(
+            tools.dns_wordlist("deep"),
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt")
+
+
+class WordlistSubdomainsTests(unittest.TestCase):
+    """recon.wordlist_subdomains(): turning a DNS wordlist into candidate
+    hostnames - gobuster's dns mode / Sublist3r's brute-force pass, minus
+    the resolver (that part is dnsx's job, via resolve_bulk())."""
+
+    def _wordlist(self, words):
+        import tempfile
+        path = tempfile.mkstemp()[1]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(words))
+        return path
+
+    def test_one_candidate_per_word_comments_and_blanks_skipped(self):
+        from assay import recon
+        path = self._wordlist(["www", "# a comment", "", "api", "mail"])
+        found = recon.wordlist_subdomains("example.com", path)
+        self.assertEqual(found, ["www.example.com", "api.example.com",
+                                 "mail.example.com"])
+
+    def test_cap_limits_the_candidate_count(self):
+        from assay import recon
+        path = self._wordlist(["word%d" % i for i in range(100)])
+        found = recon.wordlist_subdomains("example.com", path, cap=10)
+        self.assertEqual(len(found), 10)
+
+    def test_missing_wordlist_file_returns_empty_not_an_exception(self):
+        from assay import recon
+        self.assertEqual(
+            recon.wordlist_subdomains("example.com", "/no/such/wordlist.txt"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
