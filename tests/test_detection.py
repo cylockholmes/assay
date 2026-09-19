@@ -3261,7 +3261,9 @@ class InventoryModuleTests(unittest.TestCase):
         self.assertEqual(found, [])
         path = os.path.join(ctx.cfg.out_dir, "raw", "software-inventory.json")
         with open(path) as fh:
-            rows = json.load(fh)
+            doc = json.load(fh)
+        self.assertFalse(doc["cve_checked"])
+        rows = doc["items"]
         self.assertTrue(any(r["name"] == "nginx" and r["version"] == "1.18.0"
                             for r in rows))
         self.assertTrue(all(r["cves"] == [] for r in rows))
@@ -3315,7 +3317,7 @@ class SoftwareInventorySectionTests(unittest.TestCase):
     """The report's Software inventory section: present with whatever
     inventory.py wrote to raw/software-inventory.json, absent without it."""
 
-    def _report_with_inventory(self, rows):
+    def _report_with_inventory(self, rows, cve_checked=True):
         import json, os, tempfile
         from assay import report
         from assay.models import Evidence, Finding
@@ -3324,7 +3326,7 @@ class SoftwareInventorySectionTests(unittest.TestCase):
         os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
         with open(os.path.join(out_dir, "raw", "software-inventory.json"), "w",
                  encoding="utf-8") as fh:
-            json.dump(rows, fh)
+            json.dump({"cve_checked": cve_checked, "items": rows}, fh)
         s = Store(os.path.join(out_dir, "assay.db"))
         s.start_run("standard", ["10.0.0.5"])
         s.add_finding(Finding(
@@ -3353,16 +3355,25 @@ class SoftwareInventorySectionTests(unittest.TestCase):
                                  os.path.join(out_dir, "r.html"))).read()
         self.assertNotIn('id="software-inventory"', html)
 
-    def test_section_lists_software_with_no_cves(self):
+    def test_section_lists_software_checked_with_no_cve_hits(self):
         html = self._report_with_inventory([
             {"name": "OpenSSH", "version": "8.9", "category": "service",
              "sources": ["nmap service detection"], "where": ["10.0.0.5:22"],
              "cves": []},
-        ])
+        ], cve_checked=True)
         self.assertIn('id="software-inventory"', html)
         self.assertIn("OpenSSH", html)
         self.assertIn("8.9", html)
+        self.assertIn("Checked against NVD - no known CVEs matched", html)
+
+    def test_section_says_no_check_ran_when_no_passive_was_set(self):
+        html = self._report_with_inventory([
+            {"name": "OpenSSH", "version": "8.9", "category": "service",
+             "sources": ["nmap service detection"], "where": ["10.0.0.5:22"],
+             "cves": []},
+        ], cve_checked=False)
         self.assertIn("No known-CVE cross-reference was run", html)
+        self.assertIn("--no-passive", html)
 
     def test_section_shows_cve_id_and_worst_severity_when_present(self):
         html = self._report_with_inventory([
