@@ -59,8 +59,10 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     if chains:
         parts.append(_chains_section(chains, findings))
 
+    out_dir = os.path.dirname(os.path.abspath(out_path))
     parts.append(_inventory(store))
-    parts.append(_nmap_section(os.path.dirname(os.path.abspath(out_path))))
+    parts.append(_software_section(out_dir))
+    parts.append(_nmap_section(out_dir))
 
     for bucket in ("CHASE", "LOOK", "NOTE"):
         items = buckets.get(bucket) or []
@@ -185,6 +187,73 @@ def _inventory(store: Store) -> str:
                    '<tbody>%s</tbody></table></div>' % "".join(wrows))
     out.append("</section>")
     return "".join(out)
+
+
+# --------------------------------------------------------------------------
+# Software/version inventory + NVD CVE cross-reference
+# --------------------------------------------------------------------------
+
+_CVE_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _software_section(out_dir: str) -> str:
+    """Every product/version this run could identify, host and web side,
+    plus any known CVEs NVD's keyword search turned up (--passive only -
+    see assay.modules.inventory). Written regardless of whether anything
+    looks vulnerable: it is the asset inventory a client's security team
+    usually does not have.
+    """
+    path = os.path.join(out_dir, "raw", "software-inventory.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            rows = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    if not rows:
+        return ""
+
+    cve_total = sum(len(r.get("cves") or []) for r in rows)
+    trs = []
+    for r in rows:
+        cves = r.get("cves") or []
+        if cves:
+            worst = min(cves, key=lambda c: _CVE_SEV_ORDER.get(c.get("severity"), 4))
+            extra = " +%d more" % (len(cves) - 1) if len(cves) > 1 else ""
+            cve_html = (
+                '<span class="sev" style="background:%s">%s</span> '
+                '<a href="%s" target="_blank" rel="noopener">%s</a>%s'
+                % (SEV_COLOR.get(worst.get("severity"), "#8ab4f8"),
+                   _e(worst.get("severity", "")), _e(worst.get("url", "")),
+                   _e(worst.get("id", "")), _e(extra)))
+        else:
+            cve_html = '<span class="dim">-</span>'
+        where = r.get("where") or []
+        where_txt = ", ".join(where[:3]) + (" +%d more" % (len(where) - 3)
+                                            if len(where) > 3 else "")
+        trs.append(
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+            % (_e(r.get("name", "")), _e(r.get("version") or "?"),
+               _e(r.get("category", "")), _e(where_txt), cve_html))
+
+    cve_note = (
+        '<p class="blurb">%d known CVE match(es) via NVD keyword search. A match is '
+        'a text match on name and version, not a confirmed CPE match - verify the '
+        'specific CVE applies before reporting it.</p>' % cve_total
+        if cve_total else
+        '<p class="blurb">No known-CVE cross-reference was run for this scan - add '
+        '<code>--passive</code> to check detected versions against NVD.</p>'
+    )
+    return (
+        '<section class="bucket" id="software-inventory">'
+        '<h2>Software inventory <span class="count">%d item(s)</span></h2>'
+        '<p class="blurb">Every open-source or commercial product/version this run '
+        'could identify: nmap service detection on the host side, and HTTP headers, '
+        'generator tags and bundled JS libraries on the web side.</p>%s'
+        '<div class="tw"><table><thead><tr><th>name</th><th>version</th>'
+        '<th>category</th><th>seen at</th><th>known CVEs</th></tr></thead>'
+        '<tbody>%s</tbody></table></div>'
+        '</section>'
+    ) % (len(rows), cve_note, "".join(trs))
 
 
 # --------------------------------------------------------------------------

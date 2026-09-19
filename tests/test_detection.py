@@ -3066,5 +3066,317 @@ class UnregisteredDomainRefTests(unittest.TestCase):
         self.assertIn("script", refs["evil-cdn.tld"])
 
 
+class SoftwareCollectionTests(unittest.TestCase):
+    """assay.software: turning nmap ports and web responses into a flat
+    (name, version) inventory, independent of any CVE lookup."""
+
+    def test_collect_from_host_needs_both_product_and_version(self):
+        from assay.models import Port, Target
+        from assay.software import collect_from_host
+        t = Target(raw="10.0.0.5", host="10.0.0.5", ports=[
+            Port(port=22, service="ssh", product="OpenSSH", version="8.9"),
+            Port(port=53, service="domain", product="", version=""),
+        ])
+        found = collect_from_host(t)
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0].name, found[0].version), ("OpenSSH", "8.9"))
+        self.assertEqual(found[0].where, "10.0.0.5:22")
+
+    def test_server_header_with_multiple_tokens_splits_into_separate_items(self):
+        from assay.software import collect_from_web
+        wt = web_target(headers={})
+        wt.server = "Apache/2.4.41 (Ubuntu) OpenSSL/1.1.1f PHP/7.4.3"
+        found = collect_from_web(wt)
+        names = {(f.name, f.version) for f in found}
+        self.assertIn(("Apache", "2.4.41"), names)
+        self.assertIn(("OpenSSL", "1.1.1f"), names)
+        self.assertIn(("PHP", "7.4.3"), names)
+
+    def test_bare_server_header_with_no_version_is_not_misparsed(self):
+        from assay.software import collect_from_web
+        wt = web_target()
+        wt.server = "nginx"
+        found = collect_from_web(wt)
+        self.assertEqual(found, [])
+
+    def test_versioned_js_library_detected_from_body(self):
+        from assay.software import collect_from_web
+        wt = web_target()
+        wt.body_sample = '<script src="/assets/jquery-3.4.1.min.js"></script>'
+        found = collect_from_web(wt)
+        self.assertIn(("jQuery", "3.4.1"), [(f.name, f.version) for f in found])
+
+    def test_generator_meta_tag_gives_a_cms_version(self):
+        from assay.software import collect_from_web
+        wt = web_target()
+        wt.body_sample = '<meta name="generator" content="WordPress 5.7.2">'
+        found = collect_from_web(wt)
+        match = [f for f in found if f.name == "WordPress"]
+        self.assertEqual(len(match), 1)
+        self.assertEqual(match[0].version, "5.7.2")
+        self.assertEqual(match[0].category, "cms")
+
+    def test_tech_signatures_without_a_version_fill_in_the_gap(self):
+        """wt.tech (Engine._fingerprint) has no version info, but a name-only
+        hit is still worth listing rather than silently dropping it."""
+        from assay.software import collect_from_web
+        wt = web_target()
+        wt.tech = ["React"]
+        found = collect_from_web(wt)
+        self.assertEqual([(f.name, f.version) for f in found], [("React", "")])
+
+    def test_tech_signature_is_not_duplicated_when_a_version_was_already_found(self):
+        from assay.software import collect_from_web
+        wt = web_target()
+        wt.body_sample = '<script src="/assets/bootstrap-5.1.3.min.js"></script>'
+        wt.tech = ["Bootstrap"]
+        found = collect_from_web(wt)
+        names = [f.name for f in found]
+        self.assertEqual(names.count("Bootstrap"), 1)
+
+    def test_merge_collapses_by_name_and_version_across_hosts(self):
+        from assay.software import Software, merge
+        items = [
+            Software("OpenSSH", "8.9", "service", "10.0.0.1:22", "nmap"),
+            Software("OpenSSH", "8.9", "service", "10.0.0.2:22", "nmap"),
+            Software("OpenSSH", "9.0", "service", "10.0.0.3:22", "nmap"),
+        ]
+        rows = merge(items)
+        self.assertEqual(len(rows), 2)
+        row_89 = next(r for r in rows if r["version"] == "8.9")
+        self.assertEqual(sorted(row_89["where"]), ["10.0.0.1:22", "10.0.0.2:22"])
+
+
+class CveLookupTests(unittest.TestCase):
+    """assay.cve: parsing NVD's response shape and staying silent on failure.
+
+    Never sleeps for real - _throttle is monkeypatched to a no-op so this
+    suite stays offline-fast regardless of call order.
+    """
+
+    def setUp(self):
+        from assay import cve
+        self._orig_throttle = cve._throttle
+        cve._throttle = lambda has_key: None
+
+    def tearDown(self):
+        from assay import cve
+        cve._throttle = self._orig_throttle
+
+    def _nvd_body(self, entries):
+        import json as _json
+        return _json.dumps({"vulnerabilities": [
+            {"cve": {
+                "id": cve_id,
+                "descriptions": [{"lang": "en", "value": summary}],
+                "published": published,
+                "metrics": ({"cvssMetricV31": [{"cvssData": {"baseScore": score}}]}
+                            if score is not None else {}),
+            }}
+            for cve_id, summary, score, published in entries
+        ]})
+
+    def test_parse_sorts_worst_first_and_buckets_severity(self):
+        from assay.cve import parse
+        body = self._nvd_body([
+            ("CVE-2020-1", "low one", 3.1, "2020-01-01"),
+            ("CVE-2020-2", "critical one", 9.8, "2020-02-01"),
+            ("CVE-2020-3", "medium one", 5.0, "2020-03-01"),
+        ])
+        matches = parse(body)
+        self.assertEqual([m.cve_id for m in matches],
+                         ["CVE-2020-2", "CVE-2020-3", "CVE-2020-1"])
+        self.assertEqual(matches[0].severity, "critical")
+        self.assertEqual(matches[2].severity, "low")
+
+    def test_entry_with_no_cvss_score_is_info_not_dropped(self):
+        from assay.cve import parse
+        body = self._nvd_body([("CVE-2020-4", "unscored", None, "2020-01-01")])
+        matches = parse(body)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, "info")
+        self.assertIsNone(matches[0].score)
+
+    def test_malformed_body_returns_empty_not_an_exception(self):
+        from assay.cve import parse
+        self.assertEqual(parse("not json"), [])
+        self.assertEqual(parse("{}"), [])
+
+    def test_lookup_needs_both_name_and_version(self):
+        from assay.cve import lookup
+        self.assertEqual(lookup("", "1.0", http=None), [])
+        self.assertEqual(lookup("nginx", "", http=None), [])
+
+    def test_lookup_returns_empty_on_non_200(self):
+        from assay.cve import lookup
+        from tests.stub import StubHttp
+        http = StubHttp([], catch_all=(500, {}, "error"))
+        self.assertEqual(lookup("nginx", "1.18.0", http), [])
+
+    def test_lookup_parses_a_real_response_through_the_stub_http(self):
+        from assay.cve import lookup
+        from tests.stub import StubHttp, path_route
+        body = self._nvd_body([("CVE-2021-23017", "nginx resolver off-by-one",
+                                8.1, "2021-05-25")])
+        http = StubHttp([path_route("/rest/json/cves/2.0", body=body)])
+        matches = lookup("nginx", "1.18.0", http)
+        self.assertEqual([m.cve_id for m in matches], ["CVE-2021-23017"])
+        self.assertEqual(matches[0].severity, "high")
+
+
+class InventoryModuleTests(unittest.TestCase):
+    """InventoryModule: builds the software table from whatever the run
+    already collected, writes it for the report, and only calls out to NVD
+    under --passive - the same third-party-traffic rule as web_archive.py.
+    """
+
+    def setUp(self):
+        from assay import cve
+        self._orig_throttle = cve._throttle
+        cve._throttle = lambda has_key: None
+
+    def tearDown(self):
+        from assay import cve
+        cve._throttle = self._orig_throttle
+
+    def _ctx(self, passive=False):
+        import tempfile
+        from assay.models import Port, Target
+        ctx, http = make_ctx([])
+        ctx.cfg.out_dir = tempfile.mkdtemp()
+        ctx.cfg.passive = passive
+        ctx.targets = [Target(raw="10.0.0.5", host="10.0.0.5", ports=[
+            Port(port=443, service="https", product="nginx", version="1.18.0"),
+        ])]
+        wt = web_target()
+        wt.server = "nginx/1.18.0"
+        ctx.web = [wt]
+        return ctx, http
+
+    def test_writes_inventory_json_with_no_cve_lookup_when_not_passive(self):
+        import json, os
+        from assay.modules.inventory import InventoryModule
+        ctx, http = self._ctx(passive=False)
+        found = InventoryModule().run_global(ctx)
+        self.assertEqual(found, [])
+        path = os.path.join(ctx.cfg.out_dir, "raw", "software-inventory.json")
+        with open(path) as fh:
+            rows = json.load(fh)
+        self.assertTrue(any(r["name"] == "nginx" and r["version"] == "1.18.0"
+                            for r in rows))
+        self.assertTrue(all(r["cves"] == [] for r in rows))
+        self.assertFalse(any("nvd.nist.gov" in u for _, u in http.calls))
+
+    def test_passive_mode_queries_nvd_and_produces_a_finding_on_a_hit(self):
+        from assay.modules.inventory import InventoryModule
+        ctx, http = self._ctx(passive=True)
+        body = self._nvd_body()
+        # Route every NVD call to the same canned hit for nginx/1.18.0.
+        orig_get = http.get
+
+        def routed_get(url, **kw):
+            if "cves/2.0" in url:
+                return self._resp(url, body)
+            return orig_get(url, **kw)
+        http.get = routed_get
+        found = InventoryModule().run_global(ctx)
+        self.assertTrue(found, "a known-CVE hit must produce a finding")
+        self.assertIn("nginx", found[0].title)
+        self.assertEqual(found[0].confidence, "tentative")
+        self.assertIn("CVE-2021-23017", found[0].detail)
+
+    def _nvd_body(self):
+        import json as _json
+        return _json.dumps({"vulnerabilities": [{"cve": {
+            "id": "CVE-2021-23017",
+            "descriptions": [{"lang": "en", "value": "nginx resolver off-by-one"}],
+            "published": "2021-05-25",
+            "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 8.1}}]},
+        }}]})
+
+    def _resp(self, url, body):
+        from assay.net import Resp
+        return Resp(url=url, status=200, headers={}, body=body, elapsed=0.01,
+                   method="GET")
+
+    def test_nothing_detected_writes_nothing_and_returns_no_findings(self):
+        import os
+        from assay.modules.inventory import InventoryModule
+        ctx, _ = self._ctx(passive=True)
+        ctx.targets = []
+        ctx.web = []
+        found = InventoryModule().run_global(ctx)
+        self.assertEqual(found, [])
+        path = os.path.join(ctx.cfg.out_dir, "raw", "software-inventory.json")
+        self.assertFalse(os.path.exists(path))
+
+
+class SoftwareInventorySectionTests(unittest.TestCase):
+    """The report's Software inventory section: present with whatever
+    inventory.py wrote to raw/software-inventory.json, absent without it."""
+
+    def _report_with_inventory(self, rows):
+        import json, os, tempfile
+        from assay import report
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        out_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(out_dir, "raw"), exist_ok=True)
+        with open(os.path.join(out_dir, "raw", "software-inventory.json"), "w",
+                 encoding="utf-8") as fh:
+            json.dump(rows, fh)
+        s = Store(os.path.join(out_dir, "assay.db"))
+        s.start_run("standard", ["10.0.0.5"])
+        s.add_finding(Finding(
+            title="x", target="x", severity="low", confidence="confirmed",
+            module="m", category="c", cwe="", impact="i", detail="d", repro="r",
+            evidence=[Evidence(kind="http", label="e", output="e")]))
+        html = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
+                                     "duration": 1.0},
+                                 os.path.join(out_dir, "r.html"))).read()
+        return html
+
+    def test_section_absent_with_no_inventory_file(self):
+        import os, tempfile
+        from assay import report
+        from assay.models import Evidence, Finding
+        from assay.store import Store
+        out_dir = tempfile.mkdtemp()
+        s = Store(os.path.join(out_dir, "assay.db"))
+        s.start_run("standard", ["t"])
+        s.add_finding(Finding(
+            title="x", target="x", severity="low", confidence="confirmed",
+            module="m", category="c", cwe="", impact="i", detail="d", repro="r",
+            evidence=[Evidence(kind="http", label="e", output="e")]))
+        html = open(report.build(s, {"hosts": 1, "web": 0, "requests": 1,
+                                     "duration": 1.0},
+                                 os.path.join(out_dir, "r.html"))).read()
+        self.assertNotIn('id="software-inventory"', html)
+
+    def test_section_lists_software_with_no_cves(self):
+        html = self._report_with_inventory([
+            {"name": "OpenSSH", "version": "8.9", "category": "service",
+             "sources": ["nmap service detection"], "where": ["10.0.0.5:22"],
+             "cves": []},
+        ])
+        self.assertIn('id="software-inventory"', html)
+        self.assertIn("OpenSSH", html)
+        self.assertIn("8.9", html)
+        self.assertIn("No known-CVE cross-reference was run", html)
+
+    def test_section_shows_cve_id_and_worst_severity_when_present(self):
+        html = self._report_with_inventory([
+            {"name": "nginx", "version": "1.18.0", "category": "service",
+             "sources": ["Server header"], "where": ["https://x/"],
+             "cves": [{"id": "CVE-2021-23017", "severity": "high", "score": 8.1,
+                      "summary": "resolver off-by-one",
+                      "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-23017"}]},
+        ])
+        section = html.split('id="software-inventory"')[1].split("</section>")[0]
+        self.assertIn("CVE-2021-23017", section)
+        self.assertIn("high", section)
+        self.assertIn("1 known CVE match(es)", section)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

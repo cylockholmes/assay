@@ -33,7 +33,7 @@ MAX_BODY = 512 * 1024
 INFRA_HOSTS = {
     "crt.sh", "web.archive.org", "archive.org", "rdap.org", "rdap.iana.org",
     "data.iana.org", "otx.alienvault.com", "urlscan.io", "index.commoncrawl.org",
-    "dns.google", "cloudflare-dns.com",
+    "dns.google", "cloudflare-dns.com", "services.nvd.nist.gov",
 }
 
 
