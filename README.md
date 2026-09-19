@@ -301,6 +301,23 @@ target list looks. With the inventory, "there was nothing wrong" and "there was
 nothing there" are different outcomes, and the empty-result message says which
 one happened.
 
+## Software inventory and known CVEs
+
+Every product and version assay could pin down — nmap's own service
+detection on the host side, plus `Server`/`X-Powered-By` headers, CMS
+generator meta tags, and bundled JS libraries (jQuery, Bootstrap, React,
+and friends) on the web side — collapses into one table in the report, open
+source and commercial alike. It is written regardless of whether anything
+looks vulnerable, because "what is actually running, by name and version" is
+the asset inventory a client's security team usually does not have.
+
+With `--passive`, each distinct product/version also gets checked against
+NVD's public CVE database (`services.nvd.nist.gov`, no API key required,
+though `NVD_API_KEY` speeds it up). A hit becomes a `tentative`-confidence
+finding — NVD's keyword search is a text match, not a confirmed CPE match, so
+it means "go verify this," not "this is exploitable." Same third-party-traffic
+rule as the Wayback Machine lookups: it only runs when you opt in.
+
 ## Working while it scans
 
 The report is written from the first finding and refreshed every few seconds
@@ -328,7 +345,7 @@ during a scan.
 ├── report.html         rebuilt every run (and every few seconds while scanning)
 ├── activity.log        every request and command, timestamped   (mode 0600)
 ├── replay.sh           the same actions as runnable commands    (mode 0700)
-├── raw/                nmap XML, NSE output
+├── raw/                nmap XML, NSE output, software-inventory.json
 ├── evidence/           captured request/response bodies
 ├── ai-payload.json     exactly what was sent to the model       --ai only
 ├── ai-triage.json      verdicts and chains, re-hydrated locally --ai only
