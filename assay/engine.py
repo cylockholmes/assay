@@ -129,7 +129,7 @@ class Engine:
         if self.cfg.opts.get("content_discovery") and self.ctx.web:
             if not self.ctx.has("ffuf"):
                 self.ctx.say("probe", "content discovery skipped: ffuf not installed")
-            elif not tools.default_wordlist():
+            elif not tools.default_wordlist(self.cfg.profile):
                 self.ctx.say("probe", "content discovery skipped: no wordlist found "
                                       "(install seclists or dirb)")
         self._stage_modules("probe")
@@ -253,6 +253,13 @@ class Engine:
                     candidates.update(found)
             candidates.update(recon.permute(hosts, apex,
                                             cap=120 if self.cfg.profile == "quick" else 400))
+
+            wordlist = tools.dns_wordlist(self.cfg.profile) if self.ctx.has("dnsx") else None
+            if wordlist:
+                wl_hosts = recon.wordlist_subdomains(apex, wordlist)
+                candidates.update(wl_hosts)
+                self.ctx.say("recon", "%s: %d candidate(s) from %s"
+                             % (apex, len(wl_hosts), os.path.basename(wordlist)))
 
         candidates -= known
         candidates = {c for c in candidates if self.cfg.scope.allows(c)}

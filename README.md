@@ -270,6 +270,13 @@ before scanning it: environment permutations (`dev-`, `staging-`, `api-`, …)
 resolved against DNS, plus CT logs and subdomain sources unless `--no-passive`
 is set. Wildcard DNS is fingerprinted and its hits discarded.
 
+When `dnsx` is installed, permutations are joined by a real subdomain
+wordlist — the same technique as gobuster's `dns` mode or Sublist3r's
+brute-force pass, just handed to `dnsx` for bulk resolution instead of a
+resolver written here. `quick` skips it (the permutation list stays fast on
+its own); `standard` uses SecLists' 5,000-word list, `deep` its 110,000-word
+one.
+
 Two checks find surface DNS never advertises:
 
 - **Virtual hosts** — Host-header probing against an in-scope IP. A name only
@@ -727,9 +734,9 @@ All optional. `assay doctor` shows which are present and what each buys you.
 | `katana` | URL sourcing | JS-aware crawl — the main source of parameters | single-page link pass; **active checks lose most of their reach** |
 | `gau` / `waybackurls` | URL sourcing | every URL the host ever served (on by default, `--no-passive` disables) | you only see what is linked today |
 | `arjun` | URL sourcing | parameters the server accepts but no page emits | hidden parameters stay untested |
-| `ffuf` + `seclists` | content discovery | unlinked endpoints — admin panels, backups, old API versions | that surface stays invisible |
+| `ffuf` + `seclists` | content discovery | unlinked endpoints — admin panels, backups, old API versions; wordlist size scales with `--profile` | that surface stays invisible |
 | `nuclei` | external | CVE and misconfiguration volume | stage skipped entirely |
-| `dnsx` | recon | bulk resolution and CNAME chains for takeover | threaded `getaddrinfo`, plus `dig` |
+| `dnsx` (+ `seclists` for the wordlist) | recon | bulk resolution and CNAME chains for takeover; also drives subdomain brute-forcing (gobuster `dns` mode / Sublist3r-equivalent — 5,000 words on `standard`, 110,000 on `deep`) | threaded `getaddrinfo`, plus `dig`; brute-forcing needs `dnsx` specifically, so it is skipped without it |
 | `subfinder` | recon | passive subdomain enumeration (on by default, `--no-passive` disables) | falls back to certificate transparency via crt.sh |
 | `interactsh-client` | active | automatic OOB callback correlation for blind SSRF | ledger mode — payloads still fire, you correlate in Collaborator |
 

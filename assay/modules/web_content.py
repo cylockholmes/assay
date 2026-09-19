@@ -46,10 +46,10 @@ class ContentDiscoveryModule(Module):
             return False
         if not ctx.has("ffuf"):
             return False
-        return bool(tools.default_wordlist())
+        return bool(tools.default_wordlist(ctx.cfg.profile))
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        wordlist = tools.default_wordlist()
+        wordlist = tools.default_wordlist(ctx.cfg.profile)
         origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
         bl = ctx.baseline_for(origin)
 
