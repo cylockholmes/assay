@@ -77,7 +77,8 @@ REGISTRY: Dict[str, ToolSpec] = {
                      go="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"),
     "ffuf": ToolSpec("ffuf", "content discovery with automatic soft-404 calibration",
                      "sudo apt install -y ffuf", apt="ffuf"),
-    "seclists": ToolSpec("seclists", "wordlists ffuf needs to find unlinked endpoints",
+    "seclists": ToolSpec("seclists", "wordlists ffuf and dnsx need for content "
+                         "discovery and subdomain brute-forcing",
                          "sudo apt install -y seclists", apt="seclists",
                          binary="__wordlist__"),
     "gau": ToolSpec("gau", "historical URLs from Wayback/CommonCrawl/OTX (passive)",
@@ -772,13 +773,57 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = No
             pass
 
 
-def default_wordlist() -> Optional[str]:
-    for path in (
+# Bigger costs time, not just hit rate - ffuf still has to send one request
+# per word - so the wordlist scales with the profile's own time budget
+# instead of always reaching for the largest list installed.
+_CONTENT_WORDLIST_TIERS = {
+    "quick": (
         "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
         "/usr/share/seclists/Discovery/Web-Content/common.txt",
-        "/usr/share/wordlists/dirb/common.txt",
-        "/usr/share/dirb/wordlists/common.txt",
-    ):
+    ),
+    "standard": (
+        "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
+        "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt",
+        "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+    ),
+    "deep": (
+        "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt",
+        "/usr/share/seclists/Discovery/Web-Content/raft-large-words.txt",
+        "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt",
+    ),
+}
+_CONTENT_WORDLIST_FALLBACK = (
+    "/usr/share/wordlists/dirb/common.txt",
+    "/usr/share/dirb/wordlists/common.txt",
+)
+
+
+def default_wordlist(profile: str = "standard") -> Optional[str]:
+    tiers = _CONTENT_WORDLIST_TIERS.get(profile, _CONTENT_WORDLIST_TIERS["standard"])
+    for path in tiers + _CONTENT_WORDLIST_FALLBACK:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+# Subdomain brute-forcing: gobuster's dns mode / Sublist3r's brute-force pass,
+# handed to dnsx for resolution rather than reimplementing a resolver. 'quick'
+# gets no entry here at all - the passive sources and the small permutation
+# list in recon.PERMUTATIONS stay fast on their own, and wordlist
+# brute-forcing is what --expand buys on standard/deep.
+_DNS_WORDLIST_TIERS = {
+    "deep": (
+        "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt",
+        "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+    ),
+    "standard": (
+        "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+    ),
+}
+
+
+def dns_wordlist(profile: str = "standard") -> Optional[str]:
+    for path in _DNS_WORDLIST_TIERS.get(profile, ()):
         if os.path.exists(path):
             return path
     return None
