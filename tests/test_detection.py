@@ -1996,6 +1996,18 @@ class JournalSecretTests(unittest.TestCase):
         self.assertNotIn("abc123secret", blob)
         self.assertNotIn("live_key_9999", blob)
 
+    def test_nvd_apikey_header_is_not_written(self):
+        """assay.cve sends NVD_API_KEY as a bare 'apiKey' header - a distinct
+        name from 'X-Api-Key' above, and previously missing from
+        SECRET_HEADERS, so it was written to replay.sh in cleartext whenever
+        NVD_API_KEY was set. Found by checking assay.cve's actual header name
+        against this list rather than assuming the existing entries covered
+        it."""
+        j = self._journal({"apiKey": "nvd-real-secret-0000"})
+        blob = open(j.replay_path).read()
+        self.assertNotIn("nvd-real-secret-0000", blob)
+        self.assertIn("${ASSAY_NVD_KEY", blob)
+
     def test_ordinary_headers_are_still_recorded(self):
         """Redaction must not gut the replay's usefulness."""
         j = self._journal({"X-Trace": "ok", "Referer": "https://target.tld/"})
@@ -2007,6 +2019,55 @@ class JournalSecretTests(unittest.TestCase):
         j = self._journal({"X-Trace": "ok"})
         self.assertEqual(stat.S_IMODE(os.stat(j.log_path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(j.replay_path).st_mode), 0o700)
+
+
+class AiTriageFilePermissionTests(unittest.TestCase):
+    """ai-triage.json is the *rehydrated* AI result - real hostnames and IPs
+    are back in it, same as redaction-map.json, so it needs the same 0600
+    treatment. It didn't have it: this locks in the fix.
+
+    ai_mod.analyze and credential_status are monkeypatched to a canned
+    success so this stays offline - no real Anthropic API call.
+    """
+
+    def test_ai_triage_json_is_written_owner_only(self):
+        import argparse, os, stat, tempfile
+        from assay import ai as ai_mod
+        from assay import cli
+        from assay.config import Config
+        from assay.store import Store
+
+        out_dir = tempfile.mkdtemp()
+        s = Store(os.path.join(out_dir, "assay.db"))
+        s.start_run("standard", ["10.0.0.5"])
+        s.save_host("10.0.0.5", "10.0.0.5", {"ports": []})
+        from assay.models import Evidence, Finding
+        s.add_finding(Finding(
+            title="x", target="10.0.0.5", severity="low", confidence="confirmed",
+            module="m", category="c", cwe="", impact="i", detail="d", repro="r",
+            evidence=[Evidence(kind="http", label="e", output="e")]))
+        cfg = Config(out_dir=out_dir, targets=["10.0.0.5"])
+
+        orig_analyze = ai_mod.analyze
+        orig_cred = ai_mod.credential_status
+        ai_mod.analyze = lambda *a, **k: {
+            "summary": "10.0.0.5 looks fine.", "triage": [], "chains": [],
+            "_usage": {"input_tokens": 10, "output_tokens": 10,
+                      "cost_estimate_usd": 0.001},
+        }
+        ai_mod.credential_status = lambda: (True, "test stub")
+        try:
+            args = argparse.Namespace(ai_model="claude-opus-5", ai_max=60,
+                                      ai_evidence=False, ai_dry_run=False,
+                                      ai_effort="high", ai_yes=True)
+            cli.run_ai(s, cfg, args, {"hosts": 1, "web": 0})
+        finally:
+            ai_mod.analyze = orig_analyze
+            ai_mod.credential_status = orig_cred
+
+        path = os.path.join(out_dir, "ai-triage.json")
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 class EmptyStateTests(unittest.TestCase):

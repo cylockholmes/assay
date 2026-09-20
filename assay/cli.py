@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import textwrap
 from typing import Dict, List, Optional
@@ -625,8 +626,16 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
                      usage.get("cost_estimate_usd", 0.0)))
 
     local = ai_mod.rehydrate(result, redactor)
-    with open(os.path.join(cfg.out_dir, "ai-triage.json"), "w", encoding="utf-8") as fh:
+    triage_path = os.path.join(cfg.out_dir, "ai-triage.json")
+    with open(triage_path, "w", encoding="utf-8") as fh:
         json.dump(local, fh, indent=2)
+    # Unlike ai-payload.json (redacted, safe to leave at default permissions),
+    # this is the rehydrated version - real hostnames and IPs are back in it,
+    # same as redaction-map.json, so it gets the same 0600 treatment.
+    try:
+        os.chmod(triage_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
     if local.get("summary"):
         console.print("\n[bold]Summary[/bold]\n%s"
                       % textwrap.fill(local["summary"], 96, initial_indent="  ",

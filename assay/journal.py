@@ -32,6 +32,9 @@ SECRET_HEADERS = {
     "cookie": "ASSAY_COOKIE",
     "x-api-key": "ASSAY_API_KEY",
     "x-auth-token": "ASSAY_AUTH_TOKEN",
+    # NVD's own header name for its optional API key (assay.cve) - "apikey"
+    # (no separating hyphen), distinct from "x-api-key" above.
+    "apikey": "ASSAY_NVD_KEY",
 }
 
 HEADER = """#!/usr/bin/env bash

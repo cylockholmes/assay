@@ -375,6 +375,10 @@ Treat the whole folder as engagement data. Specifically:
 - **`redaction-map.json`** maps every pseudonym back to the real value. It is
   the one file that can reverse the redaction, is written `0600`, and never
   leaves the machine.
+- **`ai-triage.json`** is the AI's verdicts re-hydrated with real hostnames and
+  IPs for local reading — `ai-payload.json` (what was actually sent) stays
+  pseudonymised, but this file does not. Written `0600` for the same reason as
+  `redaction-map.json`.
 - **`replay.sh` and `activity.log`** record every URL touched. Credentials are
   **not** written to them — where a request carried `Authorization`, `Cookie`
   or an API key, the replay references a shell variable instead:
