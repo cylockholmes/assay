@@ -289,13 +289,8 @@ def is_cdn_ip(ip: str) -> bool:
 
 
 def _dig(record: str, name: str, timeout: float = 8.0) -> List[str]:
-    import subprocess
-    try:
-        p = subprocess.run(["dig", "+short", "+time=3", "+tries=1", record, name],
-                           capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [l.strip().rstrip(".") for l in (p.stdout or "").splitlines()
+    out = tools.dns_lookup(record, name, timeout=timeout)
+    return [l.strip().rstrip(".") for l in out.splitlines()
             if l.strip() and not l.startswith(";")]
 
 

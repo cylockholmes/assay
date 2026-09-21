@@ -1132,6 +1132,86 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class BridgeCoverageTests(unittest.TestCase):
+    """tools.bridge() only reaches commands that go through run/stream_lines.
+
+    On a Windows host the whole toolchain lives inside WSL, so a spawn that
+    skips the bridge fails for exactly the binaries the engine runs fine.
+    """
+
+    def test_only_tools_and_env_spawn_processes(self):
+        """env.py implements the bridge; ai.py is documented as unbridged."""
+        import pathlib as _p
+        root = _p.Path(__file__).resolve().parent.parent / "assay"
+        offenders = []
+        for f in root.rglob("*.py"):
+            if f.name in ("tools.py", "env.py", "ai.py"):
+                continue
+            if "subprocess." in f.read_text(encoding="utf-8"):
+                offenders.append(str(f.relative_to(root)))
+        self.assertEqual(offenders, [],
+                         "these spawn without the WSL bridge or the journal")
+
+    def test_dns_lookup_goes_through_run(self):
+        from assay import tools
+        seen = []
+        original = tools.run
+        tools.run = lambda cmd, **k: (seen.append(list(cmd)),
+                                      tools.Proc(rc=0, out="", err="",
+                                                 cmd=list(cmd)))[1]
+        try:
+            tools.dns_lookup("NS", "example.com")
+        finally:
+            tools.run = original
+        self.assertEqual(seen[0][0], "dig")
+        self.assertEqual(seen[1][0], "host", "host is the fallback")
+
+    def test_dns_lookup_keeps_output_from_a_nonzero_exit(self):
+        """`host` exits non-zero on NXDOMAIN but prints the reason."""
+        from assay import tools
+        original = tools.run
+        tools.run = lambda cmd, **k: tools.Proc(
+            rc=0 if cmd[0] == "dig" else 1,
+            out="" if cmd[0] == "dig" else "Host x not found: 3(NXDOMAIN)",
+            err="", cmd=list(cmd))
+        try:
+            self.assertIn("NXDOMAIN", tools.dns_lookup("NS", "x.invalid"))
+        finally:
+            tools.run = original
+
+    def test_followup_executes_through_tools_run(self):
+        from assay import followup, tools
+        from assay.config import Config, Scope
+        seen = []
+        original = tools.run
+        tools.run = lambda cmd, **k: (seen.append(list(cmd)),
+                                      tools.Proc(rc=0, out="ok", err="",
+                                                 cmd=list(cmd)))[1]
+        try:
+            cfg = Config(targets=["app.test"], scope=Scope(allow=["app.test"]))
+            cmd = followup.vet("curl -s https://app.test/x", cfg)
+            self.assertTrue(cmd.ok, cmd.reason)
+            followup.run(cmd)
+        finally:
+            tools.run = original
+        self.assertEqual(seen, [["curl", "-s", "https://app.test/x"]])
+
+    def test_env_extra_crosses_the_bridge_as_an_env_prefix(self):
+        """Windows environment does not reach the distribution."""
+        from assay import env, tools
+        saved_use, saved_pre = env.use_wsl_bridge, env.wsl_prefix
+        env.use_wsl_bridge = lambda: True
+        env.wsl_prefix = lambda: ["wsl.exe", "-d", "kali", "--"]
+        try:
+            argv = ["env", "GOFLAGS=-x"] + ["go", "install", "x"]
+            self.assertEqual(
+                tools.bridge(argv),
+                ["wsl.exe", "-d", "kali", "--", "env", "GOFLAGS=-x",
+                 "go", "install", "x"])
+        finally:
+            env.use_wsl_bridge, env.wsl_prefix = saved_use, saved_pre
+
+
 class ProbeNonLiveEndpointTests(unittest.TestCase):
     """A proxy with no backend used to kill the run on the native probe path.
 

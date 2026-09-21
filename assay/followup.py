@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import re
 import shlex
-import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
+from assay import tools
 from assay.config import Config
 
 # Read-oriented tools only. Nothing that writes to the target, installs
@@ -136,19 +136,19 @@ def vet(raw: str, cfg: Config) -> Command:
 
 
 def run(cmd: Command, timeout: float = 120.0) -> Command:
+    """Execute a vetted command through tools.run().
+
+    Not bare subprocess: every binary on ALLOWED lives inside the distribution
+    on a Windows host, so an unbridged call fails for exactly the commands the
+    engine runs successfully. Going through run() also puts them in the
+    journal, which for commands a model wrote is the point.
+    """
     if not cmd.ok:
         return cmd
-    try:
-        p = subprocess.run(cmd.argv, capture_output=True, text=True,
-                           timeout=timeout)
-        cmd.rc = p.returncode
-        cmd.output = ((p.stdout or "") + (p.stderr or ""))[:8000]
-    except subprocess.TimeoutExpired:
-        cmd.rc = -1
-        cmd.output = "timed out after %ds" % int(timeout)
-    except OSError as exc:
-        cmd.rc = -1
-        cmd.output = "failed to execute: %s" % exc
+    p = tools.run(cmd.argv, timeout=timeout)
+    cmd.rc = -1 if p.timed_out else p.rc
+    cmd.output = (("timed out after %ds" % int(timeout)) if p.timed_out
+                  else ((p.out or "") + (p.err or ""))[:8000])
     return cmd
 
 

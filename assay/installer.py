@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -63,13 +62,12 @@ def _sudo_needed() -> bool:
 
 
 def gopath_bin() -> str:
-    try:
-        out = subprocess.run(["go", "env", "GOPATH"], capture_output=True,
-                             text=True, timeout=10).stdout.strip()
-        if out:
-            return os.path.join(out, "bin")
-    except (OSError, subprocess.SubprocessError):
-        pass
+    # Through tools.run so that under the bridge this asks the distribution's
+    # go, not a Windows one - the binaries go install produces live where the
+    # command ran, and that is the path the rest of the install needs.
+    out = (tools.run(["go", "env", "GOPATH"], timeout=10).out or "").strip()
+    if out:
+        return out.rstrip("/") + "/bin"
     return os.path.expanduser("~/go/bin")
 
 
@@ -187,30 +185,28 @@ def run_plan(plan: Plan, on_step: Optional[Callable[[str, str], None]] = None,
     for i, step in enumerate(plan.steps, 1):
         say("start", "[%d/%d] %s" % (i, len(plan.steps), step.label))
         cmd = (["sudo", "-n"] + step.cmd) if step.needs_sudo else list(step.cmd)
-        proc_env = dict(os.environ)
-        proc_env.update(step.env_extra)
-        proc_env["PATH"] = proc_env.get("PATH", "") + os.pathsep + gopath_bin()
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=timeout, env=proc_env)
-        except subprocess.TimeoutExpired:
+        extra = dict(step.env_extra)
+        if not env.use_wsl_bridge():
+            extra["PATH"] = os.environ.get("PATH", "") + os.pathsep + gopath_bin()
+        # else: inside the distribution its own PATH already carries
+        # $GOPATH/bin (persist_path appends it to the shell rc). Pushing a
+        # Windows PATH across the bridge would replace it with directories
+        # the distribution cannot see.
+        proc = tools.run(cmd, timeout=timeout, env_extra=extra)
+        if proc.timed_out:
             fail += 1
             say("fail", "%s timed out after %ds" % (step.label, int(timeout)))
             continue
-        except OSError as exc:
-            fail += 1
-            say("fail", "%s: %s" % (step.label, exc))
-            continue
 
-        if proc.returncode == 0:
+        if proc.rc == 0:
             ok += 1
             say("ok", step.label)
             continue
 
         # sudo -n fails when a password is required rather than prompting.
-        stderr = (proc.stderr or "").strip().splitlines()
-        hint = stderr[-1][:160] if stderr else "exit %d" % proc.returncode
-        if step.needs_sudo and "password" in (proc.stderr or "").lower():
+        stderr = (proc.err or "").strip().splitlines()
+        hint = stderr[-1][:160] if stderr else "exit %d" % proc.rc
+        if step.needs_sudo and "password" in (proc.err or "").lower():
             hint = ("sudo needs a password. Run 'sudo -v' first, then re-run "
                     "'assay install'.")
         fail += 1

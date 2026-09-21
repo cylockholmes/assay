@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
+
+from assay import tools
 
 # Suffixes where the registrable name is one label deeper than the last dot.
 # Not the full Public Suffix List - just the ones that actually turn up.
@@ -92,31 +93,21 @@ class DomainStatus:
 
 def ns_records(domain: str, timeout: float = 8.0) -> Tuple[List[str], str]:
     """Returns (nameservers, raw status). Empty list means no delegation."""
-    for cmd in (["dig", "+short", "+time=3", "+tries=1", "NS", domain],
-                ["host", "-t", "NS", domain]):
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        except (OSError, subprocess.SubprocessError):
+    out = tools.dns_lookup("NS", domain, timeout=timeout).strip()
+    if not out:
+        return [], "lookup-failed"
+    if "NXDOMAIN" in out or "not found" in out.lower():
+        return [], "NXDOMAIN"
+    # `host` prints "domain name server ns1.x."; `dig +short` prints bare names.
+    cleaned = []
+    for line in out.splitlines():
+        line = line.strip().rstrip(".")
+        if not line or line.startswith(";"):
             continue
-        out = (p.stdout or "").strip()
-        if p.returncode != 0 and not out:
-            continue
-        if "NXDOMAIN" in out or "not found" in out.lower():
-            return [], "NXDOMAIN"
-        servers = [l.strip().rstrip(".") for l in out.splitlines()
-                   if l.strip() and not l.startswith(";")
-                   and "name server" not in l.lower() or "name server" in l.lower()]
-        # `host` prints "domain name server ns1.x."; `dig +short` prints bare names.
-        cleaned = []
-        for line in out.splitlines():
-            line = line.strip().rstrip(".")
-            if not line or line.startswith(";"):
-                continue
-            m = re.search(r"name server\s+(\S+)", line, re.I)
-            cleaned.append((m.group(1).rstrip(".") if m else line))
-        cleaned = [c for c in cleaned if "." in c and " " not in c]
-        return cleaned, "ok" if cleaned else "no-ns"
-    return [], "lookup-failed"
+        m = re.search(r"name server\s+(\S+)", line, re.I)
+        cleaned.append((m.group(1).rstrip(".") if m else line))
+    cleaned = [c for c in cleaned if "." in c and " " not in c]
+    return cleaned, "ok" if cleaned else "no-ns"
 
 
 # --------------------------------------------------------------------------
