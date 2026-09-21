@@ -757,6 +757,42 @@ session store. It answers the question and exits.
 Defaults to metadata only — no response bodies at all. `--ai-evidence` adds
 redacted evidence snippets. Interactive runs confirm before sending.
 
+### Running the verification commands during the scan
+
+Triage returns commands that would verify or escalate each finding. `assay
+followup --run` walks them one at a time; `--ai-followup` runs them as a stage
+of the scan instead:
+
+```bash
+assay scan app.target.tld -n "CODENAME" --ai --ai-backend claude-cli --ai-followup
+```
+
+`assay followup` gates execution four ways. Three are mechanical and apply
+unchanged here, per command:
+
+1. **Allow-list** — read-oriented security tools only. Shells, package
+   managers and anything that can become a shell are refused.
+2. **No shell** — parsed with `shlex` and executed without one. Metacharacters
+   cause a refusal rather than being escaped.
+3. **Scope** — every host, IP and URL in the command is checked against the
+   engagement scope. One out-of-scope argument refuses the whole command.
+
+The fourth is a human approving each command as it appears, and a scan has
+nobody to ask. **`--ai-followup` is that approval**, given up front and
+covering every command the pass produces. Two conditions stop the stage
+regardless:
+
+- **`--safe`** — these commands send crafted traffic, which is the thing
+  `--safe` exists to prevent.
+- **A permissive scope** — with no allow rules there is nothing for gate three
+  to check against, so nothing runs.
+
+A dry run, a refused send or a redaction failure all leave the scan with no
+triage, and none of them lead to commands running. Output is attached to each
+finding, same as the interactive path — `assay show <n>` to read it.
+`--ai-followup-limit` (default 25) and `--ai-followup-timeout` (default 120s)
+bound the stage.
+
 ---
 
 ## External tools

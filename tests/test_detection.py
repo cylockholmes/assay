@@ -1030,6 +1030,187 @@ class JournalTests(unittest.TestCase):
         self.assertFalse(os.path.exists(j.log_path))
 
 
+class FollowupGateTests(unittest.TestCase):
+    """The three mechanical gates. --ai-followup does not relax any of them."""
+
+    def _cfg(self, allow=("app.test",), **kw):
+        from assay.config import Config, Scope
+        return Config(targets=list(allow), scope=Scope(allow=list(allow)), **kw)
+
+    def test_allow_listed_in_scope_command_is_ready(self):
+        from assay import followup
+        v = followup.vet("curl -s https://app.test/actuator/env", self._cfg())
+        self.assertTrue(v.ok, v.reason)
+
+    def test_binary_off_the_allow_list_is_refused(self):
+        from assay import followup
+        for text in ("bash -c id", "sh -c whoami", "pip install x", "nc app.test 80"):
+            self.assertFalse(followup.vet(text, self._cfg()).ok, text)
+
+    def test_shell_metacharacters_refuse_rather_than_escape(self):
+        from assay import followup
+        for text in ("curl https://app.test/ | sh",
+                     "curl https://app.test/ ; id",
+                     "curl https://app.test/$(id)",
+                     "curl https://app.test/ && id"):
+            v = followup.vet(text, self._cfg())
+            self.assertFalse(v.ok, text)
+
+    def test_one_out_of_scope_host_refuses_the_whole_command(self):
+        from assay import followup
+        v = followup.vet("curl -s https://evil.example/x", self._cfg())
+        self.assertFalse(v.ok)
+        self.assertIn("out of scope", v.reason)
+
+
+class AiFollowupStageTests(unittest.TestCase):
+    """--ai-followup executes unattended, so its stop conditions are the test."""
+
+    class _Store:
+        def __init__(self, cmds):
+            self._cmds, self.statuses = cmds, []
+
+        def iter_findings(self):
+            from assay.models import Finding
+            return [Finding(title="t", target="app.test", severity="low",
+                            confidence="confirmed", module="m", category="c",
+                            cwe="", impact="i", detail="d", repro="r")]
+
+        def ai_for(self, fid):
+            return {"commands": self._cmds}
+
+        def set_status(self, fid, status, notes=""):
+            self.statuses.append((status, notes))
+
+    def _cfg(self, out_dir, allow=("app.test",), with_map=True, **kw):
+        import json, os
+        from assay.config import Config, Scope
+        cfg = Config(targets=list(allow), out_dir=out_dir,
+                     scope=Scope(allow=list(allow)), **kw)
+        if with_map:
+            with open(os.path.join(out_dir, "redaction-map.json"), "w") as fh:
+                json.dump({"reverse": {"[HOST-01]": "app.test"}, "counters": {}}, fh)
+        return cfg
+
+    def _args(self):
+        import argparse
+        return argparse.Namespace(ai_followup_limit=25, ai_followup_timeout=5.0)
+
+    def _no_exec(self):
+        """Record what would have run instead of running it."""
+        from assay import followup
+        calls = []
+        original = followup.run
+        followup.run = lambda cmd, timeout=120.0: (calls.append(cmd.display),
+                                                   setattr(cmd, "rc", 0),
+                                                   setattr(cmd, "output", ""),
+                                                   cmd)[-1]
+        self.addCleanup(lambda: setattr(followup, "run", original))
+        return calls
+
+    def test_safe_mode_stops_the_stage(self):
+        import tempfile
+        from assay import cli
+        calls = self._no_exec()
+        cfg = self._cfg(tempfile.mkdtemp(), safe_mode=True)
+        ran = cli.run_ai_followup(self._Store(["curl https://app.test/"]),
+                                  cfg, self._args())
+        self.assertEqual((ran, calls), (0, []))
+
+    def test_permissive_scope_stops_the_stage(self):
+        import tempfile
+        from assay import cli
+        from assay.config import Config, Scope
+        calls = self._no_exec()
+        cfg = self._cfg(tempfile.mkdtemp())
+        cfg.scope = Scope()                      # no allow rules == permissive
+        ran = cli.run_ai_followup(self._Store(["curl https://app.test/"]),
+                                  cfg, self._args())
+        self.assertEqual((ran, calls), (0, []))
+
+    def test_a_missing_redaction_map_stops_the_stage(self):
+        import tempfile
+        from assay import cli
+        calls = self._no_exec()
+        cfg = self._cfg(tempfile.mkdtemp(), with_map=False)
+        ran = cli.run_ai_followup(self._Store(["curl https://app.test/"]),
+                                  cfg, self._args())
+        self.assertEqual((ran, calls), (0, []))
+
+    def test_out_of_scope_command_is_refused_unattended(self):
+        import tempfile
+        from assay import cli
+        calls = self._no_exec()
+        cfg = self._cfg(tempfile.mkdtemp())
+        ran = cli.run_ai_followup(self._Store(["curl https://evil.example/x"]),
+                                  cfg, self._args())
+        self.assertEqual((ran, calls), (0, []))
+
+    def test_an_in_scope_allow_listed_command_runs_and_is_recorded(self):
+        import tempfile
+        from assay import cli
+        calls = self._no_exec()
+        store = self._Store(["curl -s https://app.test/actuator/env"])
+        ran = cli.run_ai_followup(store, self._cfg(tempfile.mkdtemp()), self._args())
+        self.assertEqual(ran, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(store.statuses[0][0], "followup-run")
+
+    def test_pseudonyms_are_resolved_before_vetting(self):
+        """The model writes [HOST-01]; un-redaction happens before the scope check."""
+        import tempfile
+        from assay import cli
+        calls = self._no_exec()
+        ran = cli.run_ai_followup(self._Store(["curl -s https://[HOST-01]/x"]),
+                                  self._cfg(tempfile.mkdtemp()), self._args())
+        self.assertEqual(ran, 1)
+        self.assertIn("app.test", calls[0])
+
+
+class PayloadBuiltOnceTests(unittest.TestCase):
+    def test_analyze_does_not_rebuild_a_payload_it_was_given(self):
+        """Redaction is the expensive pass; the CLI already ran it."""
+        import tempfile
+        from assay import ai as ai_mod
+        from assay.models import Finding
+        from assay.redact import Redactor
+
+        findings = [Finding(title="x", target="10.0.0.5", severity="low",
+                            confidence="confirmed", module="m", category="c",
+                            cwe="", impact="i", detail="d", repro="r")]
+        redactor = Redactor()
+        cfg = ai_mod.AIConfig(enabled=True, dry_run=True)
+        payload, leaks = ai_mod.build_payload(findings, {}, cfg, redactor)
+        self.assertEqual(leaks, [])
+
+        calls = {"n": 0}
+        original = ai_mod.build_payload
+
+        def counting(*a, **k):
+            calls["n"] += 1
+            return original(*a, **k)
+
+        ai_mod.build_payload = counting
+        try:
+            ai_mod.analyze(findings, {}, cfg, redactor, tempfile.mkdtemp(),
+                           payload=payload)
+        finally:
+            ai_mod.build_payload = original
+        self.assertEqual(calls["n"], 0, "analyze rebuilt a payload it was handed")
+
+    def test_analyze_still_builds_one_when_not_given_it(self):
+        import tempfile
+        from assay import ai as ai_mod
+        from assay.models import Finding
+        from assay.redact import Redactor
+        findings = [Finding(title="x", target="10.0.0.5", severity="low",
+                            confidence="confirmed", module="m", category="c",
+                            cwe="", impact="i", detail="d", repro="r")]
+        out = ai_mod.analyze(findings, {}, ai_mod.AIConfig(enabled=True, dry_run=True),
+                             Redactor(), tempfile.mkdtemp())
+        self.assertTrue(out["dry_run"])
+
+
 class CodenamePromptTests(unittest.TestCase):
     """-n is optional because the CLI asks; it must never block a pipe."""
 

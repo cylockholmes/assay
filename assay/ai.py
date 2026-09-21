@@ -568,9 +568,17 @@ def _parse_result(text: str, out_dir: str) -> Dict[str, Any]:
 
 
 def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
-            redactor: Redactor, out_dir: str,
-            on_status=None) -> Dict[str, Any]:
-    """Run the triage pass. Raises RedactionFailure rather than leaking."""
+            redactor: Redactor, out_dir: str, on_status=None,
+            payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Run the triage pass. Raises RedactionFailure rather than leaking.
+
+    `payload` is an already-built payload from build_payload(). The CLI builds
+    one up front so it can report the verification result before asking for
+    consent, and hands it back here; rebuilding it would run the whole
+    redaction pass over every finding a second time for an identical result.
+    A caller that passes one is asserting it checked the leak list. Omit it
+    and this builds and verifies the payload itself.
+    """
     def say(msg: str) -> None:
         if on_status:
             on_status(msg)
@@ -580,9 +588,10 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
     if not cfg.dry_run and cfg.backend not in BACKENDS:
         raise BackendUnset()
 
-    payload, leaks = build_payload(findings, assets, cfg, redactor)
-    if leaks:
-        raise RedactionFailure(leaks)
+    if payload is None:
+        payload, leaks = build_payload(findings, assets, cfg, redactor)
+        if leaks:
+            raise RedactionFailure(leaks)
 
     preview_path = os.path.join(out_dir, "ai-payload.json")
     with open(preview_path, "w", encoding="utf-8") as fh:

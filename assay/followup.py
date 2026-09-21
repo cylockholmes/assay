@@ -152,8 +152,13 @@ def run(cmd: Command, timeout: float = 120.0) -> Command:
     return cmd
 
 
-def collect(store, redactor=None) -> List[Command]:
-    """Gather every AI-suggested command, un-redacted, in priority order."""
+def collect(store, redaction_map=None) -> List[Command]:
+    """Gather every AI-suggested command, un-redacted, in priority order.
+
+    `redaction_map` is the run's RedactionMap. The model wrote these commands
+    against pseudonyms, so without it they still carry [HOST-02] and will not
+    resolve; putting the real values back is a purely local operation.
+    """
     out: List[Command] = []
     for f in store.iter_findings():
         ai = store.ai_for(f.fingerprint())
@@ -162,8 +167,8 @@ def collect(store, redactor=None) -> List[Command]:
         for raw in (ai.get("commands") or []) + [
                 s for s in (ai.get("next_steps") or []) if _looks_like_cmd(s)]:
             text = raw
-            if redactor is not None:
-                text = redactor.map.rehydrate(text)
+            if redaction_map is not None:
+                text = redaction_map.rehydrate(text)
             c = Command(raw=text, finding_id=f.fingerprint(),
                         finding_title=f.title)
             out.append(c)
