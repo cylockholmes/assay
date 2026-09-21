@@ -4,6 +4,18 @@ This is off by default and it never sends raw scan data. The flow is:
 
     findings -> redact -> VERIFY (hard gate) -> Claude -> merge back locally
 
+There are two ways to reach Claude and you have to pick one; there is no
+default, because the two spend different money:
+
+    api         the Anthropic SDK with your own API key. Billed per token.
+    claude-cli  the Claude Code CLI in headless mode, which is how the Claude
+                desktop app is driven from a script. Billed against whatever
+                Claude plan that CLI is signed in to, not per token.
+
+Both send the identical redacted payload and get the identical JSON back. The
+CLI backend is launched with every tool, skill, MCP server and project setting
+turned off, in an empty working directory, so it can only answer the question.
+
 The verification gate is not advisory. If any known client term, hostname, IP,
 credential or personal identifier survives redaction, the payload is not
 transmitted and the run aborts with the residue printed. `--ai-dry-run` writes
@@ -20,8 +32,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +45,26 @@ from assay.redact import Redactor, terms_from_context
 MODEL = "claude-opus-5"
 INPUT_PRICE_PER_MTOK = 5.00
 OUTPUT_PRICE_PER_MTOK = 25.00
+
+# The transports. Deliberately no default - see the module docstring.
+BACKEND_API = "api"
+BACKEND_CLI = "claude-cli"
+BACKENDS = (BACKEND_API, BACKEND_CLI)
+
+BACKEND_HELP = {
+    BACKEND_API: "Anthropic API key (billed per token)",
+    BACKEND_CLI: "Claude Code CLI / desktop app sign-in (billed to that plan)",
+}
+
+# Headless Claude Code, stripped to a single question-answering turn: no
+# command or code execution, no web fetch, no MCP servers, no skills, no
+# project or local settings, and nothing written to the session store.
+CLI_ISOLATION_FLAGS = [
+    "--restricted",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+]
 
 SYSTEM_PROMPT = """You are triaging the output of an automated security scan for a \
 bug bounty researcher working an authorized engagement.
@@ -139,6 +173,16 @@ class AIError(Exception):
     pass
 
 
+class BackendUnset(AIError):
+    """Neither backend was chosen. The caller has to ask."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "no AI backend selected. Pass --ai-backend with one of: "
+            + ", ".join("%s (%s)" % (b, BACKEND_HELP[b]) for b in BACKENDS)
+        )
+
+
 class RedactionFailure(AIError):
     def __init__(self, leaks: List[str]) -> None:
         self.leaks = leaks
@@ -148,6 +192,7 @@ class RedactionFailure(AIError):
 @dataclass
 class AIConfig:
     enabled: bool = False
+    backend: str = ""                # "api" or "claude-cli"; no default on purpose
     model: str = MODEL
     max_findings: int = 60
     include_evidence: bool = False   # False = metadata only (strictest)
@@ -156,6 +201,8 @@ class AIConfig:
     effort: str = "high"
     inference_geo: str = "us"
     api_key: Optional[str] = None
+    claude_bin: str = "claude"       # CLI backend: binary name or absolute path
+    cli_timeout: int = 1800
 
 
 # --------------------------------------------------------------------------
@@ -239,6 +286,40 @@ def credential_status() -> Tuple[bool, str]:
     return False, "no API key and no stored profile"
 
 
+def cli_status(cfg: Optional["AIConfig"] = None) -> Tuple[bool, str]:
+    """Is there a usable Claude Code CLI to hand the request to?
+
+    The CLI is what the Claude desktop app installs and shares a sign-in with,
+    so "the desktop app is logged in" and "this binary can answer" are the same
+    question. `claude --version` only proves the binary runs - a stale sign-in
+    surfaces at call time, where the error text is far more useful than
+    anything we could guess here.
+    """
+    name = (cfg.claude_bin if cfg else "claude") or "claude"
+    path = shutil.which(name) or (name if os.path.isfile(name) and
+                                  os.access(name, os.X_OK) else None)
+    if not path:
+        return False, ("'%s' is not on PATH - install Claude Code, or point "
+                       "--ai-claude-bin at the binary" % name)
+    try:
+        p = subprocess.run([path, "--version"], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "%s would not run: %s" % (path, exc)
+    if p.returncode != 0:
+        return False, "%s --version exited %d" % (path, p.returncode)
+    return True, "%s (%s)" % (path, (p.stdout or "").strip() or "version unknown")
+
+
+def backend_status(cfg: "AIConfig") -> Tuple[bool, str]:
+    """Can the selected backend be used right now?"""
+    if cfg.backend == BACKEND_API:
+        return credential_status()
+    if cfg.backend == BACKEND_CLI:
+        return cli_status(cfg)
+    raise BackendUnset()
+
+
 def prompt_for_key(console=None) -> bool:
     """Ask for an API key interactively. Session-only, never written to disk.
 
@@ -315,31 +396,8 @@ def _user_message(payload: Dict[str, Any]) -> str:
     )
 
 
-def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
-            redactor: Redactor, out_dir: str,
-            on_status=None) -> Dict[str, Any]:
-    """Run the triage pass. Raises RedactionFailure rather than leaking."""
-    def say(msg: str) -> None:
-        if on_status:
-            on_status(msg)
-
-    payload, leaks = build_payload(findings, assets, cfg, redactor)
-    if leaks:
-        raise RedactionFailure(leaks)
-
-    preview_path = os.path.join(out_dir, "ai-payload.json")
-    with open(preview_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-    say("redacted payload written to %s" % preview_path)
-
-    map_path = os.path.join(out_dir, "redaction-map.json")
-    redactor.map.save(map_path)
-    say("pseudonym map saved locally (0600) to %s" % map_path)
-
-    if cfg.dry_run:
-        return {"dry_run": True, "payload_path": preview_path,
-                "estimated_input_tokens": len(json.dumps(payload)) // 3}
-
+def _call_api(cfg: AIConfig, payload: Dict[str, Any], say) -> Tuple[str, Dict[str, Any]]:
+    """Transport 1: the Anthropic SDK, billed per token against an API key."""
     client = _client(cfg)
     tokens = count_tokens(cfg, payload)
     say("sending ~%s input tokens (est. $%.3f) to %s" %
@@ -358,7 +416,7 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
             # Some programmes require that data is not processed outside the
             # United States. Pinning the geography makes that checkable rather
             # than assumed.
-            inference_geo="us",
+            inference_geo=cfg.inference_geo,
             output_config={
                 "effort": cfg.effort,
                 "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
@@ -373,21 +431,156 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
                       "Nothing was triaged; scan results are unaffected.")
 
     text = "".join(b.text for b in message.content if b.type == "text")
-    try:
-        result = json.loads(text)
-    except ValueError:
-        raise AIError("model returned unparseable output; raw response kept in "
-                      "ai-raw.txt")
-
     usage = getattr(message, "usage", None)
-    result["_usage"] = {
+    return text, {
         "input_tokens": getattr(usage, "input_tokens", 0),
         "output_tokens": getattr(usage, "output_tokens", 0),
         "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0),
         "cost_estimate_usd": round(estimate_cost(
             getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0)), 4),
     }
+
+
+def _cli_argv(cfg: AIConfig, binary: str) -> List[str]:
+    """The exact command line. Separate so a test can assert on it."""
+    return [
+        binary,
+        "--print",                       # headless: answer once, exit
+        "--model", cfg.model,
+        "--effort", cfg.effort,
+        "--output-format", "json",
+        "--json-schema", json.dumps(RESPONSE_SCHEMA),
+        "--system-prompt", SYSTEM_PROMPT,
+    ] + list(CLI_ISOLATION_FLAGS)
+
+
+def _call_cli(cfg: AIConfig, payload: Dict[str, Any],
+              say) -> Tuple[str, Dict[str, Any]]:
+    """Transport 2: hand the request to the Claude Code CLI / desktop app.
+
+    Same prompt, same schema, same redacted payload as the API backend - the
+    difference is who pays. The CLI shares a sign-in with the desktop app, so
+    this spends that Claude plan instead of API credit.
+
+    The prompt goes in on stdin rather than argv: a 60-finding payload is well
+    past the point where an argument list is a sensible place to put it.
+    """
+    ok, how = cli_status(cfg)
+    if not ok:
+        raise AIError("the Claude Code CLI is not usable: %s" % how)
+    binary = shutil.which(cfg.claude_bin) or cfg.claude_bin
+    argv = _cli_argv(cfg, binary)
+
+    say("handing the payload to %s (%s, no API key used)" % (binary, cfg.model))
+    # An empty working directory: restricted mode confines the file tools to
+    # the cwd and reads CLAUDE.md from it, so give it nothing to find. The run
+    # directory is full of scan output and is not it.
+    with tempfile.TemporaryDirectory(prefix="assay-ai-") as sandbox:
+        try:
+            proc = subprocess.run(argv, input=_user_message(payload),
+                                  capture_output=True, text=True,
+                                  cwd=sandbox, timeout=cfg.cli_timeout)
+        except subprocess.TimeoutExpired:
+            raise AIError("the Claude CLI did not finish within %ds. Retry, or "
+                          "lower --ai-max." % cfg.cli_timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AIError("could not run %s: %s" % (binary, exc))
+
+    if proc.returncode != 0 and not (proc.stdout or "").strip():
+        raise AIError("the Claude CLI exited %d: %s"
+                      % (proc.returncode,
+                         (proc.stderr or "").strip()[:400] or "no output"))
+
+    try:
+        envelope = json.loads(proc.stdout)
+    except ValueError:
+        raise AIError("the Claude CLI returned output that is not JSON: %s"
+                      % (proc.stdout or proc.stderr or "")[:400])
+
+    # `is_error` is the authoritative field. `subtype` stays "success" even for
+    # an auth failure, so keying off that would silently swallow one.
+    if envelope.get("is_error"):
+        raise AIError("the Claude CLI reported an error: %s"
+                      % str(envelope.get("result", "unknown"))[:400])
+
+    denials = envelope.get("permission_denials") or []
+    if denials:
+        say("note: the CLI asked for %d tool permission(s) and was refused - "
+            "triage only needs to answer, not to act" % len(denials))
+
+    usage = envelope.get("usage") or {}
+    return str(envelope.get("result", "")), {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+        # Real reported spend. On a subscription plan this is 0.0, which is the
+        # honest number - the run cost plan quota, not dollars.
+        "cost_estimate_usd": round(float(envelope.get("total_cost_usd") or 0.0), 4),
+        "session_id": envelope.get("session_id", ""),
+    }
+
+
+def _parse_result(text: str, out_dir: str) -> Dict[str, Any]:
+    """Both backends are asked for the same schema. Both can still miss."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    # A model that wrapped the object in prose or a fence is recoverable and
+    # not worth throwing a whole triage pass away over.
+    match = re.search(r"\{.*\}", text or "", re.S)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except ValueError:
+            pass
+    raw_path = os.path.join(out_dir, "ai-raw.txt")
+    try:
+        with open(raw_path, "w", encoding="utf-8") as fh:
+            fh.write(text or "")
+    except OSError:
+        raw_path = "(could not be written)"
+    raise AIError("model returned unparseable output; raw response kept in %s"
+                  % raw_path)
+
+
+def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
+            redactor: Redactor, out_dir: str,
+            on_status=None) -> Dict[str, Any]:
+    """Run the triage pass. Raises RedactionFailure rather than leaking."""
+    def say(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    # Checked before the payload is built: a dry run is allowed without a
+    # backend, because a dry run never reaches one.
+    if not cfg.dry_run and cfg.backend not in BACKENDS:
+        raise BackendUnset()
+
+    payload, leaks = build_payload(findings, assets, cfg, redactor)
+    if leaks:
+        raise RedactionFailure(leaks)
+
+    preview_path = os.path.join(out_dir, "ai-payload.json")
+    with open(preview_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+    say("redacted payload written to %s" % preview_path)
+
+    map_path = os.path.join(out_dir, "redaction-map.json")
+    redactor.map.save(map_path)
+    say("pseudonym map saved locally (0600) to %s" % map_path)
+
+    if cfg.dry_run:
+        return {"dry_run": True, "payload_path": preview_path,
+                "estimated_input_tokens": len(json.dumps(payload)) // 3}
+
+    transport = _call_api if cfg.backend == BACKEND_API else _call_cli
+    text, usage = transport(cfg, payload, say)
+
+    result = _parse_result(text, out_dir)
+    result["_usage"] = usage
     result["_model"] = cfg.model
+    result["_backend"] = cfg.backend
     return result
 
 

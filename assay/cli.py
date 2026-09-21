@@ -249,6 +249,18 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
     if not standalone:
         g.add_argument("--ai", action="store_true",
                        help="after the scan, send REDACTED findings to Claude for triage")
+    # No default. The two backends spend different money - an API key bills
+    # per token, the CLI bills whatever Claude plan it is signed in to - so
+    # assay makes you say which one rather than guessing on your behalf.
+    g.add_argument("--ai-backend", choices=["api", "claude-cli"], default=None,
+                   help="how to reach Claude. 'api' = your Anthropic API key "
+                        "(billed per token); 'claude-cli' = hand the request to "
+                        "the Claude Code CLI, which shares a sign-in with the "
+                        "Claude desktop app (billed to that plan). Required "
+                        "unless --ai-dry-run.")
+    g.add_argument("--ai-claude-bin", default="claude",
+                   help="claude-cli backend: binary name or path "
+                        "(default: claude)")
     g.add_argument("--ai-model", default="claude-opus-5")
     g.add_argument("--ai-max", type=int, default=60, help="max findings to send")
     g.add_argument("--ai-evidence", action="store_true",
@@ -553,22 +565,42 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
     ai_cfg = ai_mod.AIConfig(
         enabled=True,
+        backend=getattr(args, "ai_backend", None) or "",
         model=args.ai_model,
         max_findings=args.ai_max,
         include_evidence=args.ai_evidence,
         dry_run=args.ai_dry_run,
         effort=args.ai_effort,
+        claude_bin=getattr(args, "ai_claude_bin", "claude") or "claude",
     )
+
+    # A dry run never reaches a backend, so it does not need one chosen.
+    if not ai_cfg.dry_run and ai_cfg.backend not in ai_mod.BACKENDS:
+        console.print("[yellow]skipping AI triage[/yellow] - no backend chosen.")
+        console.print("  [dim]pick one with --ai-backend:[/dim]")
+        for name in ai_mod.BACKENDS:
+            console.print("    [bold]%-11s[/bold] %s" % (name, ai_mod.BACKEND_HELP[name]))
+        console.print("  [dim]or --ai-dry-run to write the payload and send "
+                      "nothing[/dim]")
+        return None
 
     # Credentials before anything else: no point redacting a payload we cannot
     # send, and no point asking for a key after the user has already waited.
     if not ai_cfg.dry_run:
-        have, how = ai_mod.credential_status()
+        have, how = ai_mod.backend_status(ai_cfg)
         if have:
-            console.print("  [dim]credentials: %s[/dim]" % how)
-        elif not ai_mod.prompt_for_key(console):
+            console.print("  [dim]backend: %s - %s[/dim]" % (ai_cfg.backend, how))
+        elif ai_cfg.backend == ai_mod.BACKEND_API and ai_mod.prompt_for_key(console):
+            pass
+        elif ai_cfg.backend == ai_mod.BACKEND_API:
             console.print("  [yellow]skipping AI triage[/yellow] - no credentials. "
                           "Set ANTHROPIC_API_KEY or run 'ant auth login'.")
+            return None
+        else:
+            console.print("  [yellow]skipping AI triage[/yellow] - %s" % how)
+            console.print("  [dim]the claude-cli backend needs Claude Code "
+                          "installed and signed in; 'claude' ships with the "
+                          "Claude desktop app and shares its sign-in[/dim]")
             return None
 
     payload, leaks = ai_mod.build_payload(findings, assets, ai_cfg, redactor)
@@ -581,17 +613,21 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
         return None
 
     console.print(
-        "\n[bold]AI triage[/bold]  %d finding(s), %s, model %s"
+        "\n[bold]AI triage[/bold]  %d finding(s), %s, model %s, via %s"
         % (min(len(findings), ai_cfg.max_findings),
            "with redacted evidence" if ai_cfg.include_evidence else "metadata only",
-           ai_cfg.model)
+           ai_cfg.model, ai_cfg.backend or "dry run")
     )
     console.print("  [green]redaction verified:[/green] %d pseudonym(s), no residual "
                   "hostnames, IPs, credentials or personal data"
                   % len(redactor.map.reverse))
 
     if not ai_cfg.dry_run and not args.ai_yes and sys.stdin.isatty():
-        console.print("  [dim]this sends the redacted payload to the Anthropic API[/dim]")
+        console.print("  [dim]this sends the redacted payload %s[/dim]"
+                      % ("to the Anthropic API, billed per token"
+                         if ai_cfg.backend == ai_mod.BACKEND_API else
+                         "to the Claude Code CLI, billed to the Claude plan it "
+                         "is signed in to"))
         try:
             answer = input("  send? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -619,11 +655,17 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
     store.save_ai(result)
     usage = result.get("_usage", {})
+    # The CLI backend reports real spend, which is 0.00 on a subscription plan.
+    # Printing "~$0.000" there would read as a failed measurement rather than
+    # the truth, which is that the run cost plan quota and not dollars.
+    cost = usage.get("cost_estimate_usd", 0.0)
+    spend = ("~$%.3f" % cost) if cost else (
+        "no per-token charge" if ai_cfg.backend == ai_mod.BACKEND_CLI else "~$0.000")
     console.print("  [green]triaged[/green]  %d verdict(s), %d chain(s)  "
-                  "[dim]%s in / %s out, ~$%.3f[/dim]"
+                  "[dim]%s in / %s out, %s[/dim]"
                   % (len(result.get("triage", [])), len(result.get("chains", [])),
                      usage.get("input_tokens", 0), usage.get("output_tokens", 0),
-                     usage.get("cost_estimate_usd", 0.0)))
+                     spend))
 
     local = ai_mod.rehydrate(result, redactor)
     triage_path = os.path.join(cfg.out_dir, "ai-triage.json")
