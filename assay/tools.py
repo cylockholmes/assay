@@ -199,13 +199,16 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
 
 
 def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
-                 stdin: str = "") -> Iterator[str]:
+                 stdin: str = "",
+                 on_timeout: Optional[Callable[[float], None]] = None
+                 ) -> Iterator[str]:
     """Yield stdout lines as they arrive. Keeps peak memory flat."""
     env.augment_path()
     _record(cmd)
     # A real file rather than a pipe for stderr: a chatty tool could otherwise
     # fill a pipe's OS buffer and deadlock while we're only draining stdout.
     stderr_buf = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    timed_out = False
     try:
         proc = subprocess.Popen(
             bridge(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
@@ -234,23 +237,34 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             if line:
                 yield line
             if time.time() > deadline:
+                # The caller has already consumed everything up to here and
+                # cannot otherwise tell a finished tool from a cut-off one, so
+                # say so rather than letting partial output pass as complete.
+                timed_out = True
                 _record_failure(cmd, "timed out after %.0fs" % timeout)
                 proc.kill()
+                if on_timeout:
+                    on_timeout(timeout)
                 break
     finally:
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if proc.returncode:
+        # A kill of our own is recorded above; the returncode it produces is
+        # the same event, not a second failure.
+        if proc.returncode and not timed_out:
             stderr_buf.seek(0)
             _record_failure(cmd, stderr_buf.read())
         stderr_buf.close()
 
 
 def stream_json(cmd: Sequence[str], timeout: float = 900.0,
-                stdin: str = "") -> Iterator[dict]:
-    for line in stream_lines(cmd, timeout=timeout, stdin=stdin):
+                stdin: str = "",
+                on_timeout: Optional[Callable[[float], None]] = None
+                ) -> Iterator[dict]:
+    for line in stream_lines(cmd, timeout=timeout, stdin=stdin,
+                             on_timeout=on_timeout):
         if not line.startswith("{"):
             continue
         try:
@@ -401,7 +415,9 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
         # Always streamed: the results come from the XML either way, so the
         # only question is whether the wait is spent silently. --stats-every
         # makes nmap narrate it, and nothing downstream cares if no one reads.
-        for line in stream_lines(cmd, timeout=timeout):
+        cut = ((lambda t: on_progress("scan hit its %.0fs limit - results are "
+                                      "partial" % t)) if on_progress else None)
+        for line in stream_lines(cmd, timeout=timeout, on_timeout=cut):
             msg = nmap_stat_line(line) if on_progress else None
             if msg:
                 on_progress(msg)
@@ -669,7 +685,10 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # honest "N of 384 swept" to report - what it can say is what has turned
         # up so far, which is enough to tell a working sweep from a wedged one.
         last = 0.0
-        for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
+        cut = ((lambda t: on_progress("sweep hit its %.0fs limit - results are "
+                                      "partial" % t)) if on_progress else None)
+        for obj in stream_json(cmd, timeout=timeout,
+                               stdin="\n".join(hosts) + "\n", on_timeout=cut):
             h = obj.get("host") or obj.get("ip")
             p = obj.get("port")
             if h and p:
