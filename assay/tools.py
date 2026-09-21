@@ -223,10 +223,20 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             pass
     try:
         assert proc.stdout is not None
+        # `timeout` was accepted and never enforced: only the finally's
+        # proc.wait(10) bounded anything, so a tool that ran long ran forever.
+        # Checked per line, so it bounds a tool that is still talking - a
+        # process that goes completely silent still blocks on the read below,
+        # which needs a watchdog thread rather than a deadline.
+        deadline = time.time() + timeout
         for line in proc.stdout:
             line = line.strip()
             if line:
                 yield line
+            if time.time() > deadline:
+                _record_failure(cmd, "timed out after %.0fs" % timeout)
+                proc.kill()
+                break
     finally:
         try:
             proc.wait(timeout=10)
@@ -384,19 +394,17 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
     def _run(port_args: List[str], xml_name: str) -> Dict[str, NmapHost]:
         xml_path = os.path.join(out_dir, "raw", xml_name)
         os.makedirs(os.path.dirname(xml_path), exist_ok=True)
-        cmd = list(base_args) + ["-oX", xml_path] + port_args + hosts
+        cmd = ([base_args[0], "--stats-every", "10s"] + base_args[1:]
+               + ["-oX", xml_path] + port_args + hosts)
         # nmap runs inside WSL under the bridge, so -oX must name a path it can see.
         cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
-        if on_progress:
-            # Drain stdout for the stats lines. The results still come from the
-            # XML afterwards; this only changes how the wait is spent.
-            cmd = [cmd[0], "--stats-every", "10s"] + cmd[1:]
-            for line in stream_lines(cmd, timeout=timeout):
-                msg = nmap_stat_line(line)
-                if msg:
-                    on_progress(msg)
-        else:
-            run(cmd, timeout=timeout)
+        # Always streamed: the results come from the XML either way, so the
+        # only question is whether the wait is spent silently. --stats-every
+        # makes nmap narrate it, and nothing downstream cares if no one reads.
+        for line in stream_lines(cmd, timeout=timeout):
+            msg = nmap_stat_line(line) if on_progress else None
+            if msg:
+                on_progress(msg)
         if not os.path.exists(xml_path):
             return {}
         return parse_nmap_xml(xml_path)
@@ -660,19 +668,16 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # naabu only ever emits a line for a port it found open, so there is no
         # honest "N of 384 swept" to report - what it can say is what has turned
         # up so far, which is enough to tell a working sweep from a wedged one.
-        hits = 0
         last = 0.0
         for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
             h = obj.get("host") or obj.get("ip")
             p = obj.get("port")
             if h and p:
                 found.setdefault(str(h), []).append(int(p))
-                hits += 1
-                now = time.time()
-                if on_progress and now - last >= 2.0:
-                    last = now
+                if on_progress and time.time() - last >= 2.0:
+                    last = time.time()
                     on_progress("%d open port(s) on %d host(s) so far"
-                                % (hits, len(found)))
+                                % (sum(len(v) for v in found.values()), len(found)))
         return found
 
     found = _run(spec)

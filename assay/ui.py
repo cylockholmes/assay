@@ -115,13 +115,16 @@ class Dashboard:
         self._maybe_render()
 
     def status(self) -> Dict[str, str]:
-        """Where the scan is right now, for the live HTML report to show too."""
-        now = time.time()
+        """Where the scan is right now, for the live HTML report to show too.
+
+        No whole-scan clock: the report already gets one via assets["duration"],
+        and a second one started when the Dashboard was built rather than when
+        the Engine was would disagree with it by a second or two on the page.
+        """
         return {
             "stage": self.stage,
             "detail": self.detail,
-            "elapsed": human_duration(now - self.started),
-            "stage_elapsed": human_duration(now - self.stage_started),
+            "stage_elapsed": human_duration(time.time() - self.stage_started),
         }
 
     def _maybe_render(self) -> None:

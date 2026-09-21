@@ -1058,8 +1058,9 @@ class ScanProgressTests(unittest.TestCase):
         st = d.status()
         self.assertEqual(st["stage"], "ports")
         self.assertIn("naabu:", st["detail"])
-        self.assertRegex(st["elapsed"], r"^\d+(s|m\d\ds|h\d\dm)$")
         self.assertRegex(st["stage_elapsed"], r"^\d+(s|m\d\ds|h\d\dm)$")
+        self.assertNotIn("elapsed", st,
+                         "the whole-scan clock belongs to assets, not here")
 
     def test_nmap_stats_lines_become_progress(self):
         from assay.tools import nmap_stat_line
@@ -1096,38 +1097,39 @@ class ScanProgressTests(unittest.TestCase):
         self.assertTrue(seen, "at least the first result should report progress")
         self.assertIn("open port(s)", seen[0])
 
-    def test_live_report_bar_shows_where_the_scan_is(self):
-        import os, re, tempfile
+    def _live_bar(self, **build_kw):
+        """Render a live report and return just its status bar."""
+        import re, tempfile
         from assay import report
         from assay.store import Store
-        d = tempfile.mkdtemp()
-        st = Store(os.path.join(d, "a.db")); st.start_run("standard", ["10.0.0.0/24"])
-        try:
-            path = report.build(
-                st, {"hosts": 1, "web": 0, "requests": 0},
-                os.path.join(d, "r.html"), live=True,
-                status={"stage": "ports", "detail": "nmap: 45% done",
-                        "elapsed": "12m43s", "stage_elapsed": "11m02s"})
-            bar = re.search(r'<div class="livebar".*?</div>',
-                            open(path).read(), re.S).group(0)
-            self.assertIn("ports", bar)
-            self.assertIn("nmap: 45% done", bar)
-            self.assertIn("11m02s", bar)
-        finally:
-            st.close()
+        self.tmp = tempfile.mkdtemp()
+        st = Store(os.path.join(self.tmp, "a.db"))
+        st.start_run("standard", ["10.0.0.0/24"])
+        self.addCleanup(st.close)
+        path = report.build(st, build_kw.pop("assets", {"hosts": 1, "web": 0,
+                                                        "requests": 0}),
+                            os.path.join(self.tmp, "r.html"), live=True, **build_kw)
+        with open(path) as fh:
+            return re.search(r'<div class="livebar".*?</div>', fh.read(), re.S).group(0)
+
+    def test_live_report_bar_shows_where_the_scan_is(self):
+        bar = self._live_bar(
+            assets={"hosts": 1, "web": 0, "requests": 0, "duration": 763.0},
+            status={"stage": "ports", "detail": "nmap: 45% done",
+                    "stage_elapsed": "11m02s"})
+        self.assertIn("ports", bar)
+        self.assertIn("nmap: 45% done", bar)
+        self.assertIn("11m02s", bar)
+
+    def test_the_bar_and_the_header_show_one_scan_clock(self):
+        """Both read assets["duration"], so they cannot disagree."""
+        bar = self._live_bar(
+            assets={"hosts": 1, "web": 0, "requests": 0, "duration": 763.0},
+            status={"stage": "ports", "detail": "", "stage_elapsed": "11m02s"})
+        self.assertIn("total 12m43s", bar)
 
     def test_live_report_without_status_still_renders(self):
-        import os, tempfile
-        from assay import report
-        from assay.store import Store
-        d = tempfile.mkdtemp()
-        st = Store(os.path.join(d, "a.db")); st.start_run("standard", ["10.0.0.0/24"])
-        try:
-            path = report.build(st, {"hosts": 1, "web": 0, "requests": 0},
-                                os.path.join(d, "r.html"), live=True)
-            self.assertIn("scan running", open(path).read())
-        finally:
-            st.close()
+        self.assertIn("scan running", self._live_bar())
 
 
 class FollowupGateTests(unittest.TestCase):
@@ -3428,34 +3430,34 @@ class NmapXmlPrefixTests(unittest.TestCase):
     def test_default_prefix_is_nmap(self):
         from assay import tools
         seen = []
-        original = tools.run
+        original = tools.stream_lines
 
-        def fake_run(cmd, timeout=300.0, stdin="", cwd=None):
+        def fake_stream(cmd, timeout=900.0, stdin=""):
             seen.append(list(cmd))
-            return tools.Proc(rc=1, out="", err="", cmd=list(cmd))
+            return iter(())
 
-        tools.run = fake_run
+        tools.stream_lines = fake_stream
         try:
             tools.nmap_scan(["10.0.0.5"], "top-1000", {})
         finally:
-            tools.run = original
+            tools.stream_lines = original
         oX_values = [cmd[cmd.index("-oX") + 1] for cmd in seen if "-oX" in cmd]
         self.assertTrue(any(v.endswith("nmap.xml") for v in oX_values))
 
     def test_custom_prefix_changes_the_output_filenames(self):
         from assay import tools
         seen = []
-        original = tools.run
+        original = tools.stream_lines
 
-        def fake_run(cmd, timeout=300.0, stdin="", cwd=None):
+        def fake_stream(cmd, timeout=900.0, stdin=""):
             seen.append(list(cmd))
-            return tools.Proc(rc=1, out="", err="", cmd=list(cmd))
+            return iter(())
 
-        tools.run = fake_run
+        tools.stream_lines = fake_stream
         try:
             tools.nmap_scan(["10.0.0.5"], "top-1000", {}, xml_prefix="nmap-discovered")
         finally:
-            tools.run = original
+            tools.stream_lines = original
         oX_values = [cmd[cmd.index("-oX") + 1] for cmd in seen if "-oX" in cmd]
         self.assertTrue(any(v.endswith("nmap-discovered.xml") for v in oX_values))
         self.assertFalse(any(v.endswith(("/nmap.xml",)) for v in oX_values))

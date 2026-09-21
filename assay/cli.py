@@ -537,15 +537,24 @@ def cmd_scan(args) -> int:
         # be worked by hand long before the last host is swept.
         live = not args.no_report and not args.no_live
         report_path = os.path.join(cfg.out_dir, "report.html")
-        state = {"last": 0.0, "opened": False}
+        state = {"last": 0.0, "opened": False, "found": -1}
 
         def refresh(force: bool = False) -> None:
             if not live:
                 return
             now = time.time()
-            if not force and now - state["last"] < 4.0:
+            # Rebuilding re-queries every finding and rewrites the document;
+            # a progress tick only changes the ~100 bytes of the live bar. Now
+            # that the port stages report every few seconds, holding both to
+            # the same 4s cadence would turn one long sweep into a hundred-odd
+            # rebuilds of byte-identical output. A new finding still lands
+            # promptly; a status-only change waits longer.
+            found = sum(dash.counts.values())
+            due = 4.0 if found != state["found"] else 20.0
+            if not force and now - state["last"] < due:
                 return
             state["last"] = now
+            state["found"] = found
             try:
                 report_mod.build(engine.store, engine.assets(), report_path,
                                  scan_meta={"profile": cfg.profile,

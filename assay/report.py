@@ -14,6 +14,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from assay.models import Finding
+from assay.ui import human_duration
 from assay.store import Store
 
 SEV_COLOR = {
@@ -78,7 +79,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
             parts.append(_finding_card(f, store))
         parts.append("</section>")
 
-    parts.append(_live_script(status) if live else "")
+    parts.append(_live_script(status, assets.get("duration")) if live else "")
     parts.append(_FOOT)
     doc = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -86,35 +87,37 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     return out_path
 
 
-def _live_script(status: Optional[Dict] = None) -> str:
+def _live_script(status: Optional[Dict] = None,
+                 duration: Optional[float] = None) -> str:
     """Auto-reload while a scan is in flight, preserving where you were.
 
-    `status` carries where the scan currently is - stage, that stage's own
-    progress line, and both clocks. Without it the bar can only say "running",
-    which for a long quiet stage is the same thing it says when wedged.
+    `status` carries where the scan currently is - stage and that stage's own
+    progress line and clock. Without it the bar can only say "running", which
+    for a long quiet stage is the same thing it says when wedged. The
+    whole-scan clock comes from `duration` (the same figure the header shows)
+    so the page never displays two totals for one scan.
     """
     st = status or {}
     stage = _e(str(st.get("stage") or ""))
     detail = _e(str(st.get("detail") or ""))
-    elapsed = _e(str(st.get("elapsed") or ""))
     stage_elapsed = _e(str(st.get("stage_elapsed") or ""))
 
-    where = ""
     if stage:
-        where = ('<b>%s</b>' % stage) + (
-            ' <span class="dim">%s</span>' % stage_elapsed if stage_elapsed else "")
+        where = "<b>%s</b>" % stage
+        if stage_elapsed:
+            where += ' <span class="dim">%s</span>' % stage_elapsed
         if detail:
             where += ' <span class="dim">&middot; %s</span>' % detail
     else:
         where = "<b>scan running</b>"
+    note = ("total %s" % human_duration(duration)) if duration is not None \
+        else "findings appear as they are confirmed"
 
     return """
 <div class="livebar" id="livebar">
   <span class="dot"></span>
   %s
-  <span class="dim">%s</span>""" % (
-        where, ("total " + elapsed) if elapsed else
-        "findings appear as they are confirmed") + """
+  <span class="dim">%s</span>
   <label class="cbx"><input type="checkbox" id="autorefresh" checked> auto-refresh</label>
   <span class="dim" id="nextin"></span>
 </div>
@@ -146,7 +149,7 @@ def _live_script(status: Optional[Dict] = None) -> str:
   }, 1000);
 })();
 </script>
-"""
+""" % (where, note)
 
 
 def _inventory(store: Store) -> str:
