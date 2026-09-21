@@ -2109,6 +2109,25 @@ class AiBackendTests(unittest.TestCase):
                              Redactor(), tempfile.mkdtemp())
         self.assertTrue(out["dry_run"])
 
+    def test_an_unknown_backend_never_falls_through_to_a_subprocess(self):
+        """A typo'd backend must not silently become "run Claude Code"."""
+        import subprocess, tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+
+        def boom(*a, **k):
+            raise AssertionError("a subprocess was started for an unknown backend")
+
+        orig = subprocess.run
+        subprocess.run = boom
+        try:
+            with self.assertRaises(ai_mod.BackendUnset):
+                ai_mod.analyze(self._one_finding(), {},
+                               self._cfg(backend="claude-clii"),
+                               Redactor(), tempfile.mkdtemp())
+        finally:
+            subprocess.run = orig
+
     def test_cli_argv_carries_the_schema_and_every_isolation_flag(self):
         from assay import ai as ai_mod
         argv = ai_mod._cli_argv(self._cfg(backend="claude-cli", effort="low"),
@@ -2122,7 +2141,13 @@ class AiBackendTests(unittest.TestCase):
         self.assertEqual(schema, ai_mod.RESPONSE_SCHEMA)
         self.assertEqual(argv[argv.index("--system-prompt") + 1],
                          ai_mod.SYSTEM_PROMPT)
-        for flag in ai_mod.CLI_ISOLATION_FLAGS:
+        # Pinned literally, not looped over CLI_ISOLATION_FLAGS: iterating the
+        # constant would pass just as happily after someone deleted one of them.
+        # These four are what keep a triage call from being able to act.
+        for flag in ("--restricted",            # no bash/code execution, no web fetch
+                     "--strict-mcp-config",     # no MCP servers
+                     "--disable-slash-commands",  # no skills
+                     "--no-session-persistence"):  # nothing left on disk
             self.assertIn(flag, argv, "isolation flag %s was dropped" % flag)
 
     def _fake_run(self, envelope, seen=None, returncode=0):
