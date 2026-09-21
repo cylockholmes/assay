@@ -14,8 +14,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from assay.models import Finding
-from assay.ui import human_duration
 from assay.store import Store
+from assay.tools import human_duration
 
 SEV_COLOR = {
     "critical": "#ff4d6d", "high": "#ff8c42", "medium": "#ffd166",

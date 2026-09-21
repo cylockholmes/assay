@@ -22,6 +22,8 @@ from rich.text import Text
 
 from assay.models import Finding
 from assay.store import Store
+# Lives with the commands whose elapsed time it was written to report.
+from assay.tools import human_duration
 
 console = Console()
 
@@ -40,17 +42,6 @@ BANNER = r"""
  / __ |__ \_\ \ __ |\ V / /    what in this ore is worth extracting
 /_/ |_|___/___/_/ |_| \_/     
 """
-
-
-def human_duration(seconds: float) -> str:
-    """Compact elapsed time. "763s" is hard to read at a glance; "12m43s" is not."""
-    total = int(max(0, seconds))
-    if total < 60:
-        return "%ds" % total
-    if total < 3600:
-        return "%dm%02ds" % divmod(total, 60)
-    h, rem = divmod(total, 3600)
-    return "%dh%02dm" % (h, rem // 60)
 
 
 class Dashboard:
