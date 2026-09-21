@@ -9,6 +9,7 @@ from assay import owasp, recon
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay import domains
 
 
 @register
@@ -142,10 +143,9 @@ class VhostModule(Module):
 
     def _candidates(self, ctx: Context, wt: WebTarget) -> List[str]:
         """Names worth trying: siblings already known, plus permutations."""
-        parts = wt.host.split(".")
-        if wt.host.replace(".", "").isdigit() or len(parts) < 2:
+        apex = domains.registrable(wt.host)
+        if not apex:
             return []
-        apex = ".".join(parts[-2:])
         known = {t.host for t in ctx.targets}
         cap = 40 if ctx.cfg.profile == "standard" else 120
         cands = [c for c in recon.permute(known, apex, cap=cap) if c != wt.host]

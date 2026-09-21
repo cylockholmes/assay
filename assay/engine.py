@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
-from assay import correlate, env, recon, tools, urls as urlsrc
+from assay import correlate, domains, env, recon, tools, urls as urlsrc
 from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
@@ -235,9 +235,9 @@ class Engine:
         for t in self.ctx.targets:
             if t.is_ip:
                 continue
-            parts = t.host.split(".")
-            if len(parts) >= 2:
-                apexes.setdefault(".".join(parts[-2:]), set()).add(t.host)
+            apex = domains.registrable(t.host)
+            if apex:
+                apexes.setdefault(apex, set()).add(t.host)
         if not apexes:
             return
 

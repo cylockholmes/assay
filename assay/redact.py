@@ -187,10 +187,12 @@ class Redactor:
 
         # Phase 2 - terms we positively know identify this client. Ground truth,
         # so it runs even where the generic detectors would not fire.
+        low = out.lower()
         for term in self.extra_terms:
-            if term in out.lower():
+            if term in low:
                 out = re.sub(re.escape(term), self.map.token_for("CLIENT", term),
                              out, flags=re.I)
+                low = out.lower()          # only a real substitution moves it
 
         # Phase 3 - remaining network and opaque identifiers.
         for kind, rx in NETWORK_DETECTORS:
@@ -258,14 +260,19 @@ class Redactor:
         A non-empty result means the payload MUST NOT be transmitted.
         """
         leaks: List[str] = []
+        # Lowercased once. This runs over the whole redacted payload - a
+        # megabyte on a large engagement - and both loops below are over
+        # hundreds or thousands of entries, so folding it inside them copied
+        # the payload once per term.
+        low = text.lower()
 
         for term in self.extra_terms:
-            if term in text.lower():
+            if term in low:
                 leaks.append("known client term: %s" % term)
 
         # Any real value we have already mapped must not still be present.
         for token, real in self.map.reverse.items():
-            if len(real) > 6 and real.lower() in text.lower():
+            if len(real) > 6 and real.lower() in low:
                 leaks.append("unmapped occurrence of %s value" % token)
 
         for kind, rx in ALL_DETECTORS:

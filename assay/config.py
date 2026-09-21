@@ -151,14 +151,10 @@ class Scope:
     @staticmethod
     def _plain_host(pattern: str) -> str:
         """Turn Burp's ^example\\.com$ back into example.com where possible."""
-        p = pattern.strip()
-        anchored_start = p.startswith("^")
-        p = p.lstrip("^").rstrip("$")
+        p = pattern.strip().lstrip("^").rstrip("$")
         p = p.replace("\\.", ".")
         # ^.*\.example\.com$ means "any subdomain" -> *.example.com
-        if p.startswith(".*."):
-            p = "*" + p[2:]
-        elif p.startswith(".*"):
+        if p.startswith(".*"):
             p = "*" + p[2:]
         if re.search(r"[\\()\[\]+?{}|]", p):
             return ""          # still a real regex; keep it as one
