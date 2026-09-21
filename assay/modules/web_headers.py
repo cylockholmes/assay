@@ -16,6 +16,7 @@ from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
 from assay.net import rand_token
+from assay import domains
 
 SENSITIVE_JSON = re.compile(
     r'"(?:email|e_mail|username|user_name|token|access_token|api_key|apikey|'
@@ -175,10 +176,11 @@ class CorsModule(Module):
     def _sibling_trust(self, ctx: Context, url: str, wt: WebTarget) -> List[Finding]:
         """Does the app trust *any* subdomain of its own registrable domain?"""
         host = urlsplit(url).hostname or ""
-        parts = host.split(".")
-        if len(parts) < 2 or wt.host.replace(".", "").isdigit():
+        # registrable() rejects IPs and single labels itself, and knows the
+        # multi-part TLDs - probing assayXXXX.co.uk is not a sibling origin.
+        apex = domains.registrable(host)
+        if not apex:
             return []
-        apex = ".".join(parts[-2:])
         probe = "https://assay%s.%s" % (rand_token(6), apex)
         r = ctx.http.get(url, headers={"Origin": probe})
         if not r.ok:

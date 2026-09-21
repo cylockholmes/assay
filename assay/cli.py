@@ -489,15 +489,11 @@ def _burp_config(args) -> BurpConfig:
     proxy = getattr(args, "burp", None)
     api = getattr(args, "burp_api", None)
     if proxy:
-        bc.proxy = None if proxy == "auto" else proxy
-        if proxy == "auto":
-            bc.proxy = env.find_burp_proxy()
-            if not bc.proxy:
-                console.print("[yellow]Burp proxy not found.[/yellow]\n%s" % env.burp_hint())
+        bc.proxy = env.find_burp_proxy() if proxy == "auto" else proxy
+        if not bc.proxy:
+            console.print("[yellow]Burp proxy not found.[/yellow]\n%s" % env.burp_hint())
     if api:
-        bc.api_url = None if api == "auto" else api
-        if api == "auto":
-            bc.api_url = env.find_burp_api()
+        bc.api_url = env.find_burp_api() if api == "auto" else api
     bc.api_key = getattr(args, "burp_key", None)
     bc.mirror = bool(getattr(args, "burp_mirror", False))
     bc.scan = bool(getattr(args, "burp_scan", False))
@@ -569,6 +565,11 @@ def cmd_scan(args) -> int:
         original_progress = dash.progress
 
         def progress(stage: str, msg: str, advance: int = 0) -> None:
+            # The header is built from the target SPECS, because that is all
+            # there is before _stage_resolve runs. One "10.0.0.0/22" is one
+            # spec and 1024 hosts, so leaving it there makes the dashboard
+            # disagree with the report, which counts what was actually scanned.
+            dash.targets = len(engine.ctx.targets) or dash.targets
             original_progress(stage, msg, advance)
             refresh()
 
@@ -1103,8 +1104,7 @@ def cmd_replay(args) -> int:
         if ok and cfg.scope.allows(r.host):
             candidates.append(r)
         else:
-            key = why if ok else why
-            reasons[key] = reasons.get(key, 0) + 1
+            reasons[why] = reasons.get(why, 0) + 1
     candidates = candidates[: args.limit]
 
     console.print("  [bold]%d[/bold] worth replaying after dedupe" % len(candidates))

@@ -24,6 +24,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlsplit
 
 from assay.models import Finding
+from assay import domains
 
 
 def _host_of(target: str) -> str:
@@ -34,8 +35,13 @@ def _host_of(target: str) -> str:
 
 
 def _apex(host: str) -> str:
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    """The registrable name, so findings group by owner rather than by label.
+
+    domains.registrable knows the multi-part TLDs; a bare last-two-labels
+    slice reduces every app.x.co.uk to "co.uk" and merges unrelated targets
+    into one chain.
+    """
+    return domains.registrable(host) or host
 
 
 # --------------------------------------------------------------------------

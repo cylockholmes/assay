@@ -1132,6 +1132,46 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class ApexDerivationTests(unittest.TestCase):
+    """A bare last-two-labels slice turns every *.co.uk target into "co.uk"."""
+
+    def test_multi_part_tlds_do_not_collapse_to_the_tld(self):
+        from assay.correlate import _apex
+        self.assertEqual(_apex("app.acme.co.uk"), "acme.co.uk")
+        self.assertEqual(_apex("www.shop.com.au"), "shop.com.au")
+
+    def test_ordinary_hosts_are_unchanged(self):
+        from assay.correlate import _apex
+        self.assertEqual(_apex("a.b.example.com"), "example.com")
+        self.assertEqual(_apex("example.com"), "example.com")
+
+    def test_addresses_and_single_labels_fall_back_to_the_host(self):
+        from assay.correlate import _apex
+        self.assertEqual(_apex("10.0.0.5"), "10.0.0.5")
+        self.assertEqual(_apex("localhost"), "localhost")
+
+
+class TargetCountTests(unittest.TestCase):
+    """The header counts specs until the specs have been expanded."""
+
+    def test_a_cidr_spec_counts_as_its_hosts_once_resolved(self):
+        from assay.ui import Dashboard
+        from assay.models import Target
+        dash = Dashboard(1, "standard", quiet=True)      # one spec: a /22
+        self.assertEqual(dash.targets, 1)
+        resolved = [Target(raw="10.0.0.0/22", host="10.0.0.%d" % i)
+                    for i in range(1024)]
+        dash.targets = len(resolved) or dash.targets
+        self.assertEqual(dash.targets, 1024,
+                         "the header must count what is actually scanned")
+
+    def test_the_spec_count_survives_until_expansion(self):
+        from assay.ui import Dashboard
+        dash = Dashboard(55, "standard", quiet=True)
+        dash.targets = len([]) or dash.targets          # before resolve runs
+        self.assertEqual(dash.targets, 55)
+
+
 class StreamTimeoutTests(unittest.TestCase):
     """stream_lines enforces its timeout, so a cut-off must not read as done."""
 

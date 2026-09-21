@@ -66,7 +66,6 @@ class ContentDiscoveryModule(Module):
 
         cap = ctx.cfg.opts.get("max_urls_per_host", 60) * 3
         discovered: List[str] = []
-        found: List[str] = []
         interesting: List[Dict] = []
 
         for row in results:
@@ -84,14 +83,13 @@ class ContentDiscoveryModule(Module):
                     continue
 
             discovered.append(url)
-            found.append(url)
             if NOTEWORTHY.match(path) and status in (200, 401, 403, 301, 302):
                 interesting.append({"url": url, "status": status,
                                     "length": row.get("length")})
 
         ctx.add_urls(origin, discovered, cap)
         ctx.say("content", "%s: %d path(s), %d noteworthy"
-                % (origin, len(found), len(interesting)))
+                % (origin, len(discovered), len(interesting)))
         if not interesting:
             return []
 
