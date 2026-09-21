@@ -143,6 +143,25 @@ def _record_failure(cmd: Sequence[str], detail: str) -> None:
         pass
 
 
+def dns_lookup(record: str, name: str, timeout: float = 8.0) -> str:
+    """Raw stdout of a DNS lookup, via dig and falling back to host.
+
+    Goes through run(), so unlike the three hand-rolled wrappers this replaced
+    it is bridged into WSL (where the resolver tools actually live on a
+    Windows host) and lands in the journal like every other command.
+
+    Returns the first command's output that was not empty, even on a non-zero
+    exit: `host` exits non-zero on NXDOMAIN but prints the reason, and callers
+    need to tell that apart from "the lookup did not run".
+    """
+    for cmd in (["dig", "+short", "+time=3", "+tries=1", record, name],
+                ["host", "-t", record, name]):
+        p = run(cmd, timeout=timeout)
+        if (p.out or "").strip():
+            return p.out
+    return ""
+
+
 def bridge(cmd: Sequence[str]) -> List[str]:
     """Prepend the WSL prefix when assay is hosted on Windows.
 
@@ -175,14 +194,31 @@ def have(name: str) -> bool:
 
 
 def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
-        cwd: Optional[str] = None) -> Proc:
+        cwd: Optional[str] = None,
+        env_extra: Optional[Dict[str, str]] = None) -> Proc:
+    """Run an external command. The only spawn primitive besides stream_lines.
+
+    `env_extra` sets variables for the child. Under the WSL bridge the host's
+    environment does not cross into the distribution, so the assignments are
+    carried as an `env K=V` prefix inside the bridged command instead of being
+    set on the Windows-side process, where the tool would never see them.
+    """
     env.augment_path()
     _record(cmd)
-    argv = bridge(cmd)
+    argv = list(cmd)
+    proc_env = None
+    if env_extra:
+        if env.use_wsl_bridge():
+            argv = (["env"] + ["%s=%s" % kv for kv in sorted(env_extra.items())]
+                    + argv)
+        else:
+            proc_env = dict(os.environ)
+            proc_env.update(env_extra)
+    argv = bridge(argv)
     try:
         p = subprocess.run(
             argv, input=stdin, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd,
+            timeout=timeout, cwd=cwd, env=proc_env,
         )
         if p.returncode != 0:
             _record_failure(cmd, p.stderr)

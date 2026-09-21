@@ -8,13 +8,13 @@ at a known third-party service, and the service answers with its own
 from __future__ import annotations
 
 import re
-import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from assay import owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, Target
 from assay.modules import Module, register
+from assay import tools
 
 # provider -> (cname substring, body fingerprint)
 FINGERPRINTS: List[Tuple[str, str, str]] = [
@@ -43,17 +43,12 @@ FINGERPRINTS: List[Tuple[str, str, str]] = [
 
 def resolve_cname(host: str) -> str:
     """CNAME lookup via dig or host; returns '' when neither is available."""
-    for cmd in (["dig", "+short", "CNAME", host], ["host", "-t", "CNAME", host]):
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=8).stdout
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if not out.strip():
-            continue
-        m = re.search(r"(?:alias for\s+)?([A-Za-z0-9_.-]+\.)\s*$", out.strip().splitlines()[-1])
-        if m:
-            return m.group(1).rstrip(".").lower()
-    return ""
+    out = tools.dns_lookup("CNAME", host)
+    if not out.strip():
+        return ""
+    m = re.search(r"(?:alias for\s+)?([A-Za-z0-9_.-]+\.)\s*$",
+                  out.strip().splitlines()[-1])
+    return m.group(1).rstrip(".").lower() if m else ""
 
 
 @register
