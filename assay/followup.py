@@ -160,8 +160,9 @@ def collect(store, redaction_map=None) -> List[Command]:
     resolve; putting the real values back is a purely local operation.
     """
     out: List[Command] = []
+    ai_by_fid = store.ai_map()          # one query, not one per finding
     for f in store.iter_findings():
-        ai = store.ai_for(f.fingerprint())
+        ai = ai_by_fid.get(f.fingerprint())
         if not ai:
             continue
         for raw in (ai.get("commands") or []) + [

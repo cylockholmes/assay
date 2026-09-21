@@ -179,15 +179,25 @@ class Finding:
     unauth: bool = True                     # reachable with no credentials
     chainable: bool = False                 # useful as a step in a larger chain
     dedupe_key: Optional[str] = None
+    # The identity this finding was stored under. Empty on a freshly built
+    # one; set by Store._row_to_finding on the way back out. dedupe_key has no
+    # column, so without this a round-tripped finding recomputes a DIFFERENT
+    # fingerprint from module|title|target and stops matching its own row.
+    fid: str = ""
     created: float = field(default_factory=_now)
     score: float = 0.0
     triage: str = TRIAGE_NOTE
     notes: str = ""
     # Hunter's verdict, persisted across runs. See Store.STATUSES.
     status: str = "new"
+    # Which run last wrote this row. Set by Store._row_to_finding;
+    # the report uses it to badge findings new without a query each.
+    run_id: int = 0
 
     # -- identity ----------------------------------------------------------
     def fingerprint(self) -> str:
+        if self.fid:
+            return self.fid
         base = self.dedupe_key or "%s|%s|%s" % (self.module, self.title, self.target)
         return hashlib.sha1(base.encode("utf-8", "replace")).hexdigest()[:16]
 
