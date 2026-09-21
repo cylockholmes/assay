@@ -204,6 +204,24 @@ class _Heartbeat:
                                        " - %s" % text if text else ""))
 
 
+def _stop(proc: "subprocess.Popen", grace: float = 10.0) -> None:
+    """Ask a process to stop before insisting.
+
+    SIGKILL cannot be caught, so a tool killed outright never gets to finish
+    the file it was writing - nmap loses the closing tag on its XML and with
+    it, to a strict parser, every host it had already scanned. SIGTERM gives
+    it the chance to land its output; the kill is still there for anything
+    that ignores the request.
+    """
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _record(cmd: Sequence[str]) -> None:
     if JOURNAL is not None:
         try:
@@ -229,6 +247,20 @@ def _record_failure(cmd: Sequence[str], detail: str) -> None:
         JOURNAL.note("FAILED  %s -- %s" % (cmd[0] if cmd else "?", tail[:300]))
     except Exception:
         pass
+
+
+def _note(msg: str) -> None:
+    """Something the operator needs to know, in the journal and on screen.
+
+    Not a failure - the run carries on - but not a heartbeat either: these
+    are the things that quietly change what a result means.
+    """
+    if JOURNAL is not None:
+        try:
+            JOURNAL.note(msg)
+        except Exception:
+            pass
+    _say(msg, tick=False)
 
 
 def dns_lookup(record: str, name: str, timeout: float = 8.0) -> str:
@@ -380,15 +412,23 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                 # say so rather than letting partial output pass as complete.
                 timed_out = True
                 _record_failure(cmd, "timed out after %.0fs" % timeout)
-                proc.kill()
+                # Terminate, not kill: a tool writing a result file needs the
+                # chance to close it, or the whole run is thrown away for the
+                # sake of a few closing bytes.
+                _stop(proc)
                 hb.timed_out(timeout)
                 break
     finally:
         hb.stop()
+        if proc.stdout:
+            # Closing the pipe both releases the descriptor and tells a tool
+            # we abandoned early (a caller that hit its own cap and stopped
+            # reading) to stop, instead of leaving it writing into the void.
+            proc.stdout.close()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _stop(proc, grace=5.0)
         # A kill of our own is recorded above; the returncode it produces is
         # the same event, not a second failure.
         if proc.returncode and not timed_out:
@@ -521,7 +561,22 @@ def nmap_stat_line(line: str) -> Optional[str]:
 _LINE_STATUS["nmap"] = nmap_stat_line
 
 
-def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
+# A wall-clock backstop for nmap, not a work budget: --host-timeout already
+# bounds each host, so this only has to sit above what the host count can
+# honestly need. A flat half hour did not - it cut a 55-host -sV sweep off
+# mid-scan and, before the XML salvage below, took every result with it.
+NMAP_BASE_TIMEOUT = 1800.0
+NMAP_PER_HOST_TIMEOUT = 60.0
+NMAP_TIMEOUT_CAP = 6 * 3600.0
+
+
+def nmap_timeout(hosts: Sequence[str]) -> float:
+    return min(NMAP_TIMEOUT_CAP,
+               NMAP_BASE_TIMEOUT + NMAP_PER_HOST_TIMEOUT * max(1, len(hosts)))
+
+
+def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
+              timeout: Optional[float] = None,
               out_dir: str = ".", xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
     """Service/version scan. Returns scanned address -> NmapHost.
 
@@ -538,6 +593,11 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
     discovered via reverse DNS) must pass a distinct prefix each time, or a
     later call silently overwrites an earlier one's raw XML on disk.
     """
+    # Scaled by default: how long an -sV sweep needs is a function of how many
+    # hosts the caller handed it, and a constant is only ever right for one
+    # size of scan.
+    if timeout is None:
+        timeout = nmap_timeout(hosts)
     base_args = [
         "nmap", "-Pn", "-sV", "--version-intensity", "5",
         "-T3" if tune.get("constrained") else "-T4",
@@ -738,6 +798,34 @@ def parse_nse_xml(path: str) -> Dict[int, Dict[str, str]]:
     return out
 
 
+def _salvage_nmap_xml(path: str):
+    """Recover the finished hosts from an nmap XML with no closing tag.
+
+    nmap writes each <host> the moment it finishes with it, but the closing
+    </nmaprun> only when it exits of its own accord. A scan stopped by its
+    timeout therefore leaves a file that is a perfectly good list of every
+    host nmap DID complete and, to a strict parser, not a document at all.
+    Treating that ParseError as "no results" discarded the entire scan -- on
+    a subnet sweep, half an hour of work and every port it had found.
+
+    Cuts at the last complete </host> and closes the root. Everything else
+    nmap writes at that level (scaninfo, verbose, taskbegin, taskprogress)
+    is self-closing, so the result parses.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    end = data.rfind("</host>")
+    if end == -1:
+        return None
+    try:
+        return ET.fromstring(data[:end + len("</host>")] + "\n</nmaprun>")
+    except ET.ParseError:
+        return None
+
+
 def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
     """Parse nmap's XML into scanned address -> NmapHost.
 
@@ -748,10 +836,17 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
     """
     out: Dict[str, NmapHost] = {}
     try:
-        tree = ET.parse(path)
-    except (ET.ParseError, OSError):
-        return out
-    for host_el in tree.getroot().findall("host"):
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError) as exc:
+        root = _salvage_nmap_xml(path)
+        if root is None:
+            _record_failure(["nmap"], "unreadable XML at %s: %s" % (path, exc))
+            return out
+        # Worth a line of its own: the run continues with real results, but
+        # they are the results of a scan that did not finish.
+        _note("nmap XML was truncated - recovered %d completed host(s) from %s"
+              % (len(root.findall("host")), os.path.basename(path)))
+    for host_el in root.findall("host"):
         addr = ""
         for a in host_el.findall("address"):
             if a.get("addrtype") in ("ipv4", "ipv6"):

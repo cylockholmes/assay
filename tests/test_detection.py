@@ -3979,6 +3979,169 @@ class NmapXmlPrefixTests(unittest.TestCase):
         self.assertFalse(any(v.endswith(("/nmap.xml",)) for v in oX_values))
 
 
+class CutOffNmapScanTests(unittest.TestCase):
+    """A scan stopped by its timeout must keep the hosts it already finished.
+
+    nmap writes each <host> as it completes it and the closing </nmaprun>
+    only on a clean exit, so a killed scan leaves a file that is a good list
+    of results and not a valid document. Reading that as "nothing was found"
+    discarded half an hour of subnet sweep and left the run with no ports, no
+    web targets, and nothing to test.
+    """
+
+    def _write(self, body: str) -> str:
+        import os, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "nmap.xml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<nmaprun scanner="nmap" args="nmap -sV" start="1700000000">\n'
+            '<scaninfo type="syn" protocol="tcp"/>\n')
+    HOST = ('<host><address addr="10.0.0.%d" addrtype="ipv4"/><ports>'
+            '<port protocol="tcp" portid="%d"><state state="open"/>'
+            '<service name="%s" product="nginx"/></port></ports></host>\n')
+
+    def test_completed_hosts_survive_a_missing_closing_tag(self):
+        from assay import tools
+        path = self._write(self.HEAD + self.HOST % (1, 443, "https")
+                           + self.HOST % (2, 80, "http"))
+        result = tools.parse_nmap_xml(path)
+        self.assertEqual(sorted(result), ["10.0.0.1", "10.0.0.2"])
+        self.assertEqual([p.port for p in result["10.0.0.1"].ports], [443])
+        self.assertEqual(result["10.0.0.2"].ports[0].product, "nginx",
+                         "a salvaged host keeps its -sV detail, not just a port")
+
+    def test_a_host_cut_off_mid_write_is_dropped_not_guessed(self):
+        """Only complete <host> elements count; a partial one is not a result."""
+        from assay import tools
+        path = self._write(self.HEAD + self.HOST % (1, 443, "https")
+                           + '<host><address addr="10.0.0.9" addrtype="ipv4"/><por')
+        result = tools.parse_nmap_xml(path)
+        self.assertEqual(sorted(result), ["10.0.0.1"])
+
+    def test_a_file_with_no_finished_host_yields_nothing(self):
+        from assay import tools
+        self.assertEqual(tools.parse_nmap_xml(self._write(self.HEAD)), {})
+
+    def test_garbage_is_not_salvaged_into_results(self):
+        from assay import tools
+        self.assertEqual(tools.parse_nmap_xml(self._write("not xml at all")), {})
+
+    def test_a_missing_file_is_not_an_exception(self):
+        from assay import tools
+        self.assertEqual(tools.parse_nmap_xml("/nonexistent/nmap.xml"), {})
+
+    def test_a_salvage_is_announced_not_silent(self):
+        """Partial results that read as complete are worse than no results."""
+        from assay import tools
+        told = []
+        path = self._write(self.HEAD + self.HOST % (1, 443, "https"))
+        with _sink(told):
+            tools.parse_nmap_xml(path)
+        events = [m for m, tick in told if not tick]
+        self.assertEqual(len(events), 1, told)
+        self.assertIn("truncated", events[0])
+
+    def test_a_complete_scan_is_not_reported_as_salvaged(self):
+        from assay import tools
+        told = []
+        path = self._write(self.HEAD + self.HOST % (1, 443, "https") + "</nmaprun>\n")
+        with _sink(told):
+            result = tools.parse_nmap_xml(path)
+        self.assertEqual(sorted(result), ["10.0.0.1"])
+        self.assertEqual(told, [])
+
+
+class CutOffToolTests(unittest.TestCase):
+    """A tool that is writing a result file needs to be asked to stop."""
+
+    def _probe(self, tmpdir):
+        """A tool that only writes its closing bytes if it can clean up."""
+        import os
+        out = os.path.join(tmpdir, "out.txt")
+        return out, ['bash', '-c',
+                     'trap "echo CLOSED >> %s; exit 0" TERM; echo OPEN > %s; '
+                     'while true; do echo tick; sleep 0.05; done' % (out, out)]
+
+    def test_a_cut_off_tool_gets_to_finish_its_output_file(self):
+        import tempfile
+        from assay import tools
+        out, cmd = self._probe(tempfile.mkdtemp())
+        list(tools.stream_lines(cmd, timeout=0.4))
+        with open(out) as fh:
+            self.assertEqual(fh.read().split(), ["OPEN", "CLOSED"],
+                             "SIGKILL would have lost the closing write")
+
+    def test_the_kill_is_still_there_for_a_tool_that_ignores_the_ask(self):
+        import tempfile, time
+        from assay import tools
+        stub = os.path.join(tempfile.mkdtemp(), "stubborn.sh")
+        with open(stub, "w") as fh:
+            fh.write('trap "" TERM\nwhile true; do echo tick; sleep 0.05; done\n')
+        t = time.time()
+        list(tools.stream_lines(["bash", stub], timeout=0.3))
+        self.assertLess(time.time() - t, 20.0, "it must not hang on a deaf tool")
+
+    def test_the_stdout_pipe_is_closed_not_left_to_the_collector(self):
+        """One leaked descriptor per streamed command adds up over a scan."""
+        import subprocess as sp
+        from assay import tools
+        spawned = []
+        original = sp.Popen
+
+        def spy(*a, **kw):
+            p = original(*a, **kw)
+            spawned.append(p)
+            return p
+
+        sp.Popen = spy
+        try:
+            list(tools.stream_lines(["bash", "-c", "echo a; echo b"], timeout=30.0))
+            it = tools.stream_lines(["bash", "-c", "echo a; sleep 5"], timeout=30.0)
+            next(it)
+            it.close()          # the caller hit its own cap and stopped reading
+        finally:
+            sp.Popen = original
+        self.assertEqual(len(spawned), 2)
+        for p in spawned:
+            self.assertTrue(p.stdout.closed, "the pipe must be closed explicitly")
+
+
+class NmapTimeoutTests(unittest.TestCase):
+    """The cap has to follow the size of the sweep it is capping."""
+
+    def test_it_grows_with_the_host_count(self):
+        from assay.tools import nmap_timeout
+        self.assertGreater(nmap_timeout(["h"] * 55), nmap_timeout(["h"]))
+
+    def test_a_subnet_sweep_is_not_cut_off_at_half_an_hour(self):
+        """55 hosts of -sV is the scan that lost 48 minutes to a flat 1800s."""
+        from assay.tools import nmap_timeout
+        self.assertGreater(nmap_timeout(["h"] * 55), 1800.0)
+
+    def test_it_is_bounded_so_a_huge_sweep_cannot_run_forever(self):
+        from assay.tools import nmap_timeout, NMAP_TIMEOUT_CAP
+        self.assertEqual(nmap_timeout(["h"] * 100000), NMAP_TIMEOUT_CAP)
+
+    def test_an_explicit_timeout_still_wins(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream(cmd, timeout=900.0, stdin=""):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_lines
+        tools.stream_lines = fake_stream
+        try:
+            tools.nmap_scan(["10.0.0.5"], "top-1000", {}, timeout=42.0)
+        finally:
+            tools.stream_lines = original
+        self.assertEqual(seen, [42.0])
+
+
 class ParseNmapXmlTests(unittest.TestCase):
     """parse_nmap_xml() used to key its result by the reverse-DNS hostname
     whenever nmap resolved one, discarding the address entirely. A target
