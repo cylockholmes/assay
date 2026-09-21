@@ -550,7 +550,7 @@ def cmd_scan(args) -> int:
                 report_mod.build(engine.store, engine.assets(), report_path,
                                  scan_meta={"profile": cfg.profile,
                                             "codename": cfg.codename},
-                                 live=True)
+                                 live=True, status=dash.status())
             except Exception:
                 return
             if args.open and not state["opened"]:
