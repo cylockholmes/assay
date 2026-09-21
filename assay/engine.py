@@ -538,7 +538,11 @@ class Engine:
             for fut in as_completed(futures):
                 # as_completed yields in this thread, so the seen-set below is
                 # only ever touched here - no race, unlike the worker bodies.
-                wt = fut.result()
+                try:
+                    wt = fut.result()
+                except Exception as exc:        # one endpoint must not sink the run
+                    self.ctx.say("error", "probe failed: %s" % type(exc).__name__)
+                    continue
                 if wt is None or wt.key() in seen:
                     continue
                 seen.add(wt.key())
@@ -655,7 +659,11 @@ class Engine:
             live, why = gateway.looks_live(
                 r.status, r.body, self.cfg.is_proxied_port(p.port))
             if not live:
-                self.ctx.journal.note("%s: not a service (%s)" % (url, why))
+                # self.journal, not ctx.journal: Context has no journal field,
+                # so this raised AttributeError out of the worker and through
+                # the unguarded fut.result() in _stage_probe, killing the run
+                # on the first proxy-with-no-backend the native path probed.
+                self.journal.note("%s: not a service (%s)" % (url, why))
                 continue
             wt.tech = self._fingerprint(r.body[:200000], r.headers)
             return wt
