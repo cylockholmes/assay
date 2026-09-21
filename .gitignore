@@ -44,9 +44,10 @@ Thumbs.db
 .vscode/
 *.swp
 
-# local automation, never published
+# local automation and internal planning, never published
 scripts/
 sync.sh
+PLAN.md
 
 # scratch
 assets/preview.html
