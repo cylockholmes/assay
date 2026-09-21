@@ -1132,6 +1132,48 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class StreamTimeoutTests(unittest.TestCase):
+    """stream_lines enforces its timeout, so a cut-off must not read as done."""
+
+    CHATTY = ["bash", "-c", "for i in $(seq 1 200); do echo x; sleep 0.02; done"]
+
+    def test_the_deadline_actually_stops_the_stream(self):
+        import time
+        from assay import tools
+        t = time.time()
+        out = list(tools.stream_lines(self.CHATTY, timeout=0.3))
+        self.assertLess(len(out), 200, "the tool should have been cut short")
+        self.assertLess(time.time() - t, 3.0, "the deadline should have fired")
+
+    def test_a_cut_off_stream_tells_the_caller(self):
+        """Partial output is indistinguishable from complete output otherwise."""
+        from assay import tools
+        told = []
+        list(tools.stream_lines(self.CHATTY, timeout=0.3,
+                                on_timeout=lambda t: told.append(t)))
+        self.assertEqual(told, [0.3])
+
+    def test_a_timeout_is_recorded_once_not_twice(self):
+        from assay import tools
+        recs = []
+        original = tools._record_failure
+        tools._record_failure = lambda cmd, err: recs.append(str(err))
+        try:
+            list(tools.stream_lines(self.CHATTY, timeout=0.3))
+        finally:
+            tools._record_failure = original
+        self.assertEqual(len(recs), 1, "the kill and its returncode are one event")
+        self.assertIn("timed out", recs[0])
+
+    def test_a_tool_that_finishes_in_time_reports_no_timeout(self):
+        from assay import tools
+        told = []
+        out = list(tools.stream_lines(["bash", "-c", "echo a; echo b"], timeout=30.0,
+                                      on_timeout=lambda t: told.append(t)))
+        self.assertEqual(out, ["a", "b"])
+        self.assertEqual(told, [])
+
+
 class FollowupGateTests(unittest.TestCase):
     """The three mechanical gates. --ai-followup does not relax any of them."""
 
@@ -2189,7 +2231,7 @@ class AiSurfaceTests(unittest.TestCase):
         seen_cmds = []
         original = tools.stream_json
 
-        def fake_stream_json(cmd, timeout=900.0, stdin=""):
+        def fake_stream_json(cmd, timeout=900.0, stdin="", on_timeout=None):
             seen_cmds.append(list(cmd))
             return iter(())
 
@@ -3432,7 +3474,7 @@ class NmapXmlPrefixTests(unittest.TestCase):
         seen = []
         original = tools.stream_lines
 
-        def fake_stream(cmd, timeout=900.0, stdin=""):
+        def fake_stream(cmd, timeout=900.0, stdin="", on_timeout=None):
             seen.append(list(cmd))
             return iter(())
 
@@ -3449,7 +3491,7 @@ class NmapXmlPrefixTests(unittest.TestCase):
         seen = []
         original = tools.stream_lines
 
-        def fake_stream(cmd, timeout=900.0, stdin=""):
+        def fake_stream(cmd, timeout=900.0, stdin="", on_timeout=None):
             seen.append(list(cmd))
             return iter(())
 
