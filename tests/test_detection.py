@@ -4109,6 +4109,136 @@ class CutOffToolTests(unittest.TestCase):
             self.assertTrue(p.stdout.closed, "the pipe must be closed explicitly")
 
 
+class PortCountTests(unittest.TestCase):
+    """Both timeout budgets are built on this, so it has to read every form."""
+
+    def test_every_spec_form_the_engine_produces(self):
+        from assay.tools import port_count
+        self.assertEqual(port_count("top-100"), 100)
+        self.assertEqual(port_count("top-1000"), 1000)
+        self.assertEqual(port_count("all"), 65535)
+        self.assertEqual(port_count("80,443,8080"), 3)
+        self.assertEqual(port_count("1-1000"), 1000)
+        self.assertEqual(port_count("22"), 1)
+
+    def test_the_ai_ports_suffix_is_added_not_ignored(self):
+        """'top-1000+3000,5000' is a union; budgeting only the base under-counts."""
+        from assay.tools import port_count
+        self.assertEqual(port_count("top-1000+3000,5000"), 1002)
+
+    def test_nonsense_still_yields_a_usable_number(self):
+        """A bad spec must not divide a timeout by zero or raise."""
+        from assay.tools import port_count
+        self.assertGreaterEqual(port_count(""), 1)
+        self.assertGreaterEqual(port_count("not-ports"), 1)
+
+
+class NmapHostgroupTests(unittest.TestCase):
+    """nmap writes a host only when its group finishes, so the group size is
+    the checkpoint interval - and one group means a scan cut off at 99% has
+    written nothing at all."""
+
+    def test_a_small_scan_is_not_fragmented(self):
+        from assay.tools import nmap_hostgroup, NMAP_MIN_HOSTGROUP
+        self.assertIsNone(nmap_hostgroup(["h"] * NMAP_MIN_HOSTGROUP))
+
+    def test_a_big_scan_is_split_into_a_handful_of_batches(self):
+        from assay.tools import nmap_hostgroup, NMAP_CHECKPOINTS
+        for n in (55, 254, 1024):
+            group = nmap_hostgroup(["h"] * n)
+            batches = -(-n // group)
+            self.assertLessEqual(batches, NMAP_CHECKPOINTS + 1,
+                                 "%d hosts became %d batches" % (n, batches))
+            self.assertGreater(batches, 1, "%d hosts must checkpoint" % n)
+
+    def test_the_flag_reaches_nmap(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream(cmd, timeout=900.0, stdin=""):
+            seen.append(list(cmd))
+            return iter(())
+
+        original = tools.stream_lines
+        tools.stream_lines = fake_stream
+        try:
+            tools.nmap_scan(["10.0.0.%d" % i for i in range(55)], "80,443", {})
+        finally:
+            tools.stream_lines = original
+        self.assertTrue(seen)
+        self.assertIn("--max-hostgroup", seen[0])
+        self.assertEqual(seen[0][seen[0].index("--max-hostgroup") + 1], "16")
+
+    def test_a_small_scan_gets_no_flag(self):
+        """Fragmenting a scan that was one batch anyway only costs speed."""
+        from assay import tools
+        seen = []
+
+        def fake_stream(cmd, timeout=900.0, stdin=""):
+            seen.append(list(cmd))
+            return iter(())
+
+        original = tools.stream_lines
+        tools.stream_lines = fake_stream
+        try:
+            tools.nmap_scan(["10.0.0.1", "10.0.0.2"], "80,443", {})
+        finally:
+            tools.stream_lines = original
+        self.assertNotIn("--max-hostgroup", seen[0])
+
+
+class NaabuTimeoutTests(unittest.TestCase):
+    """naabu had nmap's bug waiting: a flat 900s for any size of sweep."""
+
+    def test_a_subnet_sweep_of_1000_ports_outgrows_the_old_flat_cap(self):
+        from assay.tools import naabu_timeout
+        self.assertGreater(naabu_timeout(["h"] * 254, "top-1000", {}), 900.0)
+
+    def test_it_follows_the_probe_count(self):
+        from assay.tools import naabu_timeout
+        few = naabu_timeout(["h"] * 10, "top-100", {})
+        many = naabu_timeout(["h"] * 10, "top-1000", {})
+        self.assertGreater(many, few, "ten times the ports is not the same wait")
+
+    def test_a_faster_rate_buys_a_shorter_wait(self):
+        from assay.tools import naabu_timeout
+        slow = naabu_timeout(["h"] * 50, "top-1000", {"nmap_min_rate": 100})
+        fast = naabu_timeout(["h"] * 50, "top-1000", {"nmap_min_rate": 1000})
+        self.assertGreater(slow, fast)
+
+    def test_a_zero_rate_does_not_divide_by_zero(self):
+        from assay.tools import naabu_timeout
+        self.assertGreater(naabu_timeout(["h"], "top-100", {"nmap_min_rate": 0}), 0)
+
+    def test_it_is_bounded(self):
+        from assay.tools import naabu_timeout, NAABU_TIMEOUT_CAP
+        self.assertEqual(naabu_timeout(["h"] * 99999, "all", {}), NAABU_TIMEOUT_CAP)
+
+    def _budgets(self, spec, **kw):
+        from assay import tools
+        seen = []
+
+        def fake_stream_json(cmd, timeout=900.0, stdin=""):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake_stream_json
+        try:
+            tools.naabu_scan(["10.0.0.1"], spec, {}, **kw)
+        finally:
+            tools.stream_json = original
+        return seen
+
+    def test_the_extra_ports_pass_is_budgeted_on_its_own_ports(self):
+        """Two ports must not inherit the thousand-port sweep's allowance."""
+        base, extra = self._budgets("top-1000+3000,5000")
+        self.assertGreater(base, extra)
+
+    def test_an_explicit_timeout_still_wins_for_both_passes(self):
+        self.assertEqual(self._budgets("top-1000+3000,5000", timeout=42.0), [42.0, 42.0])
+
+
 class NmapTimeoutTests(unittest.TestCase):
     """The cap has to follow the size of the sweep it is capping."""
 
