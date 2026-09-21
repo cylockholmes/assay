@@ -48,6 +48,7 @@ Thumbs.db
 scripts/
 sync.sh
 PLAN.md
+PLAN-APP.md
 
 # scratch
 assets/preview.html
