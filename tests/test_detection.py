@@ -1132,6 +1132,77 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class ReportFileCacheTests(unittest.TestCase):
+    """The live report rebuilds every few seconds for the whole scan."""
+
+    def setUp(self):
+        import tempfile
+        from assay import report
+        from assay.store import Store
+        report._FILE_BLOCKS.clear()
+        self.addCleanup(report._FILE_BLOCKS.clear)
+        self.out = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.out, "raw"))
+        self.st = Store(os.path.join(self.out, "a.db"))
+        self.st.start_run("standard", ["10.0.0.0/24"])
+        self.addCleanup(self.st.close)
+        self.xml = os.path.join(self.out, "raw", "nmap.xml")
+        with open(self.xml, "w") as fh:
+            fh.write("<nmaprun>" + ("<host><address addr='10.0.0.1'/></host>" * 2000)
+                     + "</nmaprun>")
+
+    def _build_counting_reads(self, times=1):
+        import builtins
+        from assay import report
+        reads = [0]
+        original = builtins.open
+
+        def counting(path, *a, **k):
+            if str(path).endswith("nmap.xml"):
+                reads[0] += 1
+            return original(path, *a, **k)
+
+        builtins.open = counting
+        try:
+            for _ in range(times):
+                report.build(self.st, {"hosts": 1, "web": 0, "requests": 0},
+                             os.path.join(self.out, "r.html"), live=True)
+        finally:
+            builtins.open = original
+        return reads[0]
+
+    def test_the_xml_is_read_once_across_many_rebuilds(self):
+        self.assertEqual(self._build_counting_reads(times=8), 1,
+                         "an unchanged file must not be re-read per refresh")
+
+    def test_a_new_nmap_run_invalidates_the_cache(self):
+        import time
+        self._build_counting_reads(times=2)
+        time.sleep(0.01)
+        with open(self.xml, "a") as fh:
+            fh.write("<!-- a second nmap invocation -->")
+        self.assertEqual(self._build_counting_reads(times=1), 1,
+                         "a changed file must be re-read")
+
+    def test_the_rendered_block_still_appears(self):
+        from assay import report
+        path = report.build(self.st, {"hosts": 1, "web": 0, "requests": 0},
+                            os.path.join(self.out, "r.html"), live=True)
+        with open(path) as fh:
+            html = fh.read()
+        self.assertIn("nmap.xml", html)
+        self.assertIn("&lt;nmaprun&gt;", html, "content is still escaped")
+
+    def test_a_missing_file_is_not_cached_as_empty(self):
+        """None means absent; a file appearing later must render."""
+        from assay import report
+        missing = os.path.join(self.out, "raw", "nmap-extra.xml")
+        self.assertIsNone(report._by_file_version(missing, lambda: "x"))
+        with open(missing, "w") as fh:
+            fh.write("<nmaprun/>")
+        self.assertEqual(report._by_file_version(missing, lambda: "x"), "x")
+
+
 class ReportQueryCountTests(unittest.TestCase):
     """Rendering asked the database three questions per finding."""
 
