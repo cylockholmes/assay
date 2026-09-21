@@ -257,6 +257,20 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
     if not standalone:
         g.add_argument("--ai", action="store_true",
                        help="after the scan, send REDACTED findings to Claude for triage")
+        # Three of the four gates in `assay followup` are mechanical and still
+        # apply to every command. The fourth is consent, and a scan has nobody
+        # to ask mid-run - so this flag is that consent, given up front.
+        g.add_argument("--ai-followup", action="store_true",
+                       help="run the AI's verification commands as part of the "
+                            "scan (implies --ai). They stay allow-listed, "
+                            "shell-free and in-scope; passing this flag is the "
+                            "approval 'assay followup --run' asks for one "
+                            "command at a time")
+        g.add_argument("--ai-followup-limit", type=int, default=25, metavar="N",
+                       help="most commands --ai-followup may run (default: 25)")
+        g.add_argument("--ai-followup-timeout", type=float, default=120.0,
+                       metavar="SEC",
+                       help="per-command timeout for --ai-followup (default: 120)")
     # No default. The two backends spend different money - an API key bills
     # per token, the CLI bills whatever Claude plan it is signed in to - so
     # assay makes you say which one rather than guessing on your behalf.
@@ -567,6 +581,14 @@ def cmd_scan(args) -> int:
     ai_result = None
     if getattr(args, "ai", False):
         ai_result = run_ai(engine.store, cfg, args, assets)
+        # Only after a pass that actually returned triage: a dry run, a
+        # refused send or a redaction failure all leave ai_result None, and
+        # none of them should lead to commands running.
+        if ai_result and getattr(args, "ai_followup", False):
+            run_ai_followup(engine.store, cfg, args)
+    elif getattr(args, "ai_followup", False):
+        console.print("[yellow]--ai-followup needs --ai[/yellow] - there are no "
+                      "suggested commands without a triage pass")
 
     if cfg.burp.mirror or cfg.burp.scan:
         _burp_push(engine.store, cfg, mirror=cfg.burp.mirror, scan=cfg.burp.scan)
@@ -584,6 +606,86 @@ def cmd_scan(args) -> int:
 
     engine.store.close()
     return 0
+
+
+def run_ai_followup(store: Store, cfg: Config, args) -> int:
+    """Execute the AI's verification commands as a stage of the scan.
+
+    `assay followup` gates execution four ways. Three of them are mechanical
+    and are enforced here unchanged, per command, by followup.vet(): the
+    read-only allow-list, the shlex parse that refuses shell metacharacters
+    rather than escaping them, and the scope check that refuses the whole
+    command if any host in it is out of scope.
+
+    The fourth gate is a human approving each command as it comes up, and a
+    scan has nobody to ask. --ai-followup is that approval, given up front
+    and covering every command the pass produces. Two conditions still stop
+    the stage outright rather than trusting the flag: --safe, because these
+    commands send crafted traffic, and a permissive scope, because gate three
+    cannot protect anything without one.
+    """
+    from assay import followup
+
+    if cfg.safe_mode:
+        console.print("  [yellow]AI followup skipped[/yellow] - --safe is set and "
+                      "these commands send crafted traffic")
+        return 0
+    if cfg.scope.permissive:
+        console.print("  [yellow]AI followup skipped[/yellow] - the scope is "
+                      "permissive, so commands cannot be checked against it")
+        return 0
+
+    rmap = _redaction_map(cfg.out_dir)
+    if rmap is None:
+        console.print("  [yellow]AI followup skipped[/yellow] - no redaction map, "
+                      "so the commands still carry pseudonyms")
+        return 0
+
+    cmds = followup.collect(store, rmap)[: args.ai_followup_limit]
+    if not cmds:
+        return 0
+
+    vetted = [followup.vet(c.raw, cfg) for c in cmds]
+    for src, v in zip(cmds, vetted):
+        v.finding_id, v.finding_title = src.finding_id, src.finding_title
+    runnable = [v for v in vetted if v.ok]
+
+    console.print("\n[bold]AI followup[/bold]  %d suggested, %d runnable, "
+                  "%d refused" % (len(vetted), len(runnable),
+                                  len(vetted) - len(runnable)))
+    for v in vetted:
+        if not v.ok:
+            console.print("  [red]SKIP[/red] %s" % v.display)
+            console.print("       [dim]%s[/dim]" % v.reason)
+
+    ran = 0
+    for v in runnable:
+        console.print("  [bold]$ %s[/bold]" % v.display)
+        followup.run(v, timeout=args.ai_followup_timeout)
+        ran += 1
+        style = "green" if v.rc == 0 else "yellow"
+        console.print("    [%s]exit %s[/%s]  [dim]%s[/dim]"
+                      % (style, v.rc, style, v.finding_title[:60]))
+        store.set_status(v.finding_id, "followup-run",
+                         notes="$ %s\n(exit %s)\n%s"
+                               % (v.display, v.rc, v.output[:2000]))
+
+    if ran:
+        console.print("  [green]%d command(s) run[/green] - output attached to "
+                      "each finding (assay show <n> to read it)" % ran)
+    return ran
+
+
+def _redaction_map(run_dir: str):
+    """The run's pseudonym map, or None when the AI pass never wrote one."""
+    from assay.redact import RedactionMap
+    path = os.path.join(run_dir, "redaction-map.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        return RedactionMap.load(path)
+    except (OSError, ValueError):
+        return None
 
 
 def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
@@ -674,7 +776,8 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
     try:
         result = ai_mod.analyze(findings, assets, ai_cfg, redactor, cfg.out_dir,
-                                on_status=lambda m: console.print("  [dim]%s[/dim]" % m))
+                                on_status=lambda m: console.print("  [dim]%s[/dim]" % m),
+                                payload=payload)
     except ai_mod.RedactionFailure as exc:
         console.print("[red]redaction verification failed - nothing sent[/red]")
         for l in exc.leaks[:15]:
@@ -1066,7 +1169,6 @@ def cmd_replay(args) -> int:
 
 def cmd_followup(args) -> int:
     from assay import followup
-    from assay.redact import RedactionMap
 
     store, run_dir = open_run(args.out, "findings")
     if store is None:
@@ -1085,20 +1187,15 @@ def cmd_followup(args) -> int:
         return 1
 
     # Un-redact locally: the mapping never left this machine.
-    redactor = None
-    map_path = os.path.join(run_dir, "redaction-map.json")
-    if os.path.exists(map_path):
-        class _R:
-            pass
-        redactor = _R()
-        redactor.map = RedactionMap.load(map_path)
-        console.print("  [dim]un-redacting with %d pseudonym(s) from %s[/dim]"
-                      % (len(redactor.map.reverse), map_path))
+    rmap = _redaction_map(run_dir)
+    if rmap is not None:
+        console.print("  [dim]un-redacting with %d pseudonym(s)[/dim]"
+                      % len(rmap.reverse))
     else:
         console.print("  [yellow]no redaction map found[/yellow] - commands will be "
                       "shown exactly as the model wrote them")
 
-    cmds = followup.collect(store, redactor)[: args.limit]
+    cmds = followup.collect(store, rmap)[: args.limit]
     if not cmds:
         console.print("[yellow]no AI-suggested commands.[/yellow] Run 'assay ai' first.")
         store.close()
