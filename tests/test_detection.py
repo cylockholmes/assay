@@ -1132,6 +1132,62 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class ProbeNonLiveEndpointTests(unittest.TestCase):
+    """A proxy with no backend used to kill the run on the native probe path.
+
+    engine._probe_one reached for ctx.journal, which Context does not have, so
+    the AttributeError came out of the worker and through an unguarded
+    fut.result() in _stage_probe. gateway.looks_live rejects an empty 502, so
+    the first such endpoint ended the scan.
+    """
+
+    def _engine(self, resp):
+        import tempfile, types
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        eng = Engine(Config(targets=["10.0.0.5"], out_dir=self.out, journal=True))
+        eng.journal.open(["10.0.0.5"], "standard")
+        self.addCleanup(eng.journal.close)
+        eng.http = types.SimpleNamespace(get=lambda *a, **k: resp)
+        eng.ctx.http = eng.http
+        return eng
+
+    class _Resp:
+        ok = True
+        status = 502
+        title = ""
+        url = "http://10.0.0.5:80/"
+        body = ""
+        content_type = "text/html"
+        headers: dict = {}
+        history: list = []
+
+        def header(self, name):
+            return ""
+
+    def test_a_dead_proxy_response_does_not_raise(self):
+        from assay.models import Target, Port
+        eng = self._engine(self._Resp())
+        self.assertIsNone(
+            eng._probe_one(Target(raw="10.0.0.5", host="10.0.0.5"), Port(port=80)),
+            "a non-live endpoint yields no WebTarget")
+
+    def test_the_reason_is_journaled(self):
+        import os
+        from assay.models import Target, Port
+        eng = self._engine(self._Resp())
+        eng._probe_one(Target(raw="10.0.0.5", host="10.0.0.5"), Port(port=80))
+        eng.journal.close()
+        with open(os.path.join(self.out, "activity.log")) as fh:
+            self.assertIn("not a service", fh.read())
+
+    def test_context_still_has_no_journal(self):
+        """Guards the instinct that caused this: ctx is not the journal's home."""
+        from assay.context import Context
+        self.assertNotIn("journal", Context.__dataclass_fields__)
+
+
 class ApexDerivationTests(unittest.TestCase):
     """A bare last-two-labels slice turns every *.co.uk target into "co.uk"."""
 
