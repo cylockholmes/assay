@@ -8,10 +8,10 @@ Two oracles, in order of strength:
             is the only oracle for the common case where the response body
             never reflects the fetched content.
 
-Without an OOB backend the blind half still fires its payloads and records them
-to a ledger, because a researcher with Burp Collaborator open can correlate them
-by hand - a check that ran with manual correlation beats a check that was
-skipped.
+assay does not watch for the callback itself. The blind half fires uniquely
+labelled payloads at the collaborator domain given with --oob-domain and
+records each one to a ledger, for you to correlate - a check that ran with
+manual correlation beats a check that was skipped.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay import params as P
 from assay.modules.web_active import candidate_urls, existing_params, with_param
@@ -89,40 +89,6 @@ class SsrfModule(Module):
                            r"getaddrinfo|Could not resolve host|"
                            r"cURL error|failed to open stream)", r.body[:20000], re.I)
 
-        hit = oob.seen(pid, wait=6.0 if ctx.cfg.profile == "deep" else 3.0)
-
-        if hit:
-            return Finding(
-                title="Blind SSRF: server fetched an attacker-supplied URL via '%s'" % param,
-                target=url,
-                severity="high",
-                confidence="confirmed",
-                category=owasp.A10,
-                cwe="CWE-918",
-                module=self.name,
-                impact=(
-                    "The application fetched a URL supplied in this parameter and the "
-                    "request arrived from the target's own egress (%s, %s). That reaches "
-                    "anything the server can reach: internal services with no "
-                    "authentication, and on cloud hosts the instance metadata endpoint, "
-                    "which returns credentials. Escalate by pointing it at "
-                    "169.254.169.254 or an internal host discovered elsewhere in this "
-                    "scan." % (hit.remote_addr or "unknown source", hit.protocol)
-                ),
-                detail="Callback %s received for payload %s" % (hit.protocol, pid),
-                repro=r.curl(),
-                refs=["https://portswigger.net/web-security/ssrf",
-                      "https://cwe.mitre.org/data/definitions/918.html"],
-                tags=["ssrf", "verified", "oob"],
-                chainable=True,
-                evidence=[
-                    r.evidence(label="Request carrying the OOB payload"),
-                    Evidence(kind="note", label="Out-of-band callback",
-                             output=hit.raw, matched=pid),
-                ],
-                dedupe_key="ssrf-oob|%s|%s" % (urlsplit(url).path, param),
-            )
-
         if inband:
             return Finding(
                 title="Possible SSRF: fetch error reflected from '%s'" % param,
@@ -135,8 +101,8 @@ class SsrfModule(Module):
                 impact=(
                     "The response contains a network-level error naming the host from "
                     "the parameter, which means the server attempted the connection. "
-                    "No callback was observed, so this is not yet proof - retry with a "
-                    "collaborator payload and a longer wait, and try an internal "
+                    "No callback was correlated, so this is not yet proof - check "
+                    "oob-payloads.txt against your collaborator, and try an internal "
                     "address to see whether the error text differs (a different error "
                     "for an internal host is itself a port-scanning oracle)."
                 ),

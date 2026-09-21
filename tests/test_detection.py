@@ -628,7 +628,7 @@ class SsrfTests(unittest.TestCase):
         self.assertEqual(found[0].confidence, "tentative")
         self.assertEqual(found[0].category[:3], "A10")
 
-    def test_no_oob_backend_means_no_probe(self):
+    def test_no_oob_session_means_no_probe(self):
         from assay.modules.web_ssrf import SsrfModule
         ctx, http = make_ctx([], urls={self.ORIGIN: [self.ORIGIN + "/f?url=x"]})
         ctx.oob = None
@@ -644,7 +644,6 @@ class SsrfTests(unittest.TestCase):
         path = s.flush_ledger()
         self.assertTrue(os.path.exists(path))
         self.assertIn(pid, open(path).read())
-        self.assertIsNone(s.seen(pid), "ledger mode must never claim a callback")
 
 
 class HostDeepTests(unittest.TestCase):
@@ -1029,6 +1028,47 @@ class JournalTests(unittest.TestCase):
         j = Journal(d, enabled=False)
         j.open(["t"], "quick"); j.request("GET", "https://t/", {}); j.close()
         self.assertFalse(os.path.exists(j.log_path))
+
+
+class CodenamePromptTests(unittest.TestCase):
+    """-n is optional because the CLI asks; it must never block a pipe."""
+
+    def _tty(self, answer):
+        import sys, assay.cli as cli
+        from assay import ui
+        saved = (sys.stdin.isatty, sys.stdout.isatty, ui.console.input)
+        sys.stdin.isatty = lambda: True
+        sys.stdout.isatty = lambda: True
+        if isinstance(answer, BaseException):
+            def raiser(*a, **k):
+                raise answer
+            ui.console.input = raiser
+        else:
+            ui.console.input = lambda *a, **k: answer
+        self.addCleanup(self._restore, saved)
+        return cli
+
+    def _restore(self, saved):
+        import sys
+        from assay import ui
+        sys.stdin.isatty, sys.stdout.isatty, ui.console.input = saved
+
+    def test_no_tty_never_prompts(self):
+        import assay.cli as cli
+        self.assertEqual(cli._ask_codename(["10.20.0.0/24"]), "")
+
+    def test_typed_codename_is_trimmed(self):
+        cli = self._tty("  ZESTY WOMBAT  ")
+        self.assertEqual(cli._ask_codename(["10.20.0.0/24"]), "ZESTY WOMBAT")
+
+    def test_empty_answer_falls_back_to_target_derived_name(self):
+        cli = self._tty("")
+        self.assertEqual(cli._ask_codename(["10.20.0.0/24"]), "")
+
+    def test_interrupt_is_not_fatal(self):
+        for exc in (KeyboardInterrupt(), EOFError()):
+            cli = self._tty(exc)
+            self.assertEqual(cli._ask_codename(["a.test"]), "")
 
 
 class RunDirTests(unittest.TestCase):

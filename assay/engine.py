@@ -108,7 +108,7 @@ class Engine:
             st = self.burp.detect()
             say("burp", "proxy=%s api=%s %s" % (st.proxy_ok, st.api_ok, st.detail[:80]))
 
-        # Blind checks need a callback channel; start it before anything fires.
+        # Blind checks mint correlatable payloads; set that up before anything fires.
         self.oob = OOBSession(self.cfg.out_dir, domain=self.cfg.oob_domain,
                               enabled=self.cfg.oob)
         say("oob", self.oob.start())
@@ -140,11 +140,11 @@ class Engine:
 
         self._stage_correlate()
 
-        fired, hits = self.oob.stats()
+        fired = self.oob.fired()
         if fired:
             ledger = self.oob.flush_ledger()
-            say("oob", "%d payload(s) fired, %d callback(s) observed%s"
-                % (fired, hits, (" - ledger: %s" % ledger) if ledger else ""))
+            say("oob", "%d payload(s) fired - correlate in your collaborator%s"
+                % (fired, (" - ledger: %s" % ledger) if ledger else ""))
         self.oob.stop()
 
         self.journal.close()
