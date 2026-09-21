@@ -33,11 +33,13 @@ assay doctor
 Run the first scan. The target is also the scope:
 
 ```bash
-assay scan 10.20.0.0/24 -n "CODENAME" --open
+assay scan 10.20.0.0/24
 ```
 
-`--open` launches the report as soon as it starts filling in, and it keeps
-refreshing while the scan runs.
+assay asks for the engagement codename if you did not pass one with `-n`;
+press Enter to name the run after the target instead. The report opens as soon
+as it starts filling in and keeps refreshing while the scan runs — pass
+`--no-open` to leave it closed and just print the path.
 
 ### One-liner
 
@@ -71,14 +73,14 @@ assay install              # install everything missing, after confirming
 ### Everyday commands
 
 ```bash
-assay scan <target> -n NAME --open                      # scan
+assay scan <target>                                    # scan (asks for a codename)
 assay diff -o ./assay-out                              # what changed since last run
 assay show 3                                           # finding #3 in full
 assay submit 3                                         # submission draft
 assay replay -o ./assay-out                            # everything it ran
 assay ai -o ./assay-out --ai-dry-run                   # redacted AI payload preview
 assay ai -o ./assay-out --ai-backend claude-cli        # triage via the Claude desktop app
-assay report --open                                    # rebuild the report
+assay report                                           # rebuild the report
 ```
 
 ### Updating
@@ -328,7 +330,7 @@ the last host is swept. Scroll position and filters survive the refresh, and
 auto-refresh can be paused from the page.
 
 ```bash
-assay scan 10.20.0.0/24 -n "ZESTY WOMBAT" --open
+assay scan 10.20.0.0/24 -n "ZESTY WOMBAT"
 ```
 
 The report itself is a triage surface, not a document: search, severity and
@@ -407,7 +409,7 @@ without running any of them.
 ## One folder per engagement
 
 `--out` is the root; each engagement gets its own subfolder, keyed on the
-codename when you give one:
+codename — asked for at the start of a scan, or passed with `-n`:
 
 ```
 assay-out/
@@ -671,17 +673,19 @@ human with two accounts, not a scanner.
 
 ## Blind vulnerabilities
 
-Blind SSRF produces no change in the response, so assay needs a callback channel:
+Blind SSRF produces no change in the response, so the only evidence is a
+callback — which arrives somewhere assay is not. assay runs no listener of its
+own and correlates nothing automatically:
 
-- **interactsh-client** installed → fully automatic; callbacks are correlated
-  and reported as `confirmed`.
-- **`--oob-domain`** with a Burp Collaborator payload domain → assay still fires
+- **`--oob-domain`** with a Burp Collaborator payload domain → assay fires
   uniquely-labelled payloads and writes `oob-payloads.txt` mapping each payload
-  to the exact request that carried it, for manual correlation.
-- **Neither** → the blind checks are skipped and say so.
+  to the exact request that carried it. Anything from that ledger appearing in
+  your collaborator is a confirmed callback for the request named beside it.
+- **Without it** → the blind checks are skipped and say so.
 
-A payload that was fired but needs manual correlation still beats a check that
-never ran.
+Correlation is deliberately left to you: you already have Collaborator open,
+and a payload that was fired but needs correlating by hand still beats a check
+that never ran.
 
 ## AI triage (opt-in, redacted)
 
@@ -761,8 +765,7 @@ assay orchestrates these when present and degrades gracefully when not —
 `assay doctor` shows what's missing and what each one buys you.
 
 `nmap` · `naabu` · `httpx` · `nuclei` · `katana` · `subfinder` · `dnsx` ·
-`ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` · `interactsh-client` ·
-`xsltproc`
+`ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` · `xsltproc`
 
 ### What each tool is for
 
@@ -780,7 +783,6 @@ All optional. `assay doctor` shows which are present and what each buys you.
 | `nuclei` | external | CVE and misconfiguration volume | stage skipped entirely |
 | `dnsx` (+ `seclists` for the wordlist) | recon | bulk resolution and CNAME chains for takeover; also drives subdomain brute-forcing (gobuster `dns` mode / Sublist3r-equivalent — 5,000 words on `standard`, 110,000 on `deep`) | threaded `getaddrinfo`, plus `dig`; brute-forcing needs `dnsx` specifically, so it is skipped without it |
 | `subfinder` | recon | passive subdomain enumeration (on by default, `--no-passive` disables) | falls back to certificate transparency via crt.sh |
-| `interactsh-client` | active | automatic OOB callback correlation for blind SSRF | ledger mode — payloads still fire, you correlate in Collaborator |
 | `xsltproc` | after port scan | renders the beautified [NmapView](https://nmapview.github.io) dashboard from the run's nmap XML | the report links only to the raw XML, not the rendered view |
 
 Nothing is installed that assay does not call: a test fails if a registered

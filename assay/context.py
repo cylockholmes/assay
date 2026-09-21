@@ -26,7 +26,7 @@ class Context:
     urls: Dict[str, List[str]] = field(default_factory=dict)
     tools: Dict[str, Optional[str]] = field(default_factory=dict)
     # Out-of-band callback session, used by the blind checks. None when the
-    # run has no OOB backend configured.
+    # run has no OOB domain configured.
     oob: Optional[object] = None
     # UI hook: fn(stage, message, advance)
     progress: Optional[Callable[[str, str, int], None]] = None

@@ -27,7 +27,7 @@ EPILOG = """\
 examples:
   assay scan 10.10.0.0/24 --scope scope.txt
   assay scan https://app.target.tld --profile deep --burp auto
-  assay scan -f targets.txt --profile quick --open
+  assay scan -f targets.txt --profile quick --no-open
   assay ai --out ./assay-out --ai-dry-run       # see exactly what would be sent
   assay ai --out ./assay-out --ai-backend claude-cli   # via the Claude desktop app
   assay ai --out ./assay-out --ai-backend api          # via your Anthropic API key
@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--out", default="./assay-out",
                    help="root output directory; each engagement gets its own subfolder")
     s.add_argument("-n", "--codename", default="",
-                   help="engagement codename - names the output folder and the report")
+                   help="engagement codename - names the output folder and the "
+                        "report; asked for interactively when omitted")
     s.add_argument("--flat", action="store_true",
                    help="write straight into --out instead of a per-engagement subfolder")
     s.add_argument("--scope", metavar="FILE_OR_LIST",
@@ -130,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "unless --no-passive, CT logs and subdomain sources)")
     g.add_argument("--oob-domain", default="", metavar="DOMAIN",
                    help="collaborator domain for blind SSRF payloads; without it "
-                        "assay uses interactsh-client when installed")
+                        "the blind checks are skipped")
     g.add_argument("--no-oob", action="store_true",
                    help="do not fire out-of-band payloads at all")
 
@@ -151,8 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-report", action="store_true")
     s.add_argument("--no-live", action="store_true",
                    help="do not update the report while the scan runs")
-    s.add_argument("--open", action="store_true",
-                   help="open the report as soon as it starts filling in")
+    s.add_argument("--open", dest="open", action="store_true", default=True,
+                   help="open the report as soon as it starts filling in (default)")
+    s.add_argument("--no-open", dest="open", action="store_false",
+                   help="leave the report closed; just print its path")
     s.add_argument("-q", "--quiet", action="store_true")
 
     # -- other commands ----------------------------------------------------
@@ -161,7 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("report", help="rebuild the HTML report from a previous run")
     r.add_argument("-o", "--out", default="./assay-out")
-    r.add_argument("--open", action="store_true")
+    r.add_argument("--open", dest="open", action="store_true", default=True,
+                   help="open the rebuilt report (default)")
+    r.add_argument("--no-open", dest="open", action="store_false",
+                   help="leave the report closed; just print its path")
 
     a = sub.add_parser("ai", help="run AI triage over an existing run")
     a.add_argument("-o", "--out", default="./assay-out")
@@ -319,6 +325,30 @@ def open_run(path: str, what: str = "results"):
     return Store(db), run_dir
 
 
+def _ask_codename(targets: List[str]) -> str:
+    """Ask for the engagement codename when -n was not given.
+
+    The codename names the output folder and titles the report, and targets
+    are usually known by it rather than by a hostname - so a run started
+    without one is the run nobody can find again a week later. Prompt for it
+    rather than silently falling back to a hash of the target set.
+
+    Returns "" when there is no one to ask (piped input, CI, cron), which
+    leaves the existing target-derived naming in place.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ""
+    derived = Config.slug_for(targets)
+    try:
+        answer = console.input(
+            "\n  [bold]engagement codename[/bold] "
+            "[dim](Enter for '%s')[/dim]: " % derived)
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return ""
+    return answer.strip()
+
+
 def make_config(args) -> Config:
     from assay import targets as tload
 
@@ -380,6 +410,10 @@ def make_config(args) -> Config:
     for w in parsed.warnings:
         console.print("  [yellow]%s[/yellow]" % w)
 
+    codename = getattr(args, "codename", "") or ""
+    if not codename and not getattr(args, "quiet", False):
+        codename = _ask_codename(targets)
+
     tune = env.autotune()
     cfg = Config(
         targets=targets,
@@ -395,7 +429,7 @@ def make_config(args) -> Config:
         detect_gateway=not getattr(args, "no_gateway_filter", False),
         proxied_ports=[int(x) for x in
                        re.findall(r"\d+", getattr(args, "proxied_ports", "") or "")],
-        codename=getattr(args, "codename", "") or "",
+        codename=codename,
         timeout=args.timeout,
         retries=args.retries,
         passive=not getattr(args, "no_passive", False),
