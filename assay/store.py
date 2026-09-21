@@ -260,6 +260,14 @@ class Store:
             f.status = r["status"] or "new"
         except (IndexError, KeyError):
             f.status = "new"
+        try:
+            f.fid = r["fid"] or ""
+        except (IndexError, KeyError):
+            f.fid = ""
+        try:
+            f.run_id = int(r["run_id"] or 0)
+        except (IndexError, KeyError, TypeError, ValueError):
+            f.run_id = 0
         f.score = r["score"]
         f.triage = r["triage"]
         return f
@@ -374,17 +382,30 @@ class Store:
             self._conn.commit()
         return n
 
-    def ai_for(self, fid: str) -> Optional[Dict]:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM ai_triage WHERE fid=?", (fid,)).fetchone()
-        if not row:
-            return None
+    @staticmethod
+    def _ai_row(row: sqlite3.Row) -> Dict:
         return {"verdict": row["verdict"], "priority": row["priority"],
                 "fp_risk": row["fp_risk"], "rationale": row["rationale"],
                 "impact": row["impact"],
                 "next_steps": json.loads(row["next_steps"] or "[]"),
                 "commands": json.loads(row["commands"] or "[]")}
+
+    def ai_for(self, fid: str) -> Optional[Dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_triage WHERE fid=?", (fid,)).fetchone()
+        return self._ai_row(row) if row else None
+
+    def ai_map(self) -> Dict[str, Dict]:
+        """Every AI verdict, keyed by finding, in one query.
+
+        Rendering asked ai_for() once per finding, so a report over a few
+        hundred findings opened a few hundred cursors against a table it reads
+        whole every time.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM ai_triage").fetchall()
+        return {r["fid"]: self._ai_row(r) for r in rows}
 
     def save_chains(self, chains: List[Dict], source: str = "assay") -> int:
         """Persist locally-derived chains, replacing the previous set."""

@@ -1132,6 +1132,101 @@ class ScanProgressTests(unittest.TestCase):
         self.assertIn("scan running", self._live_bar())
 
 
+class ReportQueryCountTests(unittest.TestCase):
+    """Rendering asked the database three questions per finding."""
+
+    def _store(self, n_findings=40):
+        import os, tempfile
+        from assay.store import Store
+        from assay.models import Finding
+        self.out = tempfile.mkdtemp()
+        st = Store(os.path.join(self.out, "a.db"))
+        st.start_run("standard", ["10.0.0.0/24"])
+        self.addCleanup(st.close)
+        for i in range(n_findings):
+            f = Finding(title="f%d" % i, target="10.0.0.%d" % i,
+                        severity="medium", confidence="firm", module="m",
+                        category="A01", cwe="CWE-1", impact="i", detail="d",
+                        repro="r", dedupe_key="k%d" % i)
+            f.compute_score()
+            st.add_finding(f)
+        return st
+
+    def _statements_for_build(self, st):
+        import os
+        from assay import report
+        n = [0]
+        st._conn.set_trace_callback(lambda stmt: n.__setitem__(0, n[0] + 1))
+        try:
+            report.build(st, {"hosts": 1, "web": 0, "requests": 0},
+                         os.path.join(self.out, "r.html"))
+        finally:
+            st._conn.set_trace_callback(None)
+        return n[0]
+
+    def test_query_count_does_not_grow_with_findings(self):
+        small = self._statements_for_build(self._store(10))
+        big = self._statements_for_build(self._store(200))
+        self.assertEqual(small, big,
+                         "report cost must not scale with the finding count")
+        self.assertLess(big, 20, "a build should be a handful of queries")
+
+    def test_a_stored_finding_keeps_its_identity(self):
+        """dedupe_key has no column, so fingerprint() must not recompute."""
+        from assay.models import Finding
+        st = self._store(0)
+        f = Finding(title="t", target="x", severity="medium", confidence="firm",
+                    module="m", category="A01", cwe="", impact="i", detail="d",
+                    repro="r", dedupe_key="ssrf-oob|/path|url")
+        f.compute_score()
+        st.add_finding(f)
+        self.assertEqual(st.findings()[0].fingerprint(), f.fingerprint(),
+                         "a round-tripped finding must match its own row")
+
+    def test_ai_verdicts_reach_a_finding_read_back_from_the_store(self):
+        from assay.models import Finding
+        st = self._store(0)
+        f = Finding(title="t", target="x", severity="medium", confidence="firm",
+                    module="m", category="A01", cwe="", impact="i", detail="d",
+                    repro="r", dedupe_key="k|/p|u")
+        f.compute_score()
+        st.add_finding(f)
+        st.save_ai({"triage": [
+            {"id": f.fingerprint(), "verdict": "report", "priority": 1,
+             "false_positive_risk": "low", "rationale": "r",
+             "impact_statement": "i", "next_steps": ["s"], "commands": ["c"]}]})
+        stored = st.findings()[0]
+        self.assertIsNotNone(st.ai_map().get(stored.fingerprint()),
+                             "the verdict must render on the card")
+
+    def test_ai_map_matches_ai_for(self):
+        st = self._store(3)
+        fids = [f.fingerprint() for f in st.findings()]
+        st.save_ai({"triage": [
+            {"id": fids[0], "verdict": "report", "priority": 1,
+             "false_positive_risk": "low", "rationale": "r",
+             "impact_statement": "i", "next_steps": ["s"], "commands": ["c"]}]})
+        by_fid = st.ai_map()
+        self.assertEqual(by_fid.get(fids[0]), st.ai_for(fids[0]))
+        self.assertIsNone(by_fid.get(fids[1]))
+
+    def test_new_badging_uses_the_run_the_finding_came_from(self):
+        st = self._store(2)
+        for f in st.findings():
+            self.assertEqual(f.run_id, st.run_id, "written by the current run")
+        st.finish_run()
+        st.start_run("standard", ["10.0.0.0/24"])
+        for f in st.findings():
+            self.assertNotEqual(f.run_id, st.run_id,
+                                "carried over from the previous run")
+
+    def test_status_comes_off_the_row(self):
+        st = self._store(1)
+        fid = st.findings()[0].fingerprint()
+        st.set_status(fid, "reported")
+        self.assertEqual(st.findings()[0].status, "reported")
+
+
 class BridgeCoverageTests(unittest.TestCase):
     """tools.bridge() only reaches commands that go through run/stream_lines.
 
@@ -1398,6 +1493,10 @@ class AiFollowupStageTests(unittest.TestCase):
 
         def ai_for(self, fid):
             return {"commands": self._cmds}
+
+        def ai_map(self):
+            return {f.fingerprint(): {"commands": self._cmds}
+                    for f in self.iter_findings()}
 
         def set_status(self, fid, status, notes=""):
             self.statuses.append((status, notes))

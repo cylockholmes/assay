@@ -48,6 +48,11 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     counts = store.counts()
     chains = store.ai_chains()
     meta = scan_meta or {}
+    # One query for the whole triage table, and the run id compared against
+    # each finding's own - rendering used to ask the database three questions
+    # per card, two of which the finding row already answered.
+    ai_by_fid = store.ai_map()
+    current_run = store.run_id
 
     buckets: Dict[str, List[Finding]] = {"CHASE": [], "LOOK": [], "NOTE": []}
     for f in findings:
@@ -56,7 +61,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     modules = sorted({f.module for f in findings if f.module})
     parts: List[str] = [_HEAD, _header(counts, assets, meta, ai),
                         _toolbar(modules, len(findings)),
-                        _start_here(findings, store)]
+                        _start_here(findings, ai_by_fid)]
 
     if chains:
         parts.append(_chains_section(chains, findings))
@@ -76,7 +81,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
             '<p class="blurb">%s</p>' % (_e(label), len(items), _e(blurb))
         )
         for f in items:
-            parts.append(_finding_card(f, store))
+            parts.append(_finding_card(f, ai_by_fid, current_run))
         parts.append("</section>")
 
     parts.append(_live_script(status, assets.get("duration")) if live else "")
@@ -458,7 +463,7 @@ def _chains_section(chains: List[Dict], findings: List[Finding]) -> str:
             % (len(chains), "".join(rows)))
 
 
-def _start_here(findings: List[Finding], store: Store) -> str:
+def _start_here(findings: List[Finding], ai_by_fid: Dict[str, Dict]) -> str:
     """The three things to do first, stated as actions rather than findings."""
     top = [f for f in findings if f.triage == "CHASE"][:3]
     if not top:
@@ -467,7 +472,7 @@ def _start_here(findings: List[Finding], store: Store) -> str:
         return ""
     rows = []
     for i, f in enumerate(top, 1):
-        ai = store.ai_for(f.fingerprint())
+        ai = ai_by_fid.get(f.fingerprint())
         step = ""
         if ai and ai.get("next_steps"):
             step = ai["next_steps"][0]
@@ -483,14 +488,13 @@ def _start_here(findings: List[Finding], store: Store) -> str:
             % "".join(rows))
 
 
-def _finding_card(f: Finding, store: Store) -> str:
+def _finding_card(f: Finding, ai_by_fid: Dict[str, Dict], current_run: int) -> str:
     fid = f.fingerprint()
-    ai = store.ai_for(fid)
-    try:
-        is_new = store.is_new_this_run(fid)
-        status = store.status_of(fid)
-    except Exception:
-        is_new, status = False, "new"
+    ai = ai_by_fid.get(fid)
+    # Both of these came off the same row the Finding was built from, so
+    # asking the database again per card was pure round-trip.
+    is_new = bool(current_run) and f.run_id == current_run
+    status = f.status or "new"
     ev_html = ""
     for e in f.evidence[:3]:
         blob = e.compact()
