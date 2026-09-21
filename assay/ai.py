@@ -286,6 +286,20 @@ def credential_status() -> Tuple[bool, str]:
     return False, "no API key and no stored profile"
 
 
+def resolve_cli(name: str) -> Optional[str]:
+    """Absolute path to the Claude binary, or None.
+
+    Absolute matters: the CLI is launched in a scratch directory, so a relative
+    path like ./claude would resolve against that instead of the user's cwd.
+    """
+    found = shutil.which(name)
+    if found:
+        return os.path.abspath(found)
+    if os.path.isfile(name) and os.access(name, os.X_OK):
+        return os.path.abspath(name)
+    return None
+
+
 def cli_status(cfg: Optional["AIConfig"] = None) -> Tuple[bool, str]:
     """Is there a usable Claude Code CLI to hand the request to?
 
@@ -296,8 +310,7 @@ def cli_status(cfg: Optional["AIConfig"] = None) -> Tuple[bool, str]:
     anything we could guess here.
     """
     name = (cfg.claude_bin if cfg else "claude") or "claude"
-    path = shutil.which(name) or (name if os.path.isfile(name) and
-                                  os.access(name, os.X_OK) else None)
+    path = resolve_cli(name)
     if not path:
         return False, ("'%s' is not on PATH - install Claude Code, or point "
                        "--ai-claude-bin at the binary" % name)
@@ -468,7 +481,10 @@ def _call_cli(cfg: AIConfig, payload: Dict[str, Any],
     ok, how = cli_status(cfg)
     if not ok:
         raise AIError("the Claude Code CLI is not usable: %s" % how)
-    binary = shutil.which(cfg.claude_bin) or cfg.claude_bin
+    binary = resolve_cli(cfg.claude_bin)
+    if not binary:                      # cli_status passed, so this is a race
+        raise AIError("%s disappeared between the check and the call"
+                      % cfg.claude_bin)
     argv = _cli_argv(cfg, binary)
 
     say("handing the payload to %s (%s, no API key used)" % (binary, cfg.model))

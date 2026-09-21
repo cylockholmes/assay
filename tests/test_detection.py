@@ -7,6 +7,8 @@ the tool usable.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import unittest
 from urllib.parse import parse_qs, urlsplit
@@ -2026,7 +2028,7 @@ class AiTriageFilePermissionTests(unittest.TestCase):
     are back in it, same as redaction-map.json, so it needs the same 0600
     treatment. It didn't have it: this locks in the fix.
 
-    ai_mod.analyze and credential_status are monkeypatched to a canned
+    ai_mod.analyze and backend_status are monkeypatched to a canned
     success so this stays offline - no real Anthropic API call.
     """
 
@@ -2049,25 +2051,195 @@ class AiTriageFilePermissionTests(unittest.TestCase):
         cfg = Config(out_dir=out_dir, targets=["10.0.0.5"])
 
         orig_analyze = ai_mod.analyze
-        orig_cred = ai_mod.credential_status
+        orig_cred = ai_mod.backend_status
         ai_mod.analyze = lambda *a, **k: {
             "summary": "10.0.0.5 looks fine.", "triage": [], "chains": [],
             "_usage": {"input_tokens": 10, "output_tokens": 10,
                       "cost_estimate_usd": 0.001},
         }
-        ai_mod.credential_status = lambda: (True, "test stub")
+        ai_mod.backend_status = lambda cfg: (True, "test stub")
         try:
             args = argparse.Namespace(ai_model="claude-opus-5", ai_max=60,
                                       ai_evidence=False, ai_dry_run=False,
-                                      ai_effort="high", ai_yes=True)
+                                      ai_effort="high", ai_yes=True,
+                                      ai_backend="api", ai_claude_bin="claude")
             cli.run_ai(s, cfg, args, {"hosts": 1, "web": 0})
         finally:
             ai_mod.analyze = orig_analyze
-            ai_mod.credential_status = orig_cred
+            ai_mod.backend_status = orig_cred
 
         path = os.path.join(out_dir, "ai-triage.json")
         self.assertTrue(os.path.exists(path))
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+
+class AiBackendTests(unittest.TestCase):
+    """There are two ways to reach Claude and assay must not pick one for you.
+
+    Everything here is offline: the CLI backend is exercised by replacing
+    subprocess.run with a canned envelope, so no real `claude` process starts
+    and no request leaves the machine.
+    """
+
+    def _cfg(self, **kw):
+        from assay.ai import AIConfig
+        return AIConfig(enabled=True, **kw)
+
+    def _one_finding(self):
+        from assay.models import Evidence, Finding
+        return [Finding(title="x", target="10.0.0.5", severity="low",
+                        confidence="confirmed", module="m", category="c", cwe="",
+                        impact="i", detail="d", repro="r",
+                        evidence=[Evidence(kind="http", label="e", output="e")])]
+
+    def test_analyze_refuses_without_a_backend(self):
+        import tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+        with self.assertRaises(ai_mod.BackendUnset):
+            ai_mod.analyze(self._one_finding(), {}, self._cfg(),
+                           Redactor(), tempfile.mkdtemp())
+
+    def test_dry_run_needs_no_backend(self):
+        """A dry run never reaches a transport, so it must not demand one."""
+        import tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+        out = ai_mod.analyze(self._one_finding(), {}, self._cfg(dry_run=True),
+                             Redactor(), tempfile.mkdtemp())
+        self.assertTrue(out["dry_run"])
+
+    def test_cli_argv_carries_the_schema_and_every_isolation_flag(self):
+        from assay import ai as ai_mod
+        argv = ai_mod._cli_argv(self._cfg(backend="claude-cli", effort="low"),
+                                "/usr/bin/claude")
+        self.assertEqual(argv[0], "/usr/bin/claude")
+        self.assertIn("--print", argv)
+        self.assertEqual(argv[argv.index("--effort") + 1], "low")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+        # Structured output is what makes the two backends interchangeable.
+        schema = json.loads(argv[argv.index("--json-schema") + 1])
+        self.assertEqual(schema, ai_mod.RESPONSE_SCHEMA)
+        self.assertEqual(argv[argv.index("--system-prompt") + 1],
+                         ai_mod.SYSTEM_PROMPT)
+        for flag in ai_mod.CLI_ISOLATION_FLAGS:
+            self.assertIn(flag, argv, "isolation flag %s was dropped" % flag)
+
+    def _fake_run(self, envelope, seen=None, returncode=0):
+        import subprocess
+
+        def run(argv, **kw):
+            if seen is not None:
+                seen["argv"] = argv
+                seen["stdin"] = kw.get("input", "")
+                seen["cwd"] = kw.get("cwd")
+                seen["cwd_contents"] = (os.listdir(kw["cwd"])
+                                        if kw.get("cwd") else None)
+            return subprocess.CompletedProcess(argv, returncode,
+                                               json.dumps(envelope), "")
+        return run
+
+    def test_cli_backend_parses_the_envelope(self):
+        import subprocess, tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+
+        answer = {"summary": "nothing much", "triage": [], "chains": []}
+        envelope = {"type": "result", "subtype": "success", "is_error": False,
+                    "result": json.dumps(answer), "total_cost_usd": 0,
+                    "session_id": "abc",
+                    "usage": {"input_tokens": 120, "output_tokens": 30}}
+        seen = {}
+        orig_run, orig_status = subprocess.run, ai_mod.cli_status
+        subprocess.run = self._fake_run(envelope, seen)
+        ai_mod.cli_status = lambda cfg=None: (True, "stub")
+        try:
+            out = ai_mod.analyze(self._one_finding(), {},
+                                 self._cfg(backend="claude-cli"),
+                                 Redactor(), tempfile.mkdtemp())
+        finally:
+            subprocess.run, ai_mod.cli_status = orig_run, orig_status
+
+        self.assertEqual(out["summary"], "nothing much")
+        self.assertEqual(out["_backend"], "claude-cli")
+        self.assertEqual(out["_usage"]["input_tokens"], 120)
+        # The payload goes in on stdin, not argv - it is far too big for one.
+        self.assertIn("pseudonymised scan results", seen["stdin"])
+        self.assertNotIn(seen["stdin"], seen["argv"])
+        # And it runs somewhere with no scan output and no CLAUDE.md in it.
+        self.assertEqual(seen["cwd_contents"], [])
+        self.assertFalse(os.path.exists(seen["cwd"]), "sandbox was left behind")
+
+    def test_cli_backend_surfaces_an_error_envelope(self):
+        """is_error is the authoritative field - subtype stays "success"."""
+        import subprocess, tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+
+        envelope = {"type": "result", "subtype": "success", "is_error": True,
+                    "result": "Failed to authenticate: OAuth session expired",
+                    "usage": {}}
+        orig_run, orig_status = subprocess.run, ai_mod.cli_status
+        subprocess.run = self._fake_run(envelope)
+        ai_mod.cli_status = lambda cfg=None: (True, "stub")
+        try:
+            with self.assertRaises(ai_mod.AIError) as caught:
+                ai_mod.analyze(self._one_finding(), {},
+                               self._cfg(backend="claude-cli"),
+                               Redactor(), tempfile.mkdtemp())
+        finally:
+            subprocess.run, ai_mod.cli_status = orig_run, orig_status
+        self.assertIn("OAuth session expired", str(caught.exception))
+
+    def test_cli_backend_still_honours_the_redaction_gate(self):
+        """The gate is transport-independent: a leak must stop the CLI too."""
+        import subprocess, tempfile
+        from assay import ai as ai_mod
+        from assay.models import Evidence, Finding
+        from assay.redact import Redactor
+
+        findings = [Finding(title="x", target="https://a.acmebank.com/",
+                            severity="high", impact="y",
+                            evidence=[Evidence(kind="http", output="10.9.9.9")])]
+        called = {"n": 0}
+
+        def boom(*a, **k):
+            called["n"] += 1
+            raise AssertionError("a subprocess was started despite a leak")
+
+        orig_run = subprocess.run
+        subprocess.run = boom
+        try:
+            r = Redactor()
+            # Force a residue the redactor does not know how to pseudonymise.
+            orig_verify = r.verify
+            r.verify = lambda blob: ["acmebank.com"]
+            try:
+                with self.assertRaises(ai_mod.RedactionFailure):
+                    ai_mod.analyze(findings, {},
+                                   self._cfg(backend="claude-cli",
+                                             include_evidence=True),
+                                   r, tempfile.mkdtemp())
+            finally:
+                r.verify = orig_verify
+        finally:
+            subprocess.run = orig_run
+        self.assertEqual(called["n"], 0)
+
+    def test_unparseable_output_is_kept_on_disk(self):
+        import tempfile
+        from assay import ai as ai_mod
+        out_dir = tempfile.mkdtemp()
+        with self.assertRaises(ai_mod.AIError):
+            ai_mod._parse_result("I would rather not.", out_dir)
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "ai-raw.txt")))
+
+    def test_fenced_json_is_recovered(self):
+        import tempfile
+        from assay import ai as ai_mod
+        text = 'Here you go:\n```json\n{"summary": "ok", "triage": []}\n```'
+        self.assertEqual(ai_mod._parse_result(text, tempfile.mkdtemp())["summary"],
+                         "ok")
 
 
 class EmptyStateTests(unittest.TestCase):

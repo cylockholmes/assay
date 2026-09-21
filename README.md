@@ -77,6 +77,7 @@ assay show 3                                           # finding #3 in full
 assay submit 3                                         # submission draft
 assay replay -o ./assay-out                            # everything it ran
 assay ai -o ./assay-out --ai-dry-run                   # redacted AI payload preview
+assay ai -o ./assay-out --ai-backend claude-cli        # triage via the Claude desktop app
 assay report --open                                    # rebuild the report
 ```
 
@@ -705,15 +706,47 @@ same detectors **plus** every known client term from your scope file and target
 list. If anything survives, the run aborts and prints the residue — it does not
 send.
 
+### Two ways to reach Claude
+
+There is no default. The two backends spend different money, so `--ai-backend`
+is required and assay will not guess:
+
+| `--ai-backend` | Route | Who pays |
+|---|---|---|
+| `api` | the Anthropic SDK with your own key | billed per token |
+| `claude-cli` | the Claude Code CLI in headless mode — the same binary the Claude desktop app installs, sharing its sign-in | billed to that Claude plan, no per-token charge |
+
+Both send byte-identical redacted payloads and ask for the same JSON schema, so
+the triage you get back does not depend on which one you picked. `assay doctor`
+shows which are usable.
+
 ```bash
-assay scan target.tld --ai --ai-dry-run   # write the payload, send nothing
-cat assay-out/ai-payload.json                                # read exactly what would go
-assay ai --out ./assay-out                                    # send it
+assay scan target.tld --ai --ai-dry-run              # write the payload, send nothing
+cat assay-out/ai-payload.json                        # read exactly what would go
+assay ai --out ./assay-out --ai-backend claude-cli   # via the desktop app sign-in
+assay ai --out ./assay-out --ai-backend api          # via your API key
 ```
 
+`--ai-dry-run` is the exception — it never reaches a backend, so it does not
+need one chosen.
+
+**`api`** requires `pip install anthropic` and `ANTHROPIC_API_KEY` (or
+`ant auth login`). assay prompts for a key if neither is set; the key is used
+for that run only and never written to disk.
+
+**`claude-cli`** requires `claude` on `PATH` and signed in — `--ai-claude-bin`
+points at it otherwise. assay runs it with `--restricted`, `--strict-mcp-config`,
+`--disable-slash-commands` and `--no-session-persistence`, in an empty temporary
+directory, with the payload on stdin: no command execution, no web fetch, no MCP
+servers, no skills, no project settings, no `CLAUDE.md`, nothing left in the
+session store. It answers the question and exits.
+
+> On WSL, assay runs the `claude` it can see from inside the distribution. A
+> Windows-side install is not on that `PATH` — install Claude Code in the
+> distribution too, or use `--ai-backend api`.
+
 Defaults to metadata only — no response bodies at all. `--ai-evidence` adds
-redacted evidence snippets. Interactive runs confirm before sending. Requires
-`pip install anthropic` and `ANTHROPIC_API_KEY` (or `ant auth login`).
+redacted evidence snippets. Interactive runs confirm before sending.
 
 ---
 
@@ -785,7 +818,7 @@ assay scan <targets>     run a scan (hosts, CIDRs, URLs, or -f file)
 assay doctor             tools, Burp reachability, WSL networking, resources
 assay report             rebuild the HTML report from a previous run
 assay show <n>           print finding #n in full, with evidence
-assay ai                 AI triage over an existing run
+assay ai                 AI triage over an existing run (--ai-backend api|claude-cli)
 assay burp               mirror findings / queue a Burp scan / export scope
 assay install           install the external tools (--dry-run to preview)
 assay replay <capture>  replay an authenticated Burp/HAR capture with the
