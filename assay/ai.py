@@ -590,8 +590,13 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
         return {"dry_run": True, "payload_path": preview_path,
                 "estimated_input_tokens": len(json.dumps(payload)) // 3}
 
-    transport = _call_api if cfg.backend == BACKEND_API else _call_cli
-    text, usage = transport(cfg, payload, say)
+    # Explicit, not `api if ... else cli`: an unrecognised backend string must
+    # not quietly become "shell out to Claude Code". Belt and braces with the
+    # guard above, which is the one that normally catches this.
+    transports = {BACKEND_API: _call_api, BACKEND_CLI: _call_cli}
+    if cfg.backend not in transports:
+        raise BackendUnset()
+    text, usage = transports[cfg.backend](cfg, payload, say)
 
     result = _parse_result(text, out_dir)
     result["_usage"] = usage
