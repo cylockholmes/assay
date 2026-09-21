@@ -7,6 +7,7 @@ the tool usable.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -18,6 +19,18 @@ sys.path.insert(0, __file__.rsplit("/tests/", 1)[0])
 from tests.stub import (SOFT404_BODY, make_ctx, path_route, titles, web_target)
 
 PASSWD = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+
+
+@contextlib.contextmanager
+def _sink(into):
+    """Capture assay.tools.PROGRESS as (message, tick) pairs for the block."""
+    from assay import tools
+    original = tools.PROGRESS
+    tools.PROGRESS = lambda msg, tick=True: into.append((msg, tick))
+    try:
+        yield into
+    finally:
+        tools.PROGRESS = original
 
 
 class ExposureTests(unittest.TestCase):
@@ -1034,7 +1047,7 @@ class ScanProgressTests(unittest.TestCase):
     """A stage that reports nothing looks exactly like a stage that hung."""
 
     def test_duration_is_readable_past_a_minute(self):
-        from assay.ui import human_duration
+        from assay.tools import human_duration
         self.assertEqual(
             [human_duration(x) for x in (0, 9, 63, 763, 4000)],
             ["0s", "9s", "1m03s", "12m43s", "1h06m"])
@@ -1080,22 +1093,17 @@ class ScanProgressTests(unittest.TestCase):
         for line in ("Nmap scan report for 10.0.0.1", "", "Host is up (0.0011s latency)."):
             self.assertIsNone(nmap_stat_line(line), line)
 
-    def test_naabu_reports_hits_while_it_streams(self):
-        """naabu only emits open ports, so progress is what turned up so far."""
+    def test_naabu_still_collects_every_streamed_result(self):
+        """Progress moved to stream_lines; naabu's own collection must not have."""
         from assay import tools
-        seen = []
         original = tools.stream_json
         tools.stream_json = lambda *a, **k: iter(
             [{"host": "10.0.0.%d" % i, "port": 80 + i} for i in range(4)])
         try:
-            # The throttle starts at last=0.0, so the first result always reports.
-            out = tools.naabu_scan(["10.0.0.1"], "top-100", {},
-                                   on_progress=lambda m: seen.append(m))
+            out = tools.naabu_scan(["10.0.0.1"], "top-100", {})
         finally:
             tools.stream_json = original
         self.assertEqual(len(out), 4, "every streamed result must still be collected")
-        self.assertTrue(seen, "at least the first result should report progress")
-        self.assertIn("open port(s)", seen[0])
 
     def _live_bar(self, **build_kw):
         """Render a live report and return just its status bar."""
@@ -1474,6 +1482,122 @@ class TargetCountTests(unittest.TestCase):
         self.assertEqual(dash.targets, 55)
 
 
+@contextlib.contextmanager
+def _fast_heartbeat(every=0.05):
+    from assay import tools
+    original = tools.HEARTBEAT
+    tools.HEARTBEAT = every
+    try:
+        yield
+    finally:
+        tools.HEARTBEAT = original
+
+
+class ToolProgressSinkTests(unittest.TestCase):
+    """A tool that works quietly for ten minutes must not look like a hang.
+
+    Progress is ambient - installed once on assay.tools - so it covers every
+    external command, including the ones whose wrappers never asked for it.
+    """
+
+    def test_a_silent_streaming_tool_still_reports(self):
+        """nuclei can go minutes between matches. That silence was the bug."""
+        from assay import tools
+        told = []
+        with _sink(told), _fast_heartbeat():
+            list(tools.stream_lines(["bash", "-c", "sleep 0.4"], timeout=30.0))
+        ticks = [m for m, tick in told if tick]
+        self.assertTrue(ticks, "a tool that says nothing must still be reported")
+        self.assertTrue(all(m.startswith("bash: running ") for m in ticks), ticks)
+
+    def test_a_blocking_tool_reports_too(self):
+        """ffuf buffers everything to a file, so its clock is all there is."""
+        from assay import tools
+        told = []
+        with _sink(told), _fast_heartbeat():
+            tools.run(["bash", "-c", "sleep 0.4"], timeout=30.0)
+        self.assertTrue([m for m, tick in told if tick],
+                        "run() is a spawn primitive too")
+
+    def test_a_quick_command_says_nothing(self):
+        """Hundreds of DNS lookups per run: they must not narrate themselves."""
+        from assay import tools
+        told = []
+        with _sink(told):          # the real 5s cadence
+            tools.run(["bash", "-c", "true"], timeout=30.0)
+            list(tools.stream_lines(["bash", "-c", "echo a"], timeout=30.0))
+        self.assertEqual(told, [])
+
+    def test_the_heartbeat_carries_what_has_turned_up(self):
+        from assay import tools
+        told = []
+        with _sink(told), _fast_heartbeat():
+            list(tools.stream_lines(
+                ["bash", "-c", "echo a; echo b; echo c; sleep 0.4"], timeout=30.0))
+        self.assertTrue(any("3 result(s) so far" in m for m, _ in told), told)
+
+    def test_nmap_is_the_tool_whose_stdout_is_read_as_status(self):
+        from assay import tools
+        self.assertIs(tools._LINE_STATUS.get("nmap"), tools.nmap_stat_line)
+
+    def test_a_registered_parser_replaces_the_result_count(self):
+        """nmap's lines are progress; counting them would report nonsense."""
+        from assay import tools
+        told = []
+        line = ("Stats: 0:00:30 elapsed; 120 hosts completed (384 up), "
+                "264 undergoing Service Scan")
+        tools._LINE_STATUS["bash"] = tools.nmap_stat_line
+        try:
+            with _sink(told), _fast_heartbeat():
+                list(tools.stream_lines(
+                    ["bash", "-c", "echo \"%s\"; sleep 0.4" % line], timeout=30.0))
+        finally:
+            del tools._LINE_STATUS["bash"]
+        self.assertTrue(any("120 host(s) completed" in m for m, _ in told), told)
+        self.assertFalse(any("result(s)" in m for m, _ in told), told)
+
+    def test_a_failed_spawn_leaves_no_heartbeat_running(self):
+        import time
+        from assay import tools
+        told = []
+        with _sink(told), _fast_heartbeat():
+            list(tools.stream_lines(["definitely-not-a-real-binary-xyz"], timeout=30.0))
+            time.sleep(0.2)
+        self.assertEqual([m for m, tick in told if tick], [],
+                         "nothing is running, so nothing should report running")
+
+
+class ToolProgressLabelTests(unittest.TestCase):
+    """The sink labels a command with whatever stage is currently talking."""
+
+    def _ctx(self):
+        from tests.stub import make_ctx
+        ctx, _ = make_ctx([])
+        seen = []
+        ctx.progress = lambda stage, msg, advance=0: seen.append((stage, msg, advance))
+        return ctx, seen
+
+    def test_a_command_borrows_the_current_stage(self):
+        ctx, seen = self._ctx()
+        ctx.say("ports", "nmap -sV across 40 host(s)")
+        ctx.tool_progress("nmap: running 2m30s - 45% done")
+        self.assertEqual(seen[-1][0], "ports")
+
+    def test_a_tick_does_not_earn_a_log_line_but_an_event_does(self):
+        ctx, seen = self._ctx()
+        ctx.tool_progress("nmap: running 2m30s")
+        ctx.tool_progress("nmap: hit its 30m limit", tick=False)
+        self.assertEqual([advance for _, _, advance in seen], [1, 0])
+
+    def test_a_finding_does_not_steal_the_stage_label(self):
+        """emit() says "finding", which is a channel, not where the scan is."""
+        ctx, seen = self._ctx()
+        ctx.say("crawl", "katana across 12 origin(s)")
+        ctx.say("finding", "CHASE  something  [host]")
+        ctx.tool_progress("katana: running 1m10s")
+        self.assertEqual(seen[-1][0], "crawl")
+
+
 class StreamTimeoutTests(unittest.TestCase):
     """stream_lines enforces its timeout, so a cut-off must not read as done."""
 
@@ -1487,13 +1611,16 @@ class StreamTimeoutTests(unittest.TestCase):
         self.assertLess(len(out), 200, "the tool should have been cut short")
         self.assertLess(time.time() - t, 3.0, "the deadline should have fired")
 
-    def test_a_cut_off_stream_tells_the_caller(self):
+    def test_a_cut_off_stream_says_so_on_the_progress_sink(self):
         """Partial output is indistinguishable from complete output otherwise."""
         from assay import tools
         told = []
-        list(tools.stream_lines(self.CHATTY, timeout=0.3,
-                                on_timeout=lambda t: told.append(t)))
-        self.assertEqual(told, [0.3])
+        with _sink(told):
+            list(tools.stream_lines(self.CHATTY, timeout=0.3))
+        events = [m for m, tick in told if not tick]
+        self.assertEqual(len(events), 1, told)
+        self.assertIn("results are partial", events[0])
+        self.assertIn("bash", events[0], "the message must name the tool")
 
     def test_a_timeout_is_recorded_once_not_twice(self):
         from assay import tools
@@ -1510,10 +1637,11 @@ class StreamTimeoutTests(unittest.TestCase):
     def test_a_tool_that_finishes_in_time_reports_no_timeout(self):
         from assay import tools
         told = []
-        out = list(tools.stream_lines(["bash", "-c", "echo a; echo b"], timeout=30.0,
-                                      on_timeout=lambda t: told.append(t)))
+        with _sink(told):
+            out = list(tools.stream_lines(["bash", "-c", "echo a; echo b"],
+                                          timeout=30.0))
         self.assertEqual(out, ["a", "b"])
-        self.assertEqual(told, [])
+        self.assertEqual([m for m, tick in told if not tick], [])
 
 
 class FollowupGateTests(unittest.TestCase):
@@ -2577,7 +2705,7 @@ class AiSurfaceTests(unittest.TestCase):
         seen_cmds = []
         original = tools.stream_json
 
-        def fake_stream_json(cmd, timeout=900.0, stdin="", on_timeout=None):
+        def fake_stream_json(cmd, timeout=900.0, stdin=""):
             seen_cmds.append(list(cmd))
             return iter(())
 
@@ -3820,7 +3948,7 @@ class NmapXmlPrefixTests(unittest.TestCase):
         seen = []
         original = tools.stream_lines
 
-        def fake_stream(cmd, timeout=900.0, stdin="", on_timeout=None):
+        def fake_stream(cmd, timeout=900.0, stdin=""):
             seen.append(list(cmd))
             return iter(())
 
@@ -3837,7 +3965,7 @@ class NmapXmlPrefixTests(unittest.TestCase):
         seen = []
         original = tools.stream_lines
 
-        def fake_stream(cmd, timeout=900.0, stdin="", on_timeout=None):
+        def fake_stream(cmd, timeout=900.0, stdin=""):
             seen.append(list(cmd))
             return iter(())
 

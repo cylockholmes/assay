@@ -30,14 +30,31 @@ class Context:
     oob: Optional[object] = None
     # UI hook: fn(stage, message, advance)
     progress: Optional[Callable[[str, str, int], None]] = None
+    # The stage whose messages are currently flowing. Remembered so that a
+    # reporter with no idea what a stage is -- an external command, which runs
+    # several layers below any of them -- can still be labelled with one.
+    stage: str = "starting"
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def say(self, stage: str, msg: str, advance: int = 0) -> None:
+        # "finding" is a channel rather than a stage (the dashboard routes it
+        # to the hits table), so it must not become the label for tool output.
+        if stage != "finding":
+            self.stage = stage
         if self.progress:
             try:
                 self.progress(stage, msg, advance)
             except Exception:  # UI must never kill a scan
                 pass
+
+    def tool_progress(self, msg: str, tick: bool = True) -> None:
+        """Ambient progress from an external command (assay.tools.PROGRESS).
+
+        The command knows nothing about stages, so it borrows whichever one is
+        currently talking. A tick updates the status line only; an event -- a
+        tool cut short, say -- also earns a line in the scroll log.
+        """
+        self.say(self.stage, msg, advance=1 if tick else 0)
 
     def emit(self, finding: Finding) -> bool:
         """Persist a finding. Returns True if it was new."""

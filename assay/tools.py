@@ -14,6 +14,7 @@ import shutil
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -112,8 +113,95 @@ class Proc:
         return " ".join(self.cmd)
 
 
+def human_duration(seconds: float) -> str:
+    """Compact elapsed time. "763s" is hard to read at a glance; "12m43s" is not."""
+    total = int(max(0, seconds))
+    if total < 60:
+        return "%ds" % total
+    if total < 3600:
+        return "%dm%02ds" % divmod(total, 60)
+    h, rem = divmod(total, 3600)
+    return "%dh%02dm" % (h, rem // 60)
+
+
 # Set by the engine so external commands land in the run journal too.
 JOURNAL = None
+
+# Set by the engine so a command that takes minutes can say it is still alive.
+# Ambient like JOURNAL, and for the same reason: every subprocess assay spawns
+# goes through run() or stream_lines(), so setting it once covers the whole
+# toolchain and no wrapper has to thread a callback down to its subprocess.
+PROGRESS = None
+
+# How long a command may say nothing before it is indistinguishable from a hang.
+HEARTBEAT = 5.0
+
+# Binary -> a parser turning one of its stdout lines into a status phrase.
+# Only for tools whose stdout is progress rather than results; everything else
+# gets the generic count below, which is what its lines actually are.
+_LINE_STATUS: Dict[str, Callable[[str], Optional[str]]] = {}
+
+
+def _say(msg: str, tick: bool = True) -> None:
+    """Report to the ambient progress sink, if the engine installed one.
+
+    tick=True is a heartbeat: it updates the status line without earning a
+    line in the scroll log. tick=False is an event worth keeping.
+    """
+    if PROGRESS is None:
+        return
+    try:
+        PROGRESS(msg, tick)
+    except Exception:  # the UI must never kill a scan
+        pass
+
+
+class _Heartbeat:
+    """Reports that a command is still running, on its own clock.
+
+    Reporting per line of output is not enough: nuclei can go minutes between
+    matches and ffuf says nothing at all until it exits, and that silence is
+    exactly what makes a working tool look wedged. A timer thread reports on a
+    fixed cadence whether or not the tool has spoken; the reader loop, when
+    there is one, feeds it the newest detail to report along the way.
+    """
+
+    def __init__(self, cmd: Sequence[str], every: Optional[float] = None) -> None:
+        self.name = cmd[0] if cmd else "?"
+        # Read at construction rather than bound as a default, so the cadence
+        # stays a knob and not a value frozen at import.
+        self.every = HEARTBEAT if every is None else every
+        self.started = time.time()
+        # Both written by the reader thread, read by the timer thread. Plain
+        # assignment of an int or a str, so no lock is needed for either.
+        self.count = 0
+        self.detail = ""
+        self._done = threading.Event()
+
+    def start(self) -> "_Heartbeat":
+        if PROGRESS is not None:
+            threading.Thread(target=self._loop, daemon=True).start()
+        return self
+
+    def stop(self) -> None:
+        self._done.set()
+
+    def timed_out(self, timeout: float) -> None:
+        """A cut-off tool is an event, not a tick: partial results are news."""
+        _say("%s: hit its %s limit - results are partial"
+             % (self.name, human_duration(timeout)), tick=False)
+
+    def _text(self) -> str:
+        if self.detail:
+            return self.detail
+        return "%d result(s) so far" % self.count if self.count else ""
+
+    def _loop(self) -> None:
+        while not self._done.wait(self.every):
+            text = self._text()
+            _say("%s: running %s%s" % (self.name,
+                                       human_duration(time.time() - self.started),
+                                       " - %s" % text if text else ""))
 
 
 def _record(cmd: Sequence[str]) -> None:
@@ -215,6 +303,10 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
             proc_env = dict(os.environ)
             proc_env.update(env_extra)
     argv = bridge(argv)
+    # Nothing is readable until the process exits, so the heartbeat's clock is
+    # all there is to report - which is still the difference between ffuf
+    # working through a 60k wordlist and ffuf having died.
+    hb = _Heartbeat(cmd).start()
     try:
         p = subprocess.run(
             argv, input=stdin, capture_output=True, text=True,
@@ -227,17 +319,18 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         out = exc.stdout or ""
         if isinstance(out, bytes):
             out = out.decode("utf-8", "replace")
+        hb.timed_out(timeout)
         return Proc(rc=-1, out=out, err="timeout after %ss" % timeout,
                     cmd=list(cmd), timed_out=True)
     except (OSError, ValueError) as exc:
         _record_failure(cmd, str(exc))
         return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
+    finally:
+        hb.stop()
 
 
 def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
-                 stdin: str = "",
-                 on_timeout: Optional[Callable[[float], None]] = None
-                 ) -> Iterator[str]:
+                 stdin: str = "") -> Iterator[str]:
     """Yield stdout lines as they arrive. Keeps peak memory flat."""
     env.augment_path()
     _record(cmd)
@@ -260,6 +353,8 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             proc.stdin.close()
         except OSError:
             pass
+    hb = _Heartbeat(cmd)
+    status = _LINE_STATUS.get(hb.name)
     try:
         assert proc.stdout is not None
         # `timeout` was accepted and never enforced: only the finally's
@@ -268,9 +363,16 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
         # process that goes completely silent still blocks on the read below,
         # which needs a watchdog thread rather than a deadline.
         deadline = time.time() + timeout
+        hb.start()
         for line in proc.stdout:
             line = line.strip()
             if line:
+                # Counting rather than formatting: a tool that streams a
+                # hundred thousand URLs would otherwise pay for a message
+                # nobody reads. The heartbeat thread formats when it fires.
+                hb.count += 1
+                if status is not None:
+                    hb.detail = status(line) or hb.detail
                 yield line
             if time.time() > deadline:
                 # The caller has already consumed everything up to here and
@@ -279,10 +381,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                 timed_out = True
                 _record_failure(cmd, "timed out after %.0fs" % timeout)
                 proc.kill()
-                if on_timeout:
-                    on_timeout(timeout)
+                hb.timed_out(timeout)
                 break
     finally:
+        hb.stop()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -296,11 +398,8 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
 
 
 def stream_json(cmd: Sequence[str], timeout: float = 900.0,
-                stdin: str = "",
-                on_timeout: Optional[Callable[[float], None]] = None
-                ) -> Iterator[dict]:
-    for line in stream_lines(cmd, timeout=timeout, stdin=stdin,
-                             on_timeout=on_timeout):
+                stdin: str = "") -> Iterator[dict]:
+    for line in stream_lines(cmd, timeout=timeout, stdin=stdin):
         if not line.startswith("{"):
             continue
         try:
@@ -415,10 +514,15 @@ def nmap_stat_line(line: str) -> Optional[str]:
     return None
 
 
+# nmap is the one tool here whose stdout is progress rather than results, so
+# it is the one that needs the heartbeat to read its lines instead of counting
+# them. Registered rather than special-cased inside stream_lines so the next
+# such tool is a line of data, not another branch.
+_LINE_STATUS["nmap"] = nmap_stat_line
+
+
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
-              out_dir: str = ".", xml_prefix: str = "nmap",
-              on_progress: Optional[Callable[[str], None]] = None
-              ) -> Dict[str, NmapHost]:
+              out_dir: str = ".", xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
     """Service/version scan. Returns scanned address -> NmapHost.
 
     Always keyed by the address nmap actually scanned, never by a
@@ -450,13 +554,10 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
         cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
         # Always streamed: the results come from the XML either way, so the
         # only question is whether the wait is spent silently. --stats-every
-        # makes nmap narrate it, and nothing downstream cares if no one reads.
-        cut = ((lambda t: on_progress("scan hit its %.0fs limit - results are "
-                                      "partial" % t)) if on_progress else None)
-        for line in stream_lines(cmd, timeout=timeout, on_timeout=cut):
-            msg = nmap_stat_line(line) if on_progress else None
-            if msg:
-                on_progress(msg)
+        # makes nmap narrate it, stream_lines turns that into progress, and
+        # nothing downstream cares if no one is reading.
+        for _ in stream_lines(cmd, timeout=timeout):
+            pass
         if not os.path.exists(xml_path):
             return {}
         return parse_nmap_xml(xml_path)
@@ -693,9 +794,7 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
 
 
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
-               timeout: float = 900.0,
-               on_progress: Optional[Callable[[str], None]] = None
-               ) -> Dict[str, List[int]]:
+               timeout: float = 900.0) -> Dict[str, List[int]]:
     # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
     # on naabu to union -top-ports with a -p list in one invocation is
     # unverified, and nmap's equivalent combination turned out to be an
@@ -718,21 +817,15 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                "-c", str(tune.get("concurrency", 10))] + port_args
         found: Dict[str, List[int]] = {}
         # naabu only ever emits a line for a port it found open, so there is no
-        # honest "N of 384 swept" to report - what it can say is what has turned
-        # up so far, which is enough to tell a working sweep from a wedged one.
-        last = 0.0
-        cut = ((lambda t: on_progress("sweep hit its %.0fs limit - results are "
-                                      "partial" % t)) if on_progress else None)
+        # honest "N of 384 swept" to report - what stream_lines counts as it
+        # streams is exactly the open ports found so far, which is enough to
+        # tell a working sweep from a wedged one.
         for obj in stream_json(cmd, timeout=timeout,
-                               stdin="\n".join(hosts) + "\n", on_timeout=cut):
+                               stdin="\n".join(hosts) + "\n"):
             h = obj.get("host") or obj.get("ip")
             p = obj.get("port")
             if h and p:
                 found.setdefault(str(h), []).append(int(p))
-                if on_progress and time.time() - last >= 2.0:
-                    last = time.time()
-                    on_progress("%d open port(s) on %d host(s) so far"
-                                % (sum(len(v) for v in found.values()), len(found)))
         return found
 
     found = _run(spec)
