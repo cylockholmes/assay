@@ -569,10 +569,62 @@ NMAP_BASE_TIMEOUT = 1800.0
 NMAP_PER_HOST_TIMEOUT = 60.0
 NMAP_TIMEOUT_CAP = 6 * 3600.0
 
+# nmap scans in groups and writes a host's XML only once its whole group is
+# finished, so the group size is also the checkpoint interval. One group means
+# a scan stopped at 99% writes nothing whatsoever - which is what a 55-host
+# sweep did after being cut off 130 seconds from the end. Aiming for a few
+# groups rather than the smallest possible bounds both the work at risk and
+# the cross-host parallelism given up to protect it.
+NMAP_CHECKPOINTS = 4
+NMAP_MIN_HOSTGROUP = 16
 
-def nmap_timeout(hosts: Sequence[str]) -> float:
+
+def port_count(spec: str) -> int:
+    """How many ports a spec asks for. For budgeting time, not for scanning."""
+    if spec == "all":
+        return 65535
+    total = 0
+    base, _, extra = spec.partition("+")
+    for part in (base, extra):
+        if not part:
+            continue
+        if part in ("top-100", "top-1000"):
+            total += int(part.partition("-")[2])
+            continue
+        for item in part.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            lo, dash, hi = item.partition("-")
+            try:
+                total += (int(hi) - int(lo) + 1) if dash else 1
+            except ValueError:
+                total += 1
+    return max(1, total)
+
+
+def nmap_timeout(hosts: Sequence[str], port_spec: str = "") -> float:
+    """A wall-clock backstop, sized by what the caller actually asked for.
+
+    Driven by the host count: -sV spends its time interrogating the ports it
+    finds open, so a thousand-port sweep costs far less than a thousand times
+    a one-port sweep. Not nothing, though - it has more to find - hence the
+    small per-port term.
+    """
+    per_host = NMAP_PER_HOST_TIMEOUT + 0.02 * port_count(port_spec or "top-1000")
     return min(NMAP_TIMEOUT_CAP,
-               NMAP_BASE_TIMEOUT + NMAP_PER_HOST_TIMEOUT * max(1, len(hosts)))
+               NMAP_BASE_TIMEOUT + per_host * max(1, len(hosts)))
+
+
+def nmap_hostgroup(hosts: Sequence[str]) -> Optional[int]:
+    """Cap nmap's host group so a cut-off scan keeps most of its work.
+
+    None when the scan is too small to be worth splitting: the whole thing is
+    one batch either way, and fragmenting it would only cost parallelism.
+    """
+    if len(hosts) <= NMAP_MIN_HOSTGROUP:
+        return None
+    return max(NMAP_MIN_HOSTGROUP, -(-len(hosts) // NMAP_CHECKPOINTS))
 
 
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
@@ -597,13 +649,18 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
     # hosts the caller handed it, and a constant is only ever right for one
     # size of scan.
     if timeout is None:
-        timeout = nmap_timeout(hosts)
+        timeout = nmap_timeout(hosts, port_spec)
     base_args = [
         "nmap", "-Pn", "-sV", "--version-intensity", "5",
         "-T3" if tune.get("constrained") else "-T4",
         "--max-retries", "2", "--host-timeout", "20m",
         "--min-rate", str(tune.get("nmap_min_rate", 300)),
     ]
+    # Checkpointing, not throttling: this is what makes a partial scan
+    # recoverable at all, since nothing reaches the XML until a group ends.
+    group = nmap_hostgroup(hosts)
+    if group:
+        base_args += ["--max-hostgroup", str(group)]
 
     def _run(port_args: List[str], xml_name: str) -> Dict[str, NmapHost]:
         xml_path = os.path.join(out_dir, "raw", xml_name)
@@ -888,8 +945,28 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
 # --------------------------------------------------------------------------
 
 
+NAABU_BASE_TIMEOUT = 300.0
+NAABU_TIMEOUT_CAP = 3 * 3600.0
+# Probes are sent at a fixed rate, so the wait is arithmetic; the multiplier
+# is slack for retries and for hosts that answer slowly.
+NAABU_SLACK = 3.0
+
+
+def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict) -> float:
+    """How long hosts x ports probes take at the configured rate, plus slack.
+
+    A flat cap was wrong here for the same reason it was wrong for nmap: the
+    work is the caller's choice. Unlike nmap's, naabu's runtime is almost
+    entirely predictable - it is a rate-limited sweep, and both the probe
+    count and the rate are known right here.
+    """
+    rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
+    probes = max(1, len(hosts)) * port_count(port_spec)
+    return min(NAABU_TIMEOUT_CAP, NAABU_BASE_TIMEOUT + NAABU_SLACK * probes / rate)
+
+
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
-               timeout: float = 900.0) -> Dict[str, List[int]]:
+               timeout: Optional[float] = None) -> Dict[str, List[int]]:
     # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
     # on naabu to union -top-ports with a -p list in one invocation is
     # unverified, and nmap's equivalent combination turned out to be an
@@ -899,7 +976,10 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
             "top-1000": ["-top-ports", "1000"],
             "all": ["-p", "-"]}.get(base, ["-p", base])
 
-    def _run(port_args: List[str]) -> Dict[str, List[int]]:
+    def _run(port_args: List[str], ports: str) -> Dict[str, List[int]]:
+        # Budgeted per pass, not per call: the extra-ports pass is a handful
+        # of ports and has no business inheriting the base sweep's allowance.
+        deadline = timeout if timeout is not None else naabu_timeout(hosts, ports, tune)
         # No -list/-host flag: naabu reads targets from stdin by default when
         # neither is given. "-list -" does NOT mean "read stdin" here -- naabu
         # 2.4.0 takes it literally and tries to open a file named "-", failing
@@ -915,7 +995,7 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # honest "N of 384 swept" to report - what stream_lines counts as it
         # streams is exactly the open ports found so far, which is enough to
         # tell a working sweep from a wedged one.
-        for obj in stream_json(cmd, timeout=timeout,
+        for obj in stream_json(cmd, timeout=deadline,
                                stdin="\n".join(hosts) + "\n"):
             h = obj.get("host") or obj.get("ip")
             p = obj.get("port")
@@ -923,9 +1003,9 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                 found.setdefault(str(h), []).append(int(p))
         return found
 
-    found = _run(spec)
+    found = _run(spec, base)
     if extra:
-        for h, ports in _run(["-p", extra]).items():
+        for h, ports in _run(["-p", extra], extra).items():
             existing = found.setdefault(h, [])
             for p in ports:
                 if p not in existing:
