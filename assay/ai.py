@@ -525,12 +525,19 @@ def _call_cli(cfg: AIConfig, payload: Dict[str, Any],
             "triage only needs to answer, not to act" % len(denials))
 
     usage = envelope.get("usage") or {}
+    # The CLI splits input across three counters and puts almost all of a
+    # first-turn prompt in cache_creation, so `input_tokens` alone reads as
+    # single digits for a payload of thousands. Report what the model actually
+    # read, and keep cache reads separate the way the API backend does.
+    fresh_input = (int(usage.get("input_tokens") or 0)
+                   + int(usage.get("cache_creation_input_tokens") or 0))
     return str(envelope.get("result", "")), {
-        "input_tokens": usage.get("input_tokens", 0),
-        "output_tokens": usage.get("output_tokens", 0),
-        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-        # Real reported spend. On a subscription plan this is 0.0, which is the
-        # honest number - the run cost plan quota, not dollars.
+        "input_tokens": fresh_input,
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        # What the CLI itself reports. Claude Code costs a run at the equivalent
+        # API rate even when it is signed in to a plan, so this is a yardstick
+        # for how big the run was, not necessarily money leaving an account.
         "cost_estimate_usd": round(float(envelope.get("total_cost_usd") or 0.0), 4),
         "session_id": envelope.get("session_id", ""),
     }

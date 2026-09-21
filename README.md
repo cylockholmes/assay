@@ -714,7 +714,7 @@ is required and assay will not guess:
 | `--ai-backend` | Route | Who pays |
 |---|---|---|
 | `api` | the Anthropic SDK with your own key | billed per token |
-| `claude-cli` | the Claude Code CLI in headless mode — the same binary the Claude desktop app installs, sharing its sign-in | billed to that Claude plan, no per-token charge |
+| `claude-cli` | the Claude Code CLI in headless mode — the same binary the Claude desktop app installs, sharing its sign-in | spends that Claude plan's quota |
 
 Both send byte-identical redacted payloads and ask for the same JSON schema, so
 the triage you get back does not depend on which one you picked. `assay doctor`
@@ -729,6 +729,11 @@ assay ai --out ./assay-out --ai-backend api          # via your API key
 
 `--ai-dry-run` is the exception — it never reaches a backend, so it does not
 need one chosen.
+
+Both print a dollar figure when the run finishes, but they do not mean the same
+thing. On `api` it is what your key was billed. On `claude-cli` it is Claude
+Code costing the run at the equivalent API rate while actually spending plan
+quota, so assay labels it `equiv` — read it as a size yardstick, not a charge.
 
 **`api`** requires `pip install anthropic` and `ANTHROPIC_API_KEY` (or
 `ant auth login`). assay prompts for a key if neither is set; the key is used
