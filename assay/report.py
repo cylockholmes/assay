@@ -392,9 +392,13 @@ def _header(counts: Dict, assets: Dict, meta: Dict, ai: Optional[Dict]) -> str:
     )
     summary = ""
     if ai and ai.get("summary"):
+        # Which model *and* which route - an API-key run and a desktop-app run
+        # are different provenance for the same paragraph.
+        via = ai.get("_backend", "")
         summary = ('<div class="ai-summary"><h3>AI triage summary '
                    '<span class="pill">%s</span></h3><p>%s</p></div>'
-                   % (_e(ai.get("_model", "")), _e(ai["summary"])))
+                   % (_e(ai.get("_model", "") + (" via %s" % via if via else "")),
+                      _e(ai["summary"])))
     return (
         '<header><div class="titlebar"><h1>assay</h1>'
         '<div class="meta">%s%s &middot; profile <b>%s</b> &middot; %.0fs</div></div>'

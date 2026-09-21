@@ -29,6 +29,8 @@ examples:
   assay scan https://app.target.tld --profile deep --burp auto
   assay scan -f targets.txt --profile quick --open
   assay ai --out ./assay-out --ai-dry-run       # see exactly what would be sent
+  assay ai --out ./assay-out --ai-backend claude-cli   # via the Claude desktop app
+  assay ai --out ./assay-out --ai-backend api          # via your Anthropic API key
   assay replay authed.xml --scope scope.txt    # unauth access from a Burp capture
   assay submit 1 > report.md                   # submission draft for finding #1
   assay triage 3 --status reported            # stop a submitted finding resurfacing
@@ -755,22 +757,47 @@ def cmd_doctor(args) -> int:
         console.print("[dim]%s[/dim]" % st.detail)
 
     console.print("\n[bold]ai triage[/bold]")
+    from assay import ai as ai_mod
+
+    # --ai-backend api: the SDK plus a key.
     try:
         import anthropic  # noqa: F401
         have_sdk = True
     except ImportError:
         have_sdk = False
-    console.print("  sdk     %s" % ("[green]installed[/green]" if have_sdk
-                                    else "[yellow]not installed[/yellow]  pip install anthropic"))
+    console.print("  [bold]api[/bold]         [dim]%s[/dim]"
+                  % ai_mod.BACKEND_HELP[ai_mod.BACKEND_API])
+    console.print("    sdk       %s"
+                  % ("[green]installed[/green]" if have_sdk
+                     else "[yellow]not installed[/yellow]  pip install anthropic"))
     if have_sdk:
-        from assay import ai as ai_mod
         ok, how = ai_mod.credential_status()
-        console.print("  creds   %s  [dim]%s[/dim]"
+        console.print("    creds     %s  [dim]%s[/dim]"
                       % ("[green]ready[/green]" if ok else "[yellow]none[/yellow]", how))
         if not ok:
-            console.print("  [dim]assay will prompt for a key when you use --ai, "
-                          "or set ANTHROPIC_API_KEY / run 'ant auth login'[/dim]")
-    console.print("  [dim]AI triage is opt-in (--ai) and only ever sends redacted data.[/dim]")
+            console.print("    [dim]assay will prompt for a key when you use "
+                          "--ai-backend api, or set ANTHROPIC_API_KEY / run "
+                          "'ant auth login'[/dim]")
+
+    # --ai-backend claude-cli: the binary the Claude desktop app installs.
+    cli_ok, cli_how = ai_mod.cli_status(ai_mod.AIConfig(
+        claude_bin=getattr(args, "ai_claude_bin", "claude") or "claude"))
+    console.print("  [bold]claude-cli[/bold]  [dim]%s[/dim]"
+                  % ai_mod.BACKEND_HELP[ai_mod.BACKEND_CLI])
+    console.print("    binary    %s  [dim]%s[/dim]"
+                  % ("[green]ready[/green]" if cli_ok else "[yellow]none[/yellow]",
+                     cli_how))
+    if not cli_ok:
+        console.print("    [dim]install Claude Code (it ships with the Claude "
+                      "desktop app and shares its sign-in), or point "
+                      "--ai-claude-bin at the binary[/dim]")
+    elif env.is_wsl() or env.is_windows():
+        console.print("    [dim]assay runs the binary it finds on this side of "
+                      "the WSL boundary - a Windows-only install will not be "
+                      "visible here[/dim]")
+
+    console.print("  [dim]AI triage is opt-in (--ai), needs an explicit "
+                  "--ai-backend, and only ever sends redacted data.[/dim]")
     return 0
 
 

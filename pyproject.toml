@@ -15,6 +15,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only the --ai-backend=api route needs the SDK. --ai-backend=claude-cli shells
+# out to the Claude Code binary and has no Python dependency at all.
 ai = ["anthropic>=0.40"]
 
 [project.scripts]
