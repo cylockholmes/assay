@@ -64,8 +64,12 @@ class Dashboard:
     def __enter__(self) -> "Dashboard":
         if not self.quiet:
             console.print(Text(BANNER, style="bold cyan"))
-            self._live = Live(self._render(), console=console, refresh_per_second=4,
-                              transient=False)
+            # get_renderable, not a pre-built snapshot: Live's auto-refresh
+            # re-prints whatever `renderable` holds, so passing the result of
+            # _render() once freezes the elapsed clock between progress events
+            # and a long quiet stage is indistinguishable from a hang.
+            self._live = Live(console=console, refresh_per_second=4,
+                              transient=False, get_renderable=self._render)
             self._live.__enter__()
         return self
 
