@@ -657,12 +657,16 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
 
     store.save_ai(result)
     usage = result.get("_usage", {})
-    # The CLI backend reports real spend, which is 0.00 on a subscription plan.
-    # Printing "~$0.000" there would read as a failed measurement rather than
-    # the truth, which is that the run cost plan quota and not dollars.
+    # Both backends report a dollar figure but they do not mean the same thing:
+    # the API one is what the key is billed, the CLI one is Claude Code costing
+    # the run at the equivalent API rate while actually spending plan quota.
+    # Label it, rather than letting the two read as the same number.
     cost = usage.get("cost_estimate_usd", 0.0)
-    spend = ("~$%.3f" % cost) if cost else (
-        "no per-token charge" if ai_cfg.backend == ai_mod.BACKEND_CLI else "~$0.000")
+    if ai_cfg.backend == ai_mod.BACKEND_CLI:
+        spend = ("~$%.3f equiv, billed to the Claude plan" % cost) if cost \
+            else "billed to the Claude plan"
+    else:
+        spend = "~$%.3f" % cost
     console.print("  [green]triaged[/green]  %d verdict(s), %d chain(s)  "
                   "[dim]%s in / %s out, %s[/dim]"
                   % (len(result.get("triage", [])), len(result.get("chains", [])),

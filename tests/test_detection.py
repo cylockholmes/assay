@@ -2195,6 +2195,37 @@ class AiBackendTests(unittest.TestCase):
         self.assertEqual(seen["cwd_contents"], [])
         self.assertFalse(os.path.exists(seen["cwd"]), "sandbox was left behind")
 
+    def test_cli_input_tokens_include_cache_creation(self):
+        """The CLI puts nearly all of a first-turn prompt in cache_creation.
+
+        Reporting bare input_tokens made a 1.4k-token payload print as "10 in",
+        which reads as a broken measurement.
+        """
+        import subprocess, tempfile
+        from assay import ai as ai_mod
+        from assay.redact import Redactor
+
+        envelope = {"type": "result", "subtype": "success", "is_error": False,
+                    "result": json.dumps({"summary": "s", "triage": [],
+                                          "chains": []}),
+                    "total_cost_usd": 0.0597,
+                    "usage": {"input_tokens": 10,
+                              "cache_creation_input_tokens": 1411,
+                              "cache_read_input_tokens": 0,
+                              "output_tokens": 3641}}
+        orig_run, orig_status = subprocess.run, ai_mod.cli_status
+        subprocess.run = self._fake_run(envelope)
+        ai_mod.cli_status = lambda cfg=None: (True, "stub")
+        try:
+            out = ai_mod.analyze(self._one_finding(), {},
+                                 self._cfg(backend="claude-cli"),
+                                 Redactor(), tempfile.mkdtemp())
+        finally:
+            subprocess.run, ai_mod.cli_status = orig_run, orig_status
+        self.assertEqual(out["_usage"]["input_tokens"], 1421)
+        self.assertEqual(out["_usage"]["output_tokens"], 3641)
+        self.assertEqual(out["_usage"]["cost_estimate_usd"], 0.0597)
+
     def test_cli_backend_surfaces_an_error_envelope(self):
         """is_error is the authoritative field - subtype stays "success"."""
         import subprocess, tempfile
