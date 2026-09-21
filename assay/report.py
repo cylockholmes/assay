@@ -11,7 +11,7 @@ import html
 import json
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from assay.models import Finding
 from assay.ui import human_duration
@@ -228,13 +228,18 @@ _CVE_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
 def _software_section(out_dir: str) -> str:
+    """Cached on the inventory file: it only changes when the stage re-runs."""
+    path = os.path.join(out_dir, "raw", "software-inventory.json")
+    return _by_file_version(path, lambda: _render_software(path)) or ""
+
+
+def _render_software(path: str) -> str:
     """Every product/version this run could identify, host and web side,
     plus any known CVEs NVD's keyword search turned up (--passive only -
     see assay.modules.inventory). Written regardless of whether anything
     looks vulnerable: it is the asset inventory a client's security team
     usually does not have.
     """
-    path = os.path.join(out_dir, "raw", "software-inventory.json")
     try:
         with open(path, "r", encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -300,6 +305,34 @@ def _software_section(out_dir: str) -> str:
 _NMAP_XML_CAP = 3_000_000   # a scan across many hosts can produce a large XML file
 
 
+# Rendered blocks that come from a file, keyed by that file's mtime and size.
+# The live report rebuilds every few seconds for the whole scan, and these
+# files only change when the tool that writes them runs again - re-reading and
+# re-escaping megabytes of nmap XML on every refresh was the largest single
+# cost of a rebuild once the per-finding queries were gone. Bounded by the
+# number of distinct paths (four XML files, replay.sh, the software JSON).
+_FILE_BLOCKS: Dict[str, Tuple[Tuple[float, int], Any]] = {}
+
+
+def _by_file_version(path: str, render):
+    """render() once per version of `path`, then reuse until the file changes.
+
+    Returns None when the file is missing, which is distinct from a file that
+    renders to an empty block.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime, st.st_size)
+    hit = _FILE_BLOCKS.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    value = render()
+    _FILE_BLOCKS[path] = (key, value)
+    return value
+
+
 def _read_capped(path: str, cap: int) -> Tuple[str, bool]:
     """Returns (content, truncated). An empty, non-truncated result means
     the file does not exist or could not be read."""
@@ -314,12 +347,26 @@ def _read_capped(path: str, cap: int) -> Tuple[str, bool]:
 def _nmap_commands(out_dir: str) -> List[str]:
     """The exact nmap invocation(s) this run made, pulled from replay.sh."""
     path = os.path.join(out_dir, "replay.sh")
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-    except OSError:
-        return []
-    return [ln.rstrip("\n") for ln in lines if ln.strip().startswith("nmap ")]
+
+    def read() -> List[str]:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return []
+        return [ln.rstrip("\n") for ln in lines if ln.strip().startswith("nmap ")]
+
+    return _by_file_version(path, read) or []
+
+
+def _nmap_raw_block(path: str, name: str, label: str) -> str:
+    """One <details> block of raw XML. Up to _NMAP_XML_CAP bytes, escaped."""
+    content, truncated = _read_capped(path, _NMAP_XML_CAP)
+    if not content:
+        return ""
+    return ('<details%s><summary>%s (%s)%s</summary><pre>%s</pre></details>'
+            % (" open" if name == "nmap.xml" else "", _e(label), _e(name),
+               " - truncated" if truncated else "", _e(content)))
 
 
 def _nmap_section(out_dir: str) -> str:
@@ -357,13 +404,10 @@ def _nmap_section(out_dir: str) -> str:
 
     raw_blocks = []
     for name, label, path in files:
-        content, truncated = _read_capped(path, _NMAP_XML_CAP)
-        if not content:
-            continue
-        raw_blocks.append(
-            '<details%s><summary>%s (%s)%s</summary><pre>%s</pre></details>'
-            % (" open" if name == "nmap.xml" else "", _e(label), _e(name),
-               " - truncated" if truncated else "", _e(content)))
+        block = _by_file_version(
+            path, lambda p=path, n=name, l=label: _nmap_raw_block(p, n, l))
+        if block:
+            raw_blocks.append(block)
 
     beautified_block = (
         '<p class="cmdwrap"><a class="copy wide" href="raw/nmapview.html" '
