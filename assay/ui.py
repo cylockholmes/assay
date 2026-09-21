@@ -42,6 +42,17 @@ BANNER = r"""
 """
 
 
+def human_duration(seconds: float) -> str:
+    """Compact elapsed time. "763s" is hard to read at a glance; "12m43s" is not."""
+    total = int(max(0, seconds))
+    if total < 60:
+        return "%ds" % total
+    if total < 3600:
+        return "%dm%02ds" % divmod(total, 60)
+    h, rem = divmod(total, 3600)
+    return "%dh%02dm" % (h, rem // 60)
+
+
 class Dashboard:
     """Live scan view. Pass .progress as the engine's progress callback."""
 
@@ -57,6 +68,10 @@ class Dashboard:
         self.hits: Deque[Finding] = deque(maxlen=12)
         self.counts: Dict[str, int] = {"CHASE": 0, "LOOK": 0, "NOTE": 0}
         self.started = time.time()
+        # A stage that reports nothing while it works is indistinguishable from
+        # one that has hung, so the header carries how long THIS stage has run
+        # as well as the whole scan.
+        self.stage_started = time.time()
         self._live: Optional[Live] = None
         self._last_render = 0.0
 
@@ -83,6 +98,8 @@ class Dashboard:
     def progress(self, stage: str, msg: str, advance: int = 0) -> None:
         if stage == "finding":
             return
+        if stage != self.stage:
+            self.stage_started = time.time()
         self.stage = stage
         self.detail = msg
         if advance == 0:
@@ -96,6 +113,16 @@ class Dashboard:
         if f.triage in ("CHASE", "LOOK"):
             self.hits.append(f)
         self._maybe_render()
+
+    def status(self) -> Dict[str, str]:
+        """Where the scan is right now, for the live HTML report to show too."""
+        now = time.time()
+        return {
+            "stage": self.stage,
+            "detail": self.detail,
+            "elapsed": human_duration(now - self.started),
+            "stage_elapsed": human_duration(now - self.stage_started),
+        }
 
     def _maybe_render(self) -> None:
         now = time.time()
@@ -114,12 +141,14 @@ class Dashboard:
             Text.assemble(*(((self.codename + "  ", "bold magenta"),) if self.codename else ()),
                           ("targets ", "dim"), (str(self.targets), "bold"),
                           ("   profile ", "dim"), (self.profile, "bold"),
-                          ("   stage ", "dim"), (self.stage, "bold cyan")),
+                          ("   stage ", "dim"), (self.stage, "bold cyan"),
+                          ("  %s" % human_duration(time.time() - self.stage_started),
+                           "dim")),
             Text.assemble(
                 (str(self.counts.get("CHASE", 0)), "bold red"), (" chase  ", "dim"),
                 (str(self.counts.get("LOOK", 0)), "yellow"), (" look  ", "dim"),
                 (str(self.counts.get("NOTE", 0)), "dim"), (" note  ", "dim"),
-                ("%.0fs" % (time.time() - self.started), "dim"),
+                (human_duration(time.time() - self.started), "dim"),
             ),
         )
 

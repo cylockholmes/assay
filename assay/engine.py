@@ -314,7 +314,10 @@ class Engine:
         if self.ctx.has("naabu") and self.ctx.has("nmap") and len(hosts) > 1:
             self.ctx.say("ports", "naabu sweep (%s) across %d host(s)"
                          % (spec, len(hosts)))
-            swept = tools.naabu_scan(hosts, spec, self.tune)
+            swept = tools.naabu_scan(
+                hosts, spec, self.tune,
+                on_progress=lambda m: self.ctx.say("ports", "naabu: %s" % m,
+                                                   advance=1))
             open_ports = sorted({p for ports in swept.values() for p in ports})
             if open_ports:
                 self.ctx.say("ports", "naabu found %d distinct open port(s); "
@@ -332,8 +335,10 @@ class Engine:
             return
 
         self.ctx.say("ports", "nmap -sV %s across %d host(s)" % (spec, len(hosts)))
-        results = tools.nmap_scan(hosts, spec, self.tune, out_dir=self.cfg.out_dir,
-                                  xml_prefix=xml_prefix)
+        results = tools.nmap_scan(
+            hosts, spec, self.tune, out_dir=self.cfg.out_dir,
+            xml_prefix=xml_prefix,
+            on_progress=lambda m: self.ctx.say("ports", "nmap: %s" % m, advance=1))
         by_host = {t.host: t for t in targets}
         by_ip = {t.ip: t for t in targets if t.ip}
         found = 0

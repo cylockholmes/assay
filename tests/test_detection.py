@@ -1030,6 +1030,106 @@ class JournalTests(unittest.TestCase):
         self.assertFalse(os.path.exists(j.log_path))
 
 
+class ScanProgressTests(unittest.TestCase):
+    """A stage that reports nothing looks exactly like a stage that hung."""
+
+    def test_duration_is_readable_past_a_minute(self):
+        from assay.ui import human_duration
+        self.assertEqual(
+            [human_duration(x) for x in (0, 9, 63, 763, 4000)],
+            ["0s", "9s", "1m03s", "12m43s", "1h06m"])
+
+    def test_stage_clock_resets_on_a_new_stage(self):
+        import time
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("resolve", "x")
+        first = d.stage_started
+        time.sleep(0.01)
+        d.progress("resolve", "still resolving", advance=1)
+        self.assertEqual(d.stage_started, first, "same stage must not reset the clock")
+        d.progress("ports", "sweeping")
+        self.assertGreater(d.stage_started, first, "new stage must reset the clock")
+
+    def test_status_reports_stage_and_detail(self):
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("ports", "naabu: 3 open port(s) on 2 host(s) so far", advance=1)
+        st = d.status()
+        self.assertEqual(st["stage"], "ports")
+        self.assertIn("naabu:", st["detail"])
+        self.assertRegex(st["elapsed"], r"^\d+(s|m\d\ds|h\d\dm)$")
+        self.assertRegex(st["stage_elapsed"], r"^\d+(s|m\d\ds|h\d\dm)$")
+
+    def test_nmap_stats_lines_become_progress(self):
+        from assay.tools import nmap_stat_line
+        self.assertEqual(
+            nmap_stat_line("Service Scan Timing: About 45.23% done; "
+                           "ETC: 14:05 (0:03:12 remaining)"),
+            "45.23% done, 0:03:12 remaining")
+        self.assertEqual(nmap_stat_line("SYN Stealth Scan Timing: About 9.80% done"),
+                         "9.80% done")
+        self.assertEqual(
+            nmap_stat_line("Stats: 0:00:30 elapsed; 120 hosts completed (384 up), "
+                           "264 undergoing Service Scan"),
+            "120 host(s) completed")
+
+    def test_a_non_stats_line_is_not_progress(self):
+        from assay.tools import nmap_stat_line
+        for line in ("Nmap scan report for 10.0.0.1", "", "Host is up (0.0011s latency)."):
+            self.assertIsNone(nmap_stat_line(line), line)
+
+    def test_naabu_reports_hits_while_it_streams(self):
+        """naabu only emits open ports, so progress is what turned up so far."""
+        from assay import tools
+        seen = []
+        original = tools.stream_json
+        tools.stream_json = lambda *a, **k: iter(
+            [{"host": "10.0.0.%d" % i, "port": 80 + i} for i in range(4)])
+        try:
+            # The throttle starts at last=0.0, so the first result always reports.
+            out = tools.naabu_scan(["10.0.0.1"], "top-100", {},
+                                   on_progress=lambda m: seen.append(m))
+        finally:
+            tools.stream_json = original
+        self.assertEqual(len(out), 4, "every streamed result must still be collected")
+        self.assertTrue(seen, "at least the first result should report progress")
+        self.assertIn("open port(s)", seen[0])
+
+    def test_live_report_bar_shows_where_the_scan_is(self):
+        import os, re, tempfile
+        from assay import report
+        from assay.store import Store
+        d = tempfile.mkdtemp()
+        st = Store(os.path.join(d, "a.db")); st.start_run("standard", ["10.0.0.0/24"])
+        try:
+            path = report.build(
+                st, {"hosts": 1, "web": 0, "requests": 0},
+                os.path.join(d, "r.html"), live=True,
+                status={"stage": "ports", "detail": "nmap: 45% done",
+                        "elapsed": "12m43s", "stage_elapsed": "11m02s"})
+            bar = re.search(r'<div class="livebar".*?</div>',
+                            open(path).read(), re.S).group(0)
+            self.assertIn("ports", bar)
+            self.assertIn("nmap: 45% done", bar)
+            self.assertIn("11m02s", bar)
+        finally:
+            st.close()
+
+    def test_live_report_without_status_still_renders(self):
+        import os, tempfile
+        from assay import report
+        from assay.store import Store
+        d = tempfile.mkdtemp()
+        st = Store(os.path.join(d, "a.db")); st.start_run("standard", ["10.0.0.0/24"])
+        try:
+            path = report.build(st, {"hosts": 1, "web": 0, "requests": 0},
+                                os.path.join(d, "r.html"), live=True)
+            self.assertIn("scan running", open(path).read())
+        finally:
+            st.close()
+
+
 class FollowupGateTests(unittest.TestCase):
     """The three mechanical gates. --ai-followup does not relax any of them."""
 

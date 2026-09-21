@@ -14,9 +14,10 @@ import shutil
 import re
 import subprocess
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Sequence
+from typing import Callable, Dict, Iterator, List, Optional, Sequence
 
 from assay import env
 from assay.models import Port
@@ -333,8 +334,31 @@ def _merge_nmap_hosts(dest: Dict[str, NmapHost], src: Dict[str, NmapHost]) -> No
                 existing.hostnames.append(name)
 
 
+_NMAP_PCT = re.compile(r"About ([\d.]+)% done(?:.*?\(([\d:]+) remaining\))?")
+_NMAP_HOSTS = re.compile(r"(\d+) hosts? completed")
+
+
+def nmap_stat_line(line: str) -> Optional[str]:
+    """Turn one nmap --stats-every line into a status, or None if it is not one.
+
+    nmap prints these to stdout on its own timer. They are the only progress
+    an -sV sweep gives: without them a scan of several hundred hosts is a
+    single blocking call that says nothing for however long it takes.
+    """
+    m = _NMAP_PCT.search(line)
+    if m:
+        return "%s%% done%s" % (m.group(1),
+                                ", %s remaining" % m.group(2) if m.group(2) else "")
+    m = _NMAP_HOSTS.search(line)
+    if m:
+        return "%s host(s) completed" % m.group(1)
+    return None
+
+
 def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 1800.0,
-              out_dir: str = ".", xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
+              out_dir: str = ".", xml_prefix: str = "nmap",
+              on_progress: Optional[Callable[[str], None]] = None
+              ) -> Dict[str, NmapHost]:
     """Service/version scan. Returns scanned address -> NmapHost.
 
     Always keyed by the address nmap actually scanned, never by a
@@ -363,7 +387,16 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict, timeout: float = 180
         cmd = list(base_args) + ["-oX", xml_path] + port_args + hosts
         # nmap runs inside WSL under the bridge, so -oX must name a path it can see.
         cmd[cmd.index("-oX") + 1] = env.to_wsl_path(xml_path)
-        run(cmd, timeout=timeout)
+        if on_progress:
+            # Drain stdout for the stats lines. The results still come from the
+            # XML afterwards; this only changes how the wait is spent.
+            cmd = [cmd[0], "--stats-every", "10s"] + cmd[1:]
+            for line in stream_lines(cmd, timeout=timeout):
+                msg = nmap_stat_line(line)
+                if msg:
+                    on_progress(msg)
+        else:
+            run(cmd, timeout=timeout)
         if not os.path.exists(xml_path):
             return {}
         return parse_nmap_xml(xml_path)
@@ -600,7 +633,9 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
 
 
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
-               timeout: float = 900.0) -> Dict[str, List[int]]:
+               timeout: float = 900.0,
+               on_progress: Optional[Callable[[str], None]] = None
+               ) -> Dict[str, List[int]]:
     # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
     # on naabu to union -top-ports with a -p list in one invocation is
     # unverified, and nmap's equivalent combination turned out to be an
@@ -622,11 +657,22 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
                "-c", str(tune.get("concurrency", 10))] + port_args
         found: Dict[str, List[int]] = {}
+        # naabu only ever emits a line for a port it found open, so there is no
+        # honest "N of 384 swept" to report - what it can say is what has turned
+        # up so far, which is enough to tell a working sweep from a wedged one.
+        hits = 0
+        last = 0.0
         for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n"):
             h = obj.get("host") or obj.get("ip")
             p = obj.get("port")
             if h and p:
                 found.setdefault(str(h), []).append(int(p))
+                hits += 1
+                now = time.time()
+                if on_progress and now - last >= 2.0:
+                    last = now
+                    on_progress("%d open port(s) on %d host(s) so far"
+                                % (hits, len(found)))
         return found
 
     found = _run(spec)
