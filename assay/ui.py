@@ -143,7 +143,8 @@ class Dashboard:
                           ("   profile ", "dim"), (self.profile, "bold"),
                           ("   stage ", "dim"), (self.stage, "bold cyan"),
                           ("  %s" % human_duration(time.time() - self.stage_started),
-                           "dim")),
+                           "dim"),
+                          ("   [s]", "dim bold"), (" skip", "dim")),
             Text.assemble(
                 (str(self.counts.get("CHASE", 0)), "bold red"), (" chase  ", "dim"),
                 (str(self.counts.get("LOOK", 0)), "yellow"), (" look  ", "dim"),
@@ -178,6 +179,87 @@ class Dashboard:
             box=ROUNDED,
             border_style="cyan",
         )
+
+
+class KeyListener:
+    """Reads single keypresses from stdin on a background thread, without
+    blocking the engine or waiting for Enter.
+
+    Used for interactive control of a live scan - moving past a stage that
+    is dragging, for instance - without adding an input-handling loop to
+    the engine itself, which has no natural place to poll one: its own
+    thread is busy either running stage code directly or blocked inside
+    as_completed() waiting on a pool. This runs entirely independently and
+    just calls back.
+
+    Silently does nothing when stdin is not a real terminal (redirected
+    input, a pipe, --quiet, non-interactive CI use) or termios/tty are
+    unavailable (anywhere off POSIX - a native Windows host driving the
+    WSL bridge, say): reading a raw keypress needs a real tty to put into
+    cbreak mode, and a scan nobody is watching live has nothing to skip
+    toward anyway. Every failure path here is a quiet no-op, never a raised
+    exception - this must not be able to take the scan down with it.
+    """
+
+    def __init__(self) -> None:
+        self._thread: Optional["threading.Thread"] = None
+        self._stop_evt: Optional["threading.Event"] = None
+        self.on_key: Optional["Callable[[str], None]"] = None
+
+    def start(self) -> None:
+        import sys
+        if self._thread is not None or not sys.stdin.isatty():
+            return
+        try:
+            import termios  # noqa: F401 - existence check; used in _loop
+            import tty      # noqa: F401
+        except ImportError:
+            return
+        import threading
+        self._stop_evt = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._stop_evt is not None:
+            self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        self._stop_evt = None
+
+    def _loop(self) -> None:
+        import select
+        import sys
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        try:
+            old = termios.tcgetattr(fd)
+        except termios.error:
+            return
+        try:
+            tty.setcbreak(fd)
+            while not self._stop_evt.is_set():
+                # A short select() timeout, not a blocking read(): this is
+                # what lets stop() return promptly instead of waiting on
+                # whatever the operator does or doesn't type next.
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                if not ready:
+                    continue
+                ch = sys.stdin.read(1)
+                if ch and self.on_key:
+                    try:
+                        self.on_key(ch)
+                    except Exception:  # a bad handler must not kill input
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------

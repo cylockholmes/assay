@@ -20,8 +20,8 @@ import time
 from assay import report as report_mod
 from rich.text import Text
 
-from assay.ui import (Dashboard, SEV_STYLE, console, detail as show_detail,
-                      inventory, summary, tool_table)
+from assay.ui import (Dashboard, KeyListener, SEV_STYLE, console,
+                      detail as show_detail, inventory, summary, tool_table)
 
 EPILOG = """\
 examples:
@@ -582,6 +582,23 @@ def cmd_scan(args) -> int:
         engine.ctx.progress = progress
         refresh(force=True)
 
+        # 's' moves the run past whatever is currently dragging - content
+        # discovery grinding through a long wordlist against every web
+        # target is the case this exists for. Acknowledged immediately
+        # under the stage that is running, since the cutoff itself can take
+        # a few seconds to actually land (see tools.SKIP's own comment) and
+        # a keypress with no visible response reads as "did that work at
+        # all?" rather than "still in progress."
+        skip_listener = KeyListener()
+
+        def on_key(ch: str) -> None:
+            if ch.lower() == "s":
+                tools.SKIP.set()
+                dash.progress(dash.stage, "skip requested - moving past %s"
+                              % dash.stage, 0)
+
+        skip_listener.on_key = on_key
+        skip_listener.start()
         try:
             engine.run()
         except KeyboardInterrupt:
@@ -589,6 +606,11 @@ def cmd_scan(args) -> int:
         except ScopeError as exc:
             console.print("[red]scope error:[/red] %s" % exc)
             return 2
+        finally:
+            # Restores the terminal's own settings (see KeyListener._loop) -
+            # must run even on an exception neither except clause above
+            # catches, or the shell is left in cbreak mode afterward.
+            skip_listener.stop()
 
     assets = engine.assets()
     inventory(engine.store)
