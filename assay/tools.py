@@ -1099,14 +1099,33 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
 # --------------------------------------------------------------------------
 
 
+HTTPX_BASE_TIMEOUT = 60.0
+HTTPX_TIMEOUT_CAP = 3 * 3600.0
+# httpx's own per-request timeout (-timeout 10) doubled for -retries 1's one
+# retry: the worst case for a candidate that never answers at all, which on
+# a speculative probe of every open TCP port - not just ones already known
+# to speak HTTP - is common, not the exception. A run of 2187 candidates hit
+# a flat 600s cap at 155 confirmed live endpoints; worked-out worst case at
+# the default 10 threads is closer to 74 minutes.
+HTTPX_PER_REQUEST_WORST_CASE = 10.0 * 2
+
+
+def httpx_timeout(candidates: Sequence[str], tune: Dict) -> float:
+    threads = max(1, int(tune.get("concurrency", 10)))
+    worst_case = len(candidates) * HTTPX_PER_REQUEST_WORST_CASE / threads
+    return min(HTTPX_TIMEOUT_CAP, HTTPX_BASE_TIMEOUT + worst_case)
+
+
 def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
-                timeout: float = 600.0,
+                timeout: Optional[float] = None,
                 headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
     # "-list -" doesn't mean stdin here either -- see _target_list_file. The
     # near-silent version of this failure is worse than naabu's: httpx
     # exiting immediately just looks like zero live endpoints, and
     # _stage_probe falls back to the native per-candidate probe without ever
     # printing that httpx failed, since a nonzero exit isn't an exception.
+    if timeout is None:
+        timeout = httpx_timeout(targets, tune)
     cmd = [
         "httpx", "-silent", "-json", "-no-color",
         "-status-code", "-title", "-tech-detect", "-web-server",
