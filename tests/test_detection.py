@@ -1839,6 +1839,145 @@ class ToolProgressLabelTests(unittest.TestCase):
         self.assertEqual(seen[-1][0], "probe")
 
 
+class KeyListenerTests(unittest.TestCase):
+    """assay.ui.KeyListener: single-keypress reads on a background thread,
+    verified against a real pty - a mock here would only prove the mock
+    works, not that cbreak mode and select() actually behave as assumed."""
+
+    def _pty_pair(self):
+        import pty
+        try:
+            master_fd, slave_fd = pty.openpty()
+        except OSError as exc:
+            # A sandboxed environment can deny pty allocation outright (seen
+            # under Claude Code's own macOS sandbox: "out of pty devices").
+            # That is a property of the sandbox, not of KeyListener - skip
+            # rather than fail, the same way the rest of this suite treats
+            # an environment gap it cannot do anything about.
+            self.skipTest("pty allocation unavailable in this sandbox: %s" % exc)
+        self.addCleanup(self._safe_close, master_fd)
+        self.addCleanup(self._safe_close, slave_fd)
+        return master_fd, slave_fd
+
+    @staticmethod
+    def _safe_close(fd):
+        import os
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _as_stdin(self, slave_fd):
+        """Point sys.stdin at the pty's slave side for the duration of the
+        test, restoring the real one afterward regardless of outcome."""
+        import os, sys
+        real_stdin = sys.stdin
+        sys.stdin = os.fdopen(slave_fd, "r", closefd=False)
+
+        def _restore():
+            sys.stdin.close()
+            sys.stdin = real_stdin
+
+        self.addCleanup(_restore)
+
+    def test_a_keypress_reaches_the_callback(self):
+        import os, time
+        from assay.ui import KeyListener
+        master_fd, slave_fd = self._pty_pair()
+        self._as_stdin(slave_fd)
+
+        seen = []
+        kl = KeyListener()
+        kl.on_key = seen.append
+        kl.start()
+        self.addCleanup(kl.stop)
+        try:
+            os.write(master_fd, b"s")
+            for _ in range(40):          # up to ~2s: the listener polls every 0.25s
+                if seen:
+                    break
+                time.sleep(0.05)
+        finally:
+            kl.stop()
+        self.assertEqual(seen, ["s"])
+
+    def test_stop_restores_canonical_mode_and_echo(self):
+        """cbreak turns ICANON and ECHO off; stop() must turn them back on.
+        Checked as specific lflag bits, not the whole raw attrs tuple - on
+        macOS a bare, session-less pty's kernel silently sets EXTPROC
+        (0x20000000) on any tcsetattr() call regardless of what was asked
+        for, which has nothing to do with whether this restored what it
+        changed and would make a bit-exact comparison fail for reasons
+        unrelated to KeyListener. ICANON/ECHO are what cbreak mode actually
+        touches, and what a real terminal's usability afterward depends on."""
+        import termios
+        from assay.ui import KeyListener
+        master_fd, slave_fd = self._pty_pair()
+        self._as_stdin(slave_fd)
+        before_lflag = termios.tcgetattr(slave_fd)[3]
+        self.assertTrue(before_lflag & termios.ICANON)
+        self.assertTrue(before_lflag & termios.ECHO)
+
+        kl = KeyListener()
+        kl.start()
+        kl.stop()
+        after_lflag = termios.tcgetattr(slave_fd)[3]
+        self.assertTrue(after_lflag & termios.ICANON, "canonical mode must be back on")
+        self.assertTrue(after_lflag & termios.ECHO, "echo must be back on")
+
+    def test_cbreak_mode_is_actually_active_while_running(self):
+        """The other half: ICANON/ECHO really are off during, not just
+        correctly restored after - proving there was something to restore."""
+        import termios
+        from assay.ui import KeyListener
+        master_fd, slave_fd = self._pty_pair()
+        self._as_stdin(slave_fd)
+
+        kl = KeyListener()
+        kl.start()
+        self.addCleanup(kl.stop)
+        try:
+            import time
+            for _ in range(20):
+                lflag = termios.tcgetattr(slave_fd)[3]
+                if not (lflag & termios.ICANON):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("cbreak mode was never observed as active")
+            self.assertFalse(lflag & termios.ICANON)
+        finally:
+            kl.stop()
+
+    def test_stop_without_start_is_a_safe_no_op(self):
+        from assay.ui import KeyListener
+        KeyListener().stop()   # must not raise
+
+    def test_start_is_a_no_op_when_stdin_is_not_a_tty(self):
+        """The default and by far the most common case: --quiet, a redirected
+        input, or just not sitting at an interactive terminal. Verified with
+        the real (non-tty, under a test runner) sys.stdin - not simulated."""
+        import sys
+        from assay.ui import KeyListener
+        self.assertFalse(sys.stdin.isatty())
+        kl = KeyListener()
+        kl.start()
+        self.addCleanup(kl.stop)
+        self.assertIsNone(kl._thread, "no thread should have been spawned at all")
+
+    def test_a_second_start_while_already_running_is_a_no_op(self):
+        import os
+        from assay.ui import KeyListener
+        master_fd, slave_fd = self._pty_pair()
+        self._as_stdin(slave_fd)
+        kl = KeyListener()
+        kl.start()
+        self.addCleanup(kl.stop)
+        first_thread = kl._thread
+        kl.start()
+        self.assertIs(kl._thread, first_thread)
+
+
 class DashboardErrorStageTests(unittest.TestCase):
     """Same bug, the terminal-facing half: the header must not read "stage
     error" for as long as failures keep recurring."""
