@@ -1181,9 +1181,32 @@ def nuclei_templates_present() -> bool:
 # --------------------------------------------------------------------------
 
 
+KATANA_BASE_TIMEOUT = 60.0
+KATANA_TIMEOUT_CAP = 3 * 3600.0
+# katana's own -timeout 10 is the worst-case cost of one request that never
+# answers. A crawl visits more than one request per seed candidate, unlike
+# httpx's one-shot probe - depth is the parameter that says how much more,
+# so it is a linear factor here rather than an attempt to model branching
+# that nothing in this codebase measures.
+KATANA_PER_REQUEST_WORST_CASE = 10.0
+
+
+def katana_timeout(candidates: Sequence[str], depth: int, tune: Dict) -> float:
+    # Must match -c's own cap below, or the budget and the concurrency it is
+    # sized for would silently disagree.
+    threads = max(1, min(int(tune.get("concurrency", 10)), 10))
+    worst_case = len(candidates) * max(1, depth) * KATANA_PER_REQUEST_WORST_CASE / threads
+    return min(KATANA_TIMEOUT_CAP, KATANA_BASE_TIMEOUT + worst_case)
+
+
 def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
-                 proxy: Optional[str] = None, timeout: float = 600.0,
+                 proxy: Optional[str] = None, timeout: Optional[float] = None,
                  headers: Optional[Dict[str, str]] = None) -> List[dict]:
+    # Flat 600s was the same bug already fixed for nmap, naabu and httpx
+    # today: a crawl of 359 endpoints hit it and cut short at 317 URLs.
+    # katana_timeout scales with candidates and depth instead.
+    if timeout is None:
+        timeout = katana_timeout(urls, depth, tune)
     # A real file, not stdin -- "-list -" doesn't mean stdin here (confirmed
     # against katana's own docs: -list takes a path, and katana reads stdin
     # only when -u/-list is omitted entirely). This is what silently
