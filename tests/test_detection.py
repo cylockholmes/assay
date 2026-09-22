@@ -4727,6 +4727,68 @@ class NmapHostgroupTests(unittest.TestCase):
         self.assertNotIn("--max-hostgroup", seen[0])
 
 
+class HttpxTimeoutTests(unittest.TestCase):
+    """httpx had the same flat-timeout bug as nmap and naabu: a run of 2187
+    speculative host:port candidates hit a flat 600s cap at 155 confirmed
+    live endpoints - most candidates never got the chance to answer."""
+
+    def test_it_grows_with_the_candidate_count(self):
+        from assay.tools import httpx_timeout
+        self.assertGreater(httpx_timeout(["h"] * 2187, {}), httpx_timeout(["h"], {}))
+
+    def test_the_run_that_hit_600s_would_no_longer(self):
+        from assay.tools import httpx_timeout
+        self.assertGreater(httpx_timeout(["h"] * 2187, {}), 600.0)
+
+    def test_more_threads_shortens_the_worst_case(self):
+        from assay.tools import httpx_timeout
+        few = httpx_timeout(["h"] * 500, {"concurrency": 5})
+        many = httpx_timeout(["h"] * 500, {"concurrency": 50})
+        self.assertGreater(few, many)
+
+    def test_a_zero_or_missing_concurrency_does_not_divide_by_zero(self):
+        from assay.tools import httpx_timeout
+        self.assertGreater(httpx_timeout(["h"], {"concurrency": 0}), 0)
+        self.assertGreater(httpx_timeout(["h"], {}), 0)
+
+    def test_it_is_bounded(self):
+        from assay.tools import httpx_timeout, HTTPX_TIMEOUT_CAP
+        self.assertEqual(httpx_timeout(["h"] * 999999, {}), HTTPX_TIMEOUT_CAP)
+
+    def test_an_explicit_timeout_still_wins(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream_json(cmd, timeout=900.0):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake_stream_json
+        try:
+            list(tools.httpx_probe(["10.0.0.1:80"], {}, timeout=42.0))
+        finally:
+            tools.stream_json = original
+        self.assertEqual(seen, [42.0])
+
+    def test_no_explicit_timeout_uses_the_scaled_default(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream_json(cmd, timeout=900.0):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake_stream_json
+        try:
+            list(tools.httpx_probe(["h"] * 2187, {}))
+        finally:
+            tools.stream_json = original
+        self.assertEqual(seen, [tools.httpx_timeout(["h"] * 2187, {})])
+        self.assertGreater(seen[0], 600.0)
+
+
 class NaabuTimeoutTests(unittest.TestCase):
     """naabu had nmap's bug waiting: a flat 900s for any size of sweep."""
 
