@@ -294,10 +294,21 @@ class HttpClient:
                     proxies=proxies,
                     stream=True,
                 )
-                raw = r.raw.read(stream_limit, decode_content=True) or b""
-                body = raw.decode(r.encoding or "utf-8", "replace")
-                elapsed = time.monotonic() - start
-                r.close()
+                # Reading the raw stream ourselves (rather than r.content /
+                # r.iter_content) is what lets stream_limit cap the bytes we
+                # ever pull off a slow or enormous body -- but it also means
+                # we bypass the exception translation requests normally does
+                # inside those helpers, so a body that stops answering mid-read
+                # raises urllib3's own ReadTimeoutError/ProtocolError, not
+                # requests.exceptions.ReadTimeout. Closed in a finally either
+                # way: on hundreds of hosts, a response leaked on every timeout
+                # empties this pool of 8 connections fast.
+                try:
+                    raw = r.raw.read(stream_limit, decode_content=True) or b""
+                    body = raw.decode(r.encoding or "utf-8", "replace")
+                    elapsed = time.monotonic() - start
+                finally:
+                    r.close()
                 with self._lock:
                     self.count += 1
                     since = time.monotonic() - (self._last_throttle or 0)
@@ -324,7 +335,15 @@ class HttpClient:
                         time.sleep(wait)
                         continue
                 return built
-            except requests.RequestException as exc:
+            # urllib3.exceptions.HTTPError alongside requests.RequestException:
+            # a body read that stops answering mid-stream raises the former
+            # (ReadTimeoutError, ProtocolError), not the latter, and it is not
+            # a subclass of it -- confirmed against this exact call shape. Left
+            # uncaught it skipped every retry and this attempt's backoff,
+            # surfaced several layers up as a bare "ReadTimeoutError" with no
+            # context, and on a scan with many black-holing hosts read as the
+            # whole probe stage stalling rather than one slow candidate.
+            except (requests.RequestException, urllib3.exceptions.HTTPError) as exc:
                 last_err = type(exc).__name__ + ": " + str(exc)[:160]
                 if attempt + 1 < attempts:
                     time.sleep(0.4 * (attempt + 1))

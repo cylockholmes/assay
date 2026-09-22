@@ -89,9 +89,15 @@ class Dashboard:
     def progress(self, stage: str, msg: str, advance: int = 0) -> None:
         if stage == "finding":
             return
-        if stage != self.stage:
-            self.stage_started = time.time()
-        self.stage = stage
+        # "error" reports a failure inside whatever stage is running, not a
+        # stage of its own. Treating it as one froze the header on "stage
+        # error" for as long as failures kept recurring - every candidate,
+        # on a probe of hundreds of hosts where many black-hole on read -
+        # which read as the scan having died rather than one noisy stage.
+        if stage != "error":
+            if stage != self.stage:
+                self.stage_started = time.time()
+            self.stage = stage
         self.detail = msg
         if advance == 0:
             line = "[%s] %s" % (stage, msg)

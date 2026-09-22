@@ -18,7 +18,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from assay import env
 from assay.models import Port
@@ -938,6 +938,49 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
                 if n not in existing.hostnames:
                     existing.hostnames.append(n)
     return out
+
+
+def nmap_xml_path(out_dir: str, xml_prefix: str = "nmap") -> str:
+    return os.path.join(out_dir, "raw", "%s.xml" % xml_prefix)
+
+
+def _nmap_xml_variants() -> List[Tuple[str, str]]:
+    base = [
+        ("nmap.xml", "base scan"),
+        ("nmap-extra.xml", "AI/ML port scan"),
+        ("nmap-discovered.xml", "reverse-DNS-discovered hosts"),
+        ("nmap-discovered-extra.xml", "reverse-DNS-discovered hosts, AI/ML ports"),
+    ]
+    out: List[Tuple[str, str]] = []
+    for name, label in base:
+        out.append((name, label))
+        out.append((name.replace(".xml", "-previous.xml"), label + ", pre-resume"))
+    return out
+
+
+# Every raw XML file a full run's nmap phase can produce, name paired with a
+# human label. --resume adds a "-previous" sibling of a file it preserves
+# instead of overwriting (see Engine._preserve_previous_xml) - one place to
+# name it, so the report's raw-XML section and NmapView's own render pick it
+# up without either maintaining its own copy of this list.
+NMAP_XML_FILES: List[Tuple[str, str]] = _nmap_xml_variants()
+
+
+def resumable_nmap_hosts(out_dir: str, xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
+    """Whatever an earlier nmap_scan() call already wrote under this prefix.
+
+    --resume's whole mechanism: parse_nmap_xml already salvages a killed
+    scan's completed hosts (see _salvage_nmap_xml), so a scan cut off by its
+    own timeout is exactly the case this recovers, not a special case of it.
+
+    A host nmap fully scanned and found completely closed is NOT a key in the
+    returned dict -- parse_nmap_xml only records a host with something to
+    report, by design (see its docstring). Resume treats "absent" as "not yet
+    covered" and scans it again. That is wasted work on a clean host, never
+    wrong: nothing is skipped on the strength of a guess, which is the
+    property that matters when the caller is deciding what to trust.
+    """
+    return parse_nmap_xml(nmap_xml_path(out_dir, xml_prefix))
 
 
 # --------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -311,6 +312,12 @@ class Engine:
         spec = self.cfg.opts.get("port_spec", "top-1000")
         spec = self._with_ai_ports(spec)
 
+        if self.cfg.resume:
+            targets = self._apply_resume(targets, xml_prefix)
+            hosts = [t.host for t in targets]
+            if not hosts:
+                return
+
         # naabu sweeps far faster than nmap; when both are present, use naabu to
         # find the open ports and nmap only to fingerprint them. On a /24 this
         # is the difference between minutes and most of an hour.
@@ -335,6 +342,8 @@ class Engine:
             return
 
         self.ctx.say("ports", "nmap -sV %s across %d host(s)" % (spec, len(hosts)))
+        if self.cfg.resume:
+            self._preserve_previous_xml(xml_prefix)
         results = tools.nmap_scan(hosts, spec, self.tune,
                                   out_dir=self.cfg.out_dir, xml_prefix=xml_prefix)
         by_host = {t.host: t for t in targets}
@@ -354,6 +363,64 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in nh.ports]})
         self.ctx.say("ports", "%d open port(s) across %d host(s)" % (found, len(results)))
+
+    # -- --resume ----------------------------------------------------------
+    def _apply_resume(self, targets: List[Target], xml_prefix: str) -> List[Target]:
+        """Reuse whatever an earlier nmap already finished under this prefix.
+
+        Returns only the targets still needing a scan. A target this recovers
+        has its .ports (and .discovered_hostnames) populated exactly as a
+        fresh nmap_scan() result would, and is saved to the Store immediately
+        -- if every target is covered, the caller never runs nmap at all.
+        """
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        recovered = tools.resumable_nmap_hosts(self.cfg.out_dir, xml_prefix)
+        if not recovered:
+            self.ctx.say("ports", "--resume: no usable %s.xml from a previous "
+                                  "run here, scanning fresh" % xml_prefix)
+            return targets
+
+        covered_ids: Set[int] = set()   # Target has no __hash__; key on identity
+        found = 0
+        for addr, nh in recovered.items():
+            t = by_ip.get(addr) or by_host.get(addr)
+            if t is None:
+                continue
+            t.ports = nh.ports
+            t.discovered_hostnames = [n for n in nh.hostnames if n and n != t.host]
+            found += len(nh.ports)
+            covered_ids.add(id(t))
+            self.store.save_host(t.host, t.ip or "", {
+                "ports": [p.__dict__ for p in nh.ports]})
+        remaining = [t for t in targets if id(t) not in covered_ids]
+        self.ctx.say("ports", "--resume: %d host(s) recovered from a previous "
+                              "%s.xml (%d open port(s)); %d still to scan"
+                     % (len(covered_ids), xml_prefix, found, len(remaining)))
+        return remaining
+
+    def _preserve_previous_xml(self, xml_prefix: str) -> None:
+        """About to overwrite <prefix>.xml with only the hosts still left to
+        scan; keep the file being replaced rather than losing it.
+
+        --resume merges the DATA (t.ports, the Store) from the old file in
+        Python, in _apply_resume, which is correct regardless of what happens
+        to the XML on disk. But the raw file is evidence in its own right,
+        and the report's raw-XML section and NmapView both read it straight
+        off disk under this exact name -- so without this, resuming a scan
+        would quietly narrow both of those to only the hosts scanned most
+        recently, dropping every host recovered from the earlier file.
+        """
+        path = tools.nmap_xml_path(self.cfg.out_dir, xml_prefix)
+        if not os.path.exists(path):
+            return
+        dest = tools.nmap_xml_path(self.cfg.out_dir, "%s-previous" % xml_prefix)
+        try:
+            shutil.copy2(path, dest)
+        except OSError as exc:
+            self.ctx.say("ports", "--resume: could not preserve the previous "
+                                  "%s.xml (%s); it will be overwritten"
+                         % (xml_prefix, type(exc).__name__))
 
     # -- stage 2b: hostnames nmap's reverse DNS resolved -------------------
     def _stage_discover_hostnames(self) -> None:
@@ -402,9 +469,7 @@ class Engine:
             self.ctx.say("ports", "NmapView render skipped: xsltproc not installed")
             return
         raw_dir = os.path.join(self.cfg.out_dir, "raw")
-        candidates = [os.path.join(raw_dir, name) for name in (
-            "nmap.xml", "nmap-extra.xml",
-            "nmap-discovered.xml", "nmap-discovered-extra.xml")]
+        candidates = [os.path.join(raw_dir, name) for name, _ in tools.NMAP_XML_FILES]
         xml_paths = [p for p in candidates if os.path.exists(p)]
         if not xml_paths:
             return
