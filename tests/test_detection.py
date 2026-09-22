@@ -2850,24 +2850,36 @@ class AiSurfaceTests(unittest.TestCase):
     def test_naabu_never_passes_list_dash_for_stdin(self):
         """naabu 2.4.0 takes '-list -' literally and tries to open a file
         named '-', failing with [FTL] Could not run enumeration: open -: no
-        such file or directory. It reads stdin by default with no -list/-host
-        flag at all, so that flag must never be emitted."""
+        such file or directory. -list must always be a real, existing file -
+        one this function wrote itself and that names the hosts asked for,
+        never the literal string "-"."""
         from assay import tools
         seen_cmds = []
+        seen_contents = []
         original = tools.stream_json
 
-        def fake_stream_json(cmd, timeout=900.0, stdin=""):
+        def fake_stream_json(cmd, timeout=900.0):
             seen_cmds.append(list(cmd))
+            # The file is only guaranteed to exist for as long as this
+            # generator is being drained - _target_list_file deletes it the
+            # moment the caller's `with` block exits, right after this
+            # returns. Read it now, not after naabu_scan() has returned.
+            path = cmd[cmd.index("-list") + 1] if "-list" in cmd else None
+            if path:
+                with open(path) as fh:
+                    seen_contents.append(fh.read().split())
             return iter(())
 
         tools.stream_json = fake_stream_json
         try:
-            tools.naabu_scan(["10.0.0.1"], "top-1000", {})
+            tools.naabu_scan(["10.0.0.1", "10.0.0.2"], "top-1000", {})
         finally:
             tools.stream_json = original
         self.assertTrue(seen_cmds)
         for cmd in seen_cmds:
-            self.assertNotIn("-list", cmd, "naabu command must not pass -list: %s" % cmd)
+            self.assertIn("-list", cmd)
+            self.assertNotEqual(cmd[cmd.index("-list") + 1], "-")
+        self.assertEqual(seen_contents, [["10.0.0.1", "10.0.0.2"]])
 
     def test_service_ports_are_covered_by_discovery(self):
         from assay.engine import AI_PORTS, WEB_PORTS
@@ -4146,6 +4158,164 @@ class ResumeCliWiringTests(unittest.TestCase):
         args = p.parse_args(["scan", "10.0.0.1", "-n", "wiring-off", "-q"])
         self.assertFalse(args.resume)
         self.assertFalse(make_config(args).resume)
+
+
+class TargetListFileTests(unittest.TestCase):
+    """_target_list_file: the mechanism every -list-taking tool wrapper now
+    shares, replacing "-list -" (naabu/katana take that literally and try to
+    open a file named "-") and stdin (nuclei has shipped bugs where stdin
+    piped in via subprocess.Popen specifically was never read at all -
+    projectdiscovery/nuclei#2032)."""
+
+    def test_writes_one_item_per_line(self):
+        from assay import tools
+        with tools._target_list_file(["a", "b", "c"]) as path:
+            with open(path) as fh:
+                self.assertEqual(fh.read().split(), ["a", "b", "c"])
+
+    def test_the_file_is_gone_after_the_with_block(self):
+        from assay import tools
+        with tools._target_list_file(["a"]) as path:
+            captured = path
+        self.assertFalse(os.path.exists(captured))
+
+    def test_cleans_up_even_when_the_body_raises(self):
+        from assay import tools
+        captured = []
+        with self.assertRaises(ValueError):
+            with tools._target_list_file(["a"]) as path:
+                captured.append(path)
+                raise ValueError("boom")
+        self.assertFalse(os.path.exists(captured[0]))
+
+    def test_a_generator_still_cleans_up_on_an_early_break(self):
+        """The real usage: `with _target_list_file(...) as p: yield from ...`
+        inside a generator function. A caller that breaks out early must
+        still trigger the cleanup, or every capped consumer (katana_crawl's
+        own max_urls break, among others) would leak a temp file per call."""
+        from assay import tools
+        captured = []
+
+        def gen():
+            with tools._target_list_file(["a", "b"]) as path:
+                captured.append(path)
+                yield from iter(["x", "y", "z"])
+
+        out = []
+        for item in gen():
+            out.append(item)
+            if item == "y":
+                break
+        self.assertEqual(out, ["x", "y"])
+        self.assertFalse(os.path.exists(captured[0]),
+                         "breaking the for loop must still run the finally")
+
+
+class ToolTargetFileWiringTests(unittest.TestCase):
+    """Every -list-taking wrapper must route through a real file, never
+    "-list -" (naabu 2.4.0's literal-file bug) and never bare stdin (nuclei's
+    subprocess-stdin bug) - this is what made a crawl of 218 live endpoints
+    silently return zero URLs, and made httpx silently fall back to the slow
+    native probe path with no visible error."""
+
+    def _fake_stream_json(self, seen_cmds, seen_contents):
+        def fake(cmd, timeout=900.0):
+            seen_cmds.append(list(cmd))
+            if "-list" in cmd:
+                path = cmd[cmd.index("-list") + 1]
+                with open(path) as fh:
+                    seen_contents.append(fh.read().split())
+            return iter(())
+        return fake
+
+    def test_httpx_probe_writes_a_real_list_file(self):
+        from assay import tools
+        seen_cmds, seen_contents = [], []
+        original = tools.stream_json
+        tools.stream_json = self._fake_stream_json(seen_cmds, seen_contents)
+        try:
+            list(tools.httpx_probe(["10.0.0.1:80", "10.0.0.2:443"], {}))
+        finally:
+            tools.stream_json = original
+        self.assertTrue(seen_cmds)
+        self.assertNotEqual(seen_cmds[0][seen_cmds[0].index("-list") + 1], "-")
+        self.assertEqual(seen_contents, [["10.0.0.1:80", "10.0.0.2:443"]])
+
+    def test_nuclei_scan_writes_a_real_list_file(self):
+        from assay import tools
+        seen_cmds, seen_contents = [], []
+        original = tools.stream_json
+        tools.stream_json = self._fake_stream_json(seen_cmds, seen_contents)
+        try:
+            list(tools.nuclei_scan(["https://10.0.0.1/"], "high,critical", {}))
+        finally:
+            tools.stream_json = original
+        self.assertTrue(seen_cmds)
+        self.assertNotEqual(seen_cmds[0][seen_cmds[0].index("-list") + 1], "-")
+        self.assertEqual(seen_contents, [["https://10.0.0.1/"]])
+
+    def test_katana_crawl_writes_a_real_list_file(self):
+        from assay import tools
+        seen_cmds, seen_contents = [], []
+        original = tools.stream_json
+        tools.stream_json = self._fake_stream_json(seen_cmds, seen_contents)
+        try:
+            tools.katana_crawl(["https://10.0.0.1/"], depth=2, tune={}, max_urls=60)
+        finally:
+            tools.stream_json = original
+        self.assertTrue(seen_cmds)
+        self.assertNotEqual(seen_cmds[0][seen_cmds[0].index("-list") + 1], "-")
+        self.assertEqual(seen_contents, [["https://10.0.0.1/"]])
+
+    def test_katana_crawl_no_longer_passes_js_crawl_unintentionally(self):
+        """-jc is katana's alias for -js-crawl, not "give me the complete
+        JSON object" as its presence here implied; -jsonl already includes
+        request.endpoint/response, which is the field this function reads."""
+        from assay import tools
+        seen_cmds = []
+        original = tools.stream_json
+        tools.stream_json = lambda cmd, timeout=900.0: (seen_cmds.append(list(cmd)), iter(()))[1]
+        try:
+            tools.katana_crawl(["https://10.0.0.1/"], depth=2, tune={}, max_urls=60)
+        finally:
+            tools.stream_json = original
+        self.assertNotIn("-jc", seen_cmds[0])
+
+    def test_dnsx_resolve_writes_a_real_list_file(self):
+        from assay import tools
+        seen_cmds, seen_contents = [], []
+        original = tools.stream_json
+        tools.stream_json = self._fake_stream_json(seen_cmds, seen_contents)
+        try:
+            list(tools.dnsx_resolve(["a.test", "b.test"]))
+        finally:
+            tools.stream_json = original
+        self.assertTrue(seen_cmds)
+        self.assertNotEqual(seen_cmds[0][seen_cmds[0].index("-list") + 1], "-")
+        self.assertEqual(seen_contents, [["a.test", "b.test"]])
+
+    def test_none_of_the_four_ever_pass_stdin_to_stream_json(self):
+        """The whole point: not stdin either, for the reason in
+        TargetListFileTests' docstring. fake() has no stdin parameter at
+        all, so any caller still passing it would raise TypeError here
+        rather than this assertion quietly proving nothing."""
+        from assay import tools
+        calls = [0]
+
+        def fake(cmd, timeout=900.0):
+            calls[0] += 1
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake
+        try:
+            list(tools.httpx_probe(["10.0.0.1:80"], {}))
+            list(tools.nuclei_scan(["https://10.0.0.1/"], "high", {}))
+            tools.katana_crawl(["https://10.0.0.1/"], depth=1, tune={}, max_urls=10)
+            list(tools.dnsx_resolve(["a.test"]))
+        finally:
+            tools.stream_json = original
+        self.assertEqual(calls[0], 4)
 
 
 class ResumableNmapHostsTests(unittest.TestCase):

@@ -8,6 +8,7 @@ a nuclei run against a /24 can otherwise produce hundreds of MB.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -1008,6 +1009,41 @@ def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict) -> float:
     return min(NAABU_TIMEOUT_CAP, NAABU_BASE_TIMEOUT + NAABU_SLACK * probes / rate)
 
 
+@contextlib.contextmanager
+def _target_list_file(items: Sequence[str]):
+    """A real file listing one target per line, cleaned up on exit.
+
+    Every tool below used to get its targets piped over stdin instead - cheap
+    when it works, but it relies on the tool auto-detecting a non-interactive
+    stdin the instant its -list/-u flag is omitted entirely. naabu and katana
+    follow that convention; nuclei has shipped bugs where stdin piped in via
+    subprocess.Popen specifically (not a real shell |, which is all "it works
+    when I test it by hand" ever proves) was not read at all
+    (projectdiscovery/nuclei#2032) - exactly how every one of these is
+    invoked here. A real file sidesteps whether stdin auto-detection holds
+    for a given tool and Python's own subprocess plumbing: every one of them
+    already supports "-list <path>" as its first-class, most-tested input
+    method, so this is one mechanism to trust instead of five.
+
+    Used as `with _target_list_file(hosts) as path: cmd = [..., "-list", path]`.
+    A generator function that stays suspended at a yield inside this `with`
+    keeps the file alive for as long as its caller is still reading results,
+    and still cleans up on an early break (the `for` loop's implicit
+    .close() raises GeneratorExit at that yield, which unwinds through this
+    `finally` the same as normal exhaustion would).
+    """
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="assay-targets-", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(items) + "\n")
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                timeout: Optional[float] = None) -> Dict[str, List[int]]:
     # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
@@ -1023,14 +1059,16 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # Budgeted per pass, not per call: the extra-ports pass is a handful
         # of ports and has no business inheriting the base sweep's allowance.
         deadline = timeout if timeout is not None else naabu_timeout(hosts, ports, tune)
-        # No -list/-host flag: naabu reads targets from stdin by default when
-        # neither is given. "-list -" does NOT mean "read stdin" here -- naabu
-        # 2.4.0 takes it literally and tries to open a file named "-", failing
-        # with "[FTL] Could not run enumeration: open -: no such file or
-        # directory" on stderr, which stream_json() never surfaces since it
-        # only looks for JSON on stdout. That silently turned every naabu scan
-        # into a no-op, and _stage_portscan() then trusted the empty result
-        # and returned without ever falling back to nmap.
+        # "-list -" does NOT mean "read stdin" -- naabu 2.4.0 takes it
+        # literally and tries to open a file named "-", failing with "[FTL]
+        # Could not run enumeration: open -: no such file or directory" on
+        # stderr, which stream_json() never surfaces since it only looks for
+        # JSON on stdout. That silently turned every naabu scan into a
+        # no-op, and _stage_portscan() then trusted the empty result and
+        # returned without ever falling back to nmap. A real file for
+        # "-list" sidesteps the whole question of whether stdin auto-detects
+        # correctly when piped in via subprocess rather than a shell |; see
+        # _target_list_file.
         cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
                "-c", str(tune.get("concurrency", 10))] + port_args
         found: Dict[str, List[int]] = {}
@@ -1038,12 +1076,12 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # honest "N of 384 swept" to report - what stream_lines counts as it
         # streams is exactly the open ports found so far, which is enough to
         # tell a working sweep from a wedged one.
-        for obj in stream_json(cmd, timeout=deadline,
-                               stdin="\n".join(hosts) + "\n"):
-            h = obj.get("host") or obj.get("ip")
-            p = obj.get("port")
-            if h and p:
-                found.setdefault(str(h), []).append(int(p))
+        with _target_list_file(hosts) as path:
+            for obj in stream_json(cmd + ["-list", path], timeout=deadline):
+                h = obj.get("host") or obj.get("ip")
+                p = obj.get("port")
+                if h and p:
+                    found.setdefault(str(h), []).append(int(p))
         return found
 
     found = _run(spec, base)
@@ -1064,6 +1102,11 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
 def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
                 timeout: float = 600.0,
                 headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+    # "-list -" doesn't mean stdin here either -- see _target_list_file. The
+    # near-silent version of this failure is worse than naabu's: httpx
+    # exiting immediately just looks like zero live endpoints, and
+    # _stage_probe falls back to the native per-candidate probe without ever
+    # printing that httpx failed, since a nonzero exit isn't an exception.
     cmd = [
         "httpx", "-silent", "-json", "-no-color",
         "-status-code", "-title", "-tech-detect", "-web-server",
@@ -1071,9 +1114,9 @@ def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
         "-timeout", "10", "-retries", "1",
         "-threads", str(tune.get("concurrency", 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
-        "-list", "-",
     ] + proxy_args("httpx", proxy) + header_args("httpx", headers)
-    return stream_json(cmd, timeout=timeout, stdin="\n".join(targets) + "\n")
+    with _target_list_file(targets) as path:
+        yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -1085,6 +1128,10 @@ def nuclei_scan(urls: List[str], severity: str, tune: Dict,
                 proxy: Optional[str] = None, extra_tags: str = "",
                 timeout: float = 3600.0,
                 headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+    # A real file, not stdin -- nuclei has shipped bugs where stdin piped in
+    # via subprocess.Popen specifically was never read at all
+    # (projectdiscovery/nuclei#2032), on top of the same "-list -" literal-
+    # file mistake naabu and httpx had. See _target_list_file.
     cmd = [
         "nuclei", "-silent", "-jsonl", "-no-color", "-disable-update-check",
         "-severity", severity,
@@ -1096,12 +1143,12 @@ def nuclei_scan(urls: List[str], severity: str, tune: Dict,
         "-irr",
         # Templates that fire on generic pages produce most of nuclei's noise.
         "-exclude-tags", "dos,fuzz,intrusive,honeypot",
-        "-list", "-",
     ]
     if extra_tags:
         cmd += ["-tags", extra_tags]
     cmd += proxy_args("nuclei", proxy) + header_args("nuclei", headers)
-    return stream_json(cmd, timeout=timeout, stdin="\n".join(urls) + "\n")
+    with _target_list_file(urls) as path:
+        yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
 def nuclei_templates_present() -> bool:
@@ -1118,19 +1165,32 @@ def nuclei_templates_present() -> bool:
 def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
                  proxy: Optional[str] = None, timeout: float = 600.0,
                  headers: Optional[Dict[str, str]] = None) -> List[dict]:
+    # A real file, not stdin -- "-list -" doesn't mean stdin here (confirmed
+    # against katana's own docs: -list takes a path, and katana reads stdin
+    # only when -u/-list is omitted entirely). This is what silently
+    # produced zero URLs from a crawl of hundreds of live endpoints - katana
+    # exits immediately trying to open a file literally named "-", and a
+    # nonzero exit isn't an exception, so nothing surfaced beyond
+    # activity.log. See _target_list_file.
+    #
+    # -jc was also removed: it is katana's alias for -js-crawl (crawl
+    # JavaScript files for endpoints), not a "give me the complete JSON
+    # object" flag as its presence here implied - -jsonl already includes
+    # request.endpoint/response by default, which is the field this
+    # function reads.
     cmd = [
         "katana", "-silent", "-jsonl", "-no-color",
         "-d", str(depth), "-c", str(min(tune.get("concurrency", 10), 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
-        "-timeout", "10", "-jc", "-kf", "robotstxt,sitemapxml",
+        "-timeout", "10", "-kf", "robotstxt,sitemapxml",
         "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
-        "-list", "-",
     ] + proxy_args("katana", proxy) + header_args("katana", headers)
     out: List[dict] = []
-    for obj in stream_json(cmd, timeout=timeout, stdin="\n".join(urls) + "\n"):
-        out.append(obj)
-        if len(out) >= max_urls:
-            break
+    with _target_list_file(urls) as path:
+        for obj in stream_json(cmd + ["-list", path], timeout=timeout):
+            out.append(obj)
+            if len(out) >= max_urls:
+                break
     return out
 
 
@@ -1141,8 +1201,11 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
 
 
 def dnsx_resolve(hosts: List[str], timeout: float = 300.0) -> Iterator[dict]:
-    cmd = ["dnsx", "-silent", "-json", "-a", "-cname", "-resp", "-list", "-"]
-    return stream_json(cmd, timeout=timeout, stdin="\n".join(hosts) + "\n")
+    # A real file, not stdin -- same "-list -" mistake as naabu/httpx/nuclei/
+    # katana above. See _target_list_file.
+    cmd = ["dnsx", "-silent", "-json", "-a", "-cname", "-resp"]
+    with _target_list_file(hosts) as path:
+        yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
 def subfinder_enum(domain: str, timeout: float = 300.0) -> List[str]:
