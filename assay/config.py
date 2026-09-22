@@ -285,6 +285,10 @@ class Config:
     targets: List[str] = field(default_factory=list)
     profile: str = "standard"
     out_dir: str = "./assay-out"
+    # --resume: skip re-running nmap against a host it already finished in a
+    # prior invocation against this same out_dir, recovering results even
+    # from a truncated (killed-mid-scan) nmap.xml. See Engine._apply_resume.
+    resume: bool = False
     # Engagement codename. Targets are usually known by a codename rather than
     # a hostname, and one codename covers many hosts - so it, not the first
     # target, is the right thing to file a run under.

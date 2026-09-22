@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from assay.models import Finding
 from assay.store import Store
-from assay.tools import human_duration
+from assay.tools import human_duration, NMAP_XML_FILES
 
 SEV_COLOR = {
     "critical": "#ff4d6d", "high": "#ff8c42", "medium": "#ffd166",
@@ -383,11 +383,7 @@ def _nmap_section(out_dir: str) -> str:
     open on its own, not a widget to wedge into this page.
     """
     files = []
-    for name, label in (
-        ("nmap.xml", "base scan"), ("nmap-extra.xml", "AI/ML port scan"),
-        ("nmap-discovered.xml", "reverse-DNS-discovered hosts"),
-        ("nmap-discovered-extra.xml", "reverse-DNS-discovered hosts, AI/ML ports"),
-    ):
+    for name, label in NMAP_XML_FILES:
         path = os.path.join(out_dir, "raw", name)
         if os.path.exists(path):
             files.append((name, label, path))

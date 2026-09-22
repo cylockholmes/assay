@@ -969,6 +969,109 @@ class PacingTests(unittest.TestCase):
         self.assertIsNone(HttpClient(Config(rate_per_host=0))._host_limiter("a.test"))
 
 
+class _FakeRawStream:
+    """Stands in for r.raw: .read() either raises or returns a fixed body."""
+
+    def __init__(self, body: bytes = b"", raises=None):
+        self.body = body
+        self.raises = raises
+        self.read_calls = 0
+
+    def read(self, n, decode_content=True):
+        self.read_calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.body
+
+
+class _FakeResponse:
+    """Stands in for what session.request(..., stream=True) returns."""
+
+    def __init__(self, raw: "_FakeRawStream", status=200):
+        self.raw = raw
+        self.status_code = status
+        self.headers = {}
+        self.url = "http://10.0.0.1/"
+        self.history = []
+        self.encoding = "utf-8"
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
+
+
+class _FakeSession:
+    """Replaces HttpClient._session(). Hands back one canned response per call."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def request(self, method, url, **kw):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+class HttpClientRawReadTimeoutTests(unittest.TestCase):
+    """r.raw.read() bypasses requests' own exception translation.
+
+    A body that stops answering mid-stream raises urllib3.exceptions.
+    ReadTimeoutError (or ProtocolError), confirmed by direct reproduction
+    against a real socket - and that is not a requests.RequestException, so
+    catching only the latter let it escape uncaught. It surfaced several
+    layers up, several stages removed from HttpClient, as a bare
+    "ReadTimeoutError" that made a scan with many black-holing hosts read as
+    having died in the middle of the probe stage rather than losing one slow
+    candidate.
+    """
+
+    def _client(self, session):
+        from assay.config import Config
+        from assay.net import HttpClient
+        c = HttpClient(Config())
+        c._session = lambda: session
+        return c
+
+    def test_a_read_timeout_is_caught_not_propagated(self):
+        import urllib3
+        raw = _FakeRawStream(raises=urllib3.exceptions.ReadTimeoutError(
+            None, "http://10.0.0.1/", "Read timed out."))
+        session = _FakeSession([_FakeResponse(raw), _FakeResponse(raw)])
+        resp = self._client(session).get("http://10.0.0.1/")
+        self.assertEqual(resp.status, 0)
+        self.assertIn("ReadTimeoutError", resp.error)
+
+    def test_the_connection_is_still_closed_on_a_raised_read(self):
+        """Reached via r.raw.read() directly, so close() is not automatic."""
+        import urllib3
+        raw = _FakeRawStream(raises=urllib3.exceptions.ReadTimeoutError(
+            None, "http://10.0.0.1/", "Read timed out."))
+        first = _FakeResponse(raw)
+        second = _FakeResponse(raw)
+        session = _FakeSession([first, second])
+        self._client(session).get("http://10.0.0.1/")
+        self.assertEqual(first.closed, 1, "a leaked connection empties an 8-slot pool")
+        self.assertEqual(second.closed, 1)
+
+    def test_a_timeout_on_the_first_attempt_still_retries(self):
+        """Escaping the except clause meant no retry at all, not just no logging."""
+        import urllib3
+        bad = _FakeRawStream(raises=urllib3.exceptions.ProtocolError("Connection broken"))
+        good = _FakeRawStream(body=b"hello")
+        session = _FakeSession([_FakeResponse(bad), _FakeResponse(good)])
+        resp = self._client(session).get("http://10.0.0.1/")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.body, "hello")
+        self.assertEqual(session.calls, 2)
+
+    def test_a_clean_read_is_unaffected(self):
+        raw = _FakeRawStream(body=b"ok")
+        session = _FakeSession([_FakeResponse(raw)])
+        resp = self._client(session).get("http://10.0.0.1/")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.body, "ok")
+
+
 class ImpactClassTests(unittest.TestCase):
     def test_every_module_declares_a_valid_class(self):
         from assay.modules import IMPACT_CLASSES, all_modules
@@ -1596,6 +1699,54 @@ class ToolProgressLabelTests(unittest.TestCase):
         ctx.say("finding", "CHASE  something  [host]")
         ctx.tool_progress("katana: running 1m10s")
         self.assertEqual(seen[-1][0], "crawl")
+
+    def test_an_error_does_not_steal_the_stage_label_either(self):
+        """A failed candidate reports through "error"; it is still the probe
+        stage that is running, and later heartbeats must say so - not "error",
+        which on a host that keeps failing would otherwise stick forever."""
+        ctx, seen = self._ctx()
+        ctx.say("probe", "probing 2187 host:port candidate(s)")
+        ctx.say("error", "probe failed: ReadTimeoutError")
+        ctx.tool_progress("nuclei: running 1m10s")
+        self.assertEqual(seen[-1][0], "probe")
+
+
+class DashboardErrorStageTests(unittest.TestCase):
+    """Same bug, the terminal-facing half: the header must not read "stage
+    error" for as long as failures keep recurring."""
+
+    def test_an_error_message_does_not_relabel_the_header(self):
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("probe", "probing 2187 host:port candidate(s)")
+        d.progress("error", "probe failed: ReadTimeoutError")
+        self.assertEqual(d.stage, "probe")
+
+    def test_the_stage_clock_does_not_reset_on_an_error(self):
+        import time
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("probe", "probing 2187 host:port candidate(s)")
+        started = d.stage_started
+        time.sleep(0.05)
+        d.progress("error", "probe failed: ReadTimeoutError")
+        self.assertEqual(d.stage_started, started)
+
+    def test_an_error_is_still_logged(self):
+        """Silencing the mislabel must not silence the failure itself."""
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("probe", "probing 2187 host:port candidate(s)")
+        d.progress("error", "probe failed: ReadTimeoutError")
+        self.assertTrue(any("probe failed" in line for line in d.log))
+
+    def test_a_real_stage_after_an_error_still_relabels_normally(self):
+        from assay.ui import Dashboard
+        d = Dashboard(1, "standard", quiet=True)
+        d.progress("probe", "probing 2187 host:port candidate(s)")
+        d.progress("error", "probe failed: ReadTimeoutError")
+        d.progress("analyze", "running secrets")
+        self.assertEqual(d.stage, "analyze")
 
 
 class StreamTimeoutTests(unittest.TestCase):
@@ -3979,6 +4130,85 @@ class NmapXmlPrefixTests(unittest.TestCase):
         self.assertFalse(any(v.endswith(("/nmap.xml",)) for v in oX_values))
 
 
+class ResumeCliWiringTests(unittest.TestCase):
+    """--resume has to actually reach Config.resume, not just parse."""
+
+    def test_the_flag_reaches_config(self):
+        from assay.cli import build_parser, make_config
+        p = build_parser()
+        args = p.parse_args(["scan", "10.0.0.1", "-n", "wiring-on", "-q", "--resume"])
+        self.assertTrue(args.resume)
+        self.assertTrue(make_config(args).resume)
+
+    def test_it_defaults_off(self):
+        from assay.cli import build_parser, make_config
+        p = build_parser()
+        args = p.parse_args(["scan", "10.0.0.1", "-n", "wiring-off", "-q"])
+        self.assertFalse(args.resume)
+        self.assertFalse(make_config(args).resume)
+
+
+class ResumableNmapHostsTests(unittest.TestCase):
+    """tools.resumable_nmap_hosts() is the whole mechanism --resume rests on."""
+
+    def _dir_with(self, xml_body):
+        import os, tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "raw"), exist_ok=True)
+        with open(os.path.join(d, "raw", "nmap.xml"), "w", encoding="utf-8") as fh:
+            fh.write(xml_body)
+        return d
+
+    HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<nmaprun scanner="nmap" args="nmap -sV" start="1700000000">\n')
+    HOST = ('<host><address addr="10.0.0.%d" addrtype="ipv4"/><ports>'
+            '<port protocol="tcp" portid="%d"><state state="open"/>'
+            '<service name="%s"/></port></ports></host>\n')
+
+    def test_recovers_hosts_from_a_killed_scan_the_same_as_a_finished_one(self):
+        """The scan that motivated this: killed at 90%%, nothing salvaged
+        before parse_nmap_xml's own fix, and now the resume path on top of
+        it - two hosts complete, no closing tag at all."""
+        from assay import tools
+        d = self._dir_with(self.HEAD + self.HOST % (1, 443, "https")
+                           + self.HOST % (2, 80, "http"))
+        result = tools.resumable_nmap_hosts(d)
+        self.assertEqual(sorted(result), ["10.0.0.1", "10.0.0.2"])
+
+    def test_no_file_yet_is_not_an_exception(self):
+        import tempfile
+        from assay import tools
+        self.assertEqual(tools.resumable_nmap_hosts(tempfile.mkdtemp()), {})
+
+    def test_reads_the_prefix_it_is_given(self):
+        import os
+        from assay import tools
+        d = self._dir_with(self.HEAD + self.HOST % (1, 443, "https") + "</nmaprun>\n")
+        os.rename(os.path.join(d, "raw", "nmap.xml"),
+                 os.path.join(d, "raw", "nmap-discovered.xml"))
+        self.assertEqual(tools.resumable_nmap_hosts(d), {})
+        self.assertEqual(sorted(tools.resumable_nmap_hosts(d, "nmap-discovered")),
+                         ["10.0.0.1"])
+
+
+class NmapXmlFileListTests(unittest.TestCase):
+    """One list, used by both the report and NmapView - not two copies that
+    can drift when a "-previous" sibling is added for --resume."""
+
+    def test_every_base_file_has_a_previous_sibling(self):
+        from assay import tools
+        names = {n for n, _ in tools.NMAP_XML_FILES}
+        for base in ("nmap.xml", "nmap-extra.xml",
+                     "nmap-discovered.xml", "nmap-discovered-extra.xml"):
+            self.assertIn(base, names)
+            self.assertIn(base.replace(".xml", "-previous.xml"), names)
+
+    def test_report_and_nmapview_read_the_same_list(self):
+        import assay.report as report_mod
+        from assay import tools
+        self.assertIs(report_mod.NMAP_XML_FILES, tools.NMAP_XML_FILES)
+
+
 class CutOffNmapScanTests(unittest.TestCase):
     """A scan stopped by its timeout must keep the hosts it already finished.
 
@@ -4052,6 +4282,146 @@ class CutOffNmapScanTests(unittest.TestCase):
             result = tools.parse_nmap_xml(path)
         self.assertEqual(sorted(result), ["10.0.0.1"])
         self.assertEqual(told, [])
+
+
+class PortscanSkipsNmapWhenFullyResumedTests(unittest.TestCase):
+    """The point of --resume: a fully-covered scan must not touch nmap/naabu
+    at all, not just narrow their input to zero and call them anyway."""
+
+    def test_nmap_and_naabu_are_never_invoked(self):
+        import os, tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        from assay import tools
+
+        out = tempfile.mkdtemp()
+        raw = os.path.join(out, "raw")
+        os.makedirs(raw, exist_ok=True)
+        with open(os.path.join(raw, "nmap.xml"), "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0"?><nmaprun args="nmap -sV" start="1">\n'
+                    '<host><address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+                    '<port protocol="tcp" portid="443"><state state="open"/>'
+                    '<service name="https"/></port></ports></host>\n'
+                    '</nmaprun>\n')
+        eng = Engine(Config(targets=["10.0.0.1"], out_dir=out, resume=True, journal=False))
+
+        called = []
+        original_nmap, original_naabu = tools.nmap_scan, tools.naabu_scan
+        tools.nmap_scan = lambda *a, **k: called.append("nmap") or {}
+        tools.naabu_scan = lambda *a, **k: called.append("naabu") or {}
+        try:
+            eng._stage_resolve()
+            eng._stage_portscan()
+        finally:
+            tools.nmap_scan, tools.naabu_scan = original_nmap, original_naabu
+        self.assertEqual(called, [], "a fully-covered scan must skip both")
+        self.assertEqual([p.port for p in eng.ctx.targets[0].ports], [443],
+                         "and still end up with the recovered port data")
+
+
+class ApplyResumeTests(unittest.TestCase):
+    """Engine._apply_resume: the actual --resume mechanism, end to end
+    against a real Engine and a real (small) nmap.xml on disk."""
+
+    def _engine(self):
+        import tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        return Engine(Config(targets=["10.0.0.1", "10.0.0.2"], out_dir=self.out,
+                             resume=True, journal=False))
+
+    def _write_xml(self, eng, body, name="nmap.xml"):
+        import os
+        raw = os.path.join(eng.cfg.out_dir, "raw")
+        os.makedirs(raw, exist_ok=True)
+        with open(os.path.join(raw, name), "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<nmaprun scanner="nmap" args="nmap -sV" start="1700000000">\n')
+    HOST = ('<host><address addr="10.0.0.%d" addrtype="ipv4"/><ports>'
+            '<port protocol="tcp" portid="%d"><state state="open"/>'
+            '<service name="%s"/></port></ports></host>\n')
+
+    def test_a_covered_host_is_dropped_from_the_work_left_to_do(self):
+        from assay.models import Target
+        eng = self._engine()
+        self._write_xml(eng, self.HEAD + self.HOST % (1, 443, "https"))  # killed, no closing tag
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        t2 = Target(raw="10.0.0.2", host="10.0.0.2", ip="10.0.0.2")
+        remaining = eng._apply_resume([t1, t2], "nmap")
+        self.assertEqual([t.host for t in remaining], ["10.0.0.2"],
+                         "the recovered host must not be re-scanned")
+        self.assertEqual([p.port for p in t1.ports], [443],
+                         "the recovered host's ports must still be populated")
+
+    def test_the_recovered_host_is_saved_to_the_store(self):
+        from assay.models import Target
+        eng = self._engine()
+        self._write_xml(eng, self.HEAD + self.HOST % (1, 443, "https"))
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        eng._apply_resume([t1], "nmap")
+        rows = eng.store.host_rows()
+        self.assertEqual(len(rows), 1)
+
+    def test_nothing_on_disk_means_nothing_is_skipped(self):
+        from assay.models import Target
+        eng = self._engine()
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        remaining = eng._apply_resume([t1], "nmap")
+        self.assertEqual(remaining, [t1])
+
+    def test_a_host_scanned_and_found_completely_closed_is_rescanned(self):
+        """Documented, deliberate: parse_nmap_xml drops a host with no ports
+        and no hostname, so resume cannot tell "clean" from "never scanned"
+        and conservatively re-scans it. Wasteful, never wrong."""
+        from assay.models import Target
+        eng = self._engine()
+        empty_host = ('<host><address addr="10.0.0.9" addrtype="ipv4"/>'
+                     '<ports></ports></host>\n')
+        self._write_xml(eng, self.HEAD + self.HOST % (1, 443, "https") + empty_host)
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        t9 = Target(raw="10.0.0.9", host="10.0.0.9", ip="10.0.0.9")
+        remaining = eng._apply_resume([t1, t9], "nmap")
+        self.assertEqual([t.host for t in remaining], ["10.0.0.9"])
+
+    def test_every_host_covered_leaves_nothing_to_scan(self):
+        from assay.models import Target
+        eng = self._engine()
+        self._write_xml(eng, self.HEAD + self.HOST % (1, 443, "https") + "</nmaprun>\n")
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        self.assertEqual(eng._apply_resume([t1], "nmap"), [])
+
+
+class PreservePreviousXmlTests(unittest.TestCase):
+    """The file resume is about to overwrite must not simply vanish."""
+
+    def _engine(self):
+        import tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        return Engine(Config(targets=["10.0.0.1"], out_dir=self.out,
+                             resume=True, journal=False))
+
+    def test_an_existing_file_is_copied_before_it_would_be_overwritten(self):
+        import os
+        eng = self._engine()
+        raw = os.path.join(eng.cfg.out_dir, "raw")
+        os.makedirs(raw, exist_ok=True)
+        with open(os.path.join(raw, "nmap.xml"), "w") as fh:
+            fh.write("original content")
+        eng._preserve_previous_xml("nmap")
+        with open(os.path.join(raw, "nmap-previous.xml")) as fh:
+            self.assertEqual(fh.read(), "original content")
+        with open(os.path.join(raw, "nmap.xml")) as fh:
+            self.assertEqual(fh.read(), "original content",
+                             "preserving must not touch the original either")
+
+    def test_nothing_to_preserve_is_not_an_exception(self):
+        eng = self._engine()
+        eng._preserve_previous_xml("nmap")   # no raw/nmap.xml exists yet
 
 
 class CutOffToolTests(unittest.TestCase):

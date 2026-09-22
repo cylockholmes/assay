@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "report; asked for interactively when omitted")
     s.add_argument("--flat", action="store_true",
                    help="write straight into --out instead of a per-engagement subfolder")
+    s.add_argument("--resume", action="store_true",
+                   help="reuse -n's existing raw/nmap.xml instead of re-scanning "
+                        "ports nmap already finished - recovers hosts even from a "
+                        "scan that was killed mid-run; hosts not in that file are "
+                        "still scanned fresh")
     s.add_argument("--scope", metavar="FILE_OR_LIST",
                    help="override the scope, when what may be reached differs "
                         "from what is being scanned. Defaults to the targets.")
@@ -433,6 +438,7 @@ def make_config(args) -> Config:
         targets=targets,
         profile=args.profile,
         out_dir=args.out,
+        resume=getattr(args, "resume", False),
         scope=scope,
         concurrency=args.concurrency or tune["concurrency"],
         rate=args.rate or tune["rate"],

@@ -37,9 +37,12 @@ class Context:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def say(self, stage: str, msg: str, advance: int = 0) -> None:
-        # "finding" is a channel rather than a stage (the dashboard routes it
-        # to the hits table), so it must not become the label for tool output.
-        if stage != "finding":
+        # "finding" and "error" are event channels, not pipeline stages (the
+        # dashboard routes "finding" to the hits table; "error" reports a
+        # failure inside whatever stage is actually running). Neither may
+        # become the label for tool output, or an ambient heartbeat gets
+        # mislabelled the moment one candidate fails.
+        if stage not in ("finding", "error"):
             self.stage = stage
         if self.progress:
             try:
