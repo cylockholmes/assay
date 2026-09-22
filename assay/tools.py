@@ -1201,7 +1201,14 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
         "katana", "-silent", "-jsonl", "-no-color",
         "-d", str(depth), "-c", str(min(tune.get("concurrency", 10), 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
-        "-timeout", "10", "-kf", "robotstxt,sitemapxml",
+        # -kf is a single choice, not a comma-list like -ef below: reproduced
+        # against a real installed katana, "-kf robotstxt,sitemapxml" is
+        # rejected outright ("invalid value ... allowed values are , all,
+        # robotstxt, sitemapxml"), exit code 2, in well under a second. That
+        # is what actually produced "crawl: 0 URL(s)" from a real crawl of
+        # 155 live endpoints - not an empty crawl, a crawl that never ran.
+        # "all" is the choice that covers both robots.txt and sitemap.xml.
+        "-timeout", "10", "-kf", "all",
         "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
     ] + proxy_args("katana", proxy) + header_args("katana", headers)
     out: List[dict] = []

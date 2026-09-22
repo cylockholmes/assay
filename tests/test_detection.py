@@ -4281,6 +4281,31 @@ class ToolTargetFileWiringTests(unittest.TestCase):
             tools.stream_json = original
         self.assertNotIn("-jc", seen_cmds[0])
 
+    def test_kf_is_a_single_choice_not_a_comma_list(self):
+        """Reproduced against a real installed katana: "-kf
+        robotstxt,sitemapxml" is rejected outright ("invalid value ...
+        allowed values are , all, robotstxt, sitemapxml"), exit code 2, in
+        well under a second -- indistinguishable from a real empty crawl
+        until you check the exit code, which is exactly what "crawl: 0
+        URL(s)" against 155 live endpoints turned out to be. "all" is the
+        single choice that covers both robots.txt and sitemap.xml."""
+        from assay import tools
+        seen_cmds = []
+        original = tools.stream_json
+
+        def fake(cmd, timeout=900.0):
+            seen_cmds.append(list(cmd))
+            return iter(())
+
+        tools.stream_json = fake
+        try:
+            tools.katana_crawl(["https://10.0.0.1/"], depth=2, tune={}, max_urls=60)
+        finally:
+            tools.stream_json = original
+        cmd = seen_cmds[0]
+        self.assertIn("-kf", cmd)
+        self.assertEqual(cmd[cmd.index("-kf") + 1], "all")
+
     def test_dnsx_resolve_writes_a_real_list_file(self):
         from assay import tools
         seen_cmds, seen_contents = [], []
