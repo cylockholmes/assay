@@ -4752,6 +4752,82 @@ class NmapHostgroupTests(unittest.TestCase):
         self.assertNotIn("--max-hostgroup", seen[0])
 
 
+class KatanaTimeoutTests(unittest.TestCase):
+    """katana had the same flat-timeout bug as nmap, naabu and httpx: a
+    crawl of 359 endpoints hit a flat 600s cap at 317 URLs, right after the
+    -kf fix finally let it run for real."""
+
+    def test_it_grows_with_the_candidate_count(self):
+        from assay.tools import katana_timeout
+        self.assertGreater(katana_timeout(["h"] * 359, 2, {}),
+                           katana_timeout(["h"], 2, {}))
+
+    def test_it_grows_with_depth(self):
+        from assay.tools import katana_timeout
+        self.assertGreater(katana_timeout(["h"] * 100, 3, {}),
+                           katana_timeout(["h"] * 100, 1, {}))
+
+    def test_the_run_that_hit_600s_would_now_get_more(self):
+        from assay.tools import katana_timeout
+        self.assertGreater(katana_timeout(["h"] * 359, 2, {}), 600.0)
+
+    def test_more_threads_shortens_the_worst_case(self):
+        from assay.tools import katana_timeout
+        few = katana_timeout(["h"] * 100, 2, {"concurrency": 2})
+        many = katana_timeout(["h"] * 100, 2, {"concurrency": 10})
+        self.assertGreater(few, many)
+
+    def test_concurrency_above_katanas_own_10_cap_does_not_help_further(self):
+        """-c is capped at 10 in the command itself; the budget must agree."""
+        from assay.tools import katana_timeout
+        at_cap = katana_timeout(["h"] * 100, 2, {"concurrency": 10})
+        above_cap = katana_timeout(["h"] * 100, 2, {"concurrency": 50})
+        self.assertEqual(at_cap, above_cap)
+
+    def test_a_zero_or_missing_concurrency_does_not_divide_by_zero(self):
+        from assay.tools import katana_timeout
+        self.assertGreater(katana_timeout(["h"], 2, {"concurrency": 0}), 0)
+        self.assertGreater(katana_timeout(["h"], 2, {}), 0)
+
+    def test_it_is_bounded(self):
+        from assay.tools import katana_timeout, KATANA_TIMEOUT_CAP
+        self.assertEqual(katana_timeout(["h"] * 999999, 5, {}), KATANA_TIMEOUT_CAP)
+
+    def test_an_explicit_timeout_still_wins(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream_json(cmd, timeout=900.0):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake_stream_json
+        try:
+            tools.katana_crawl(["https://10.0.0.1/"], depth=2, tune={},
+                               max_urls=60, timeout=42.0)
+        finally:
+            tools.stream_json = original
+        self.assertEqual(seen, [42.0])
+
+    def test_no_explicit_timeout_uses_the_scaled_default(self):
+        from assay import tools
+        seen = []
+
+        def fake_stream_json(cmd, timeout=900.0):
+            seen.append(timeout)
+            return iter(())
+
+        original = tools.stream_json
+        tools.stream_json = fake_stream_json
+        try:
+            tools.katana_crawl(["h"] * 359, depth=2, tune={}, max_urls=60)
+        finally:
+            tools.stream_json = original
+        self.assertEqual(seen, [tools.katana_timeout(["h"] * 359, 2, {})])
+        self.assertGreater(seen[0], 600.0)
+
+
 class HttpxTimeoutTests(unittest.TestCase):
     """httpx had the same flat-timeout bug as nmap and naabu: a run of 2187
     speculative host:port candidates hit a flat 600s cap at 155 confirmed
