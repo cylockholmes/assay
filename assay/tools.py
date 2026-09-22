@@ -105,10 +105,15 @@ class Proc:
     err: str
     cmd: List[str] = field(default_factory=list)
     timed_out: bool = False
+    # Cut short by the operator's skip key, not a deadline. A separate flag
+    # from timed_out rather than reusing it: a caller that wants to tell "the
+    # tool was slow" apart from "we chose to move on" - for its own logging,
+    # say - needs the distinction preserved, not collapsed into one bit.
+    skipped: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.rc == 0 and not self.timed_out
+        return self.rc == 0 and not self.timed_out and not self.skipped
 
     def cmdline(self) -> str:
         return " ".join(self.cmd)
@@ -136,6 +141,16 @@ PROGRESS = None
 
 # How long a command may say nothing before it is indistinguishable from a hang.
 HEARTBEAT = 5.0
+
+# Set by the engine's key listener when the operator asks to move past
+# whatever the current stage is doing (assay.ui.KeyListener). Left set
+# across multiple calls deliberately: a stage that is many tool invocations
+# deep - content discovery running ffuf once per web target, say - should
+# have all of its remaining invocations wave through immediately rather
+# than needing one skip press per target. Cleared once, at the start of the
+# next stage (see Engine._run_stage), so a skip never leaks into later work
+# the operator never asked to cut.
+SKIP = threading.Event()
 
 # Binary -> a parser turning one of its stdout lines into a status phrase.
 # Only for tools whose stdout is progress rather than results; everything else
@@ -177,7 +192,28 @@ class _Heartbeat:
         # assignment of an int or a str, so no lock is needed for either.
         self.count = 0
         self.detail = ""
+        # Set by this thread, read by the caller once its blocking call
+        # returns - same reasoning as count/detail above, just the other
+        # direction. Distinguishes "the operator moved us on" from a normal
+        # finish or a deadline cutoff, which look identical from the
+        # caller's side otherwise (both are just "the process ended").
+        self.was_skipped = False
+        self._proc: Optional["subprocess.Popen"] = None
         self._done = threading.Event()
+
+    def bind(self, proc: "subprocess.Popen") -> "_Heartbeat":
+        """Give this heartbeat the process it is watching.
+
+        Without this, only the caller's own read loop - if it has one - can
+        ever notice a cutoff, and run()'s single blocking subprocess call has
+        no such loop at all: nothing would read stdout line by line to give
+        it a chance to check anything mid-flight. With it, this thread's own
+        timer can act on a deadline or a skip request directly, which is what
+        makes a fully-blocking call like run()'s interruptible in the first
+        place, not just refuse the *next* one.
+        """
+        self._proc = proc
+        return self
 
     def start(self) -> "_Heartbeat":
         if PROGRESS is not None:
@@ -199,6 +235,12 @@ class _Heartbeat:
 
     def _loop(self) -> None:
         while not self._done.wait(self.every):
+            if SKIP.is_set() and self._proc is not None:
+                self.was_skipped = True
+                _say("%s: skipped - moving on to the next stage" % self.name,
+                     tick=False)
+                _stop(self._proc)
+                return
             text = self._text()
             _say("%s: running %s%s" % (self.name,
                                        human_duration(time.time() - self.started),
@@ -336,24 +378,42 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
             proc_env = dict(os.environ)
             proc_env.update(env_extra)
     argv = bridge(argv)
-    # Nothing is readable until the process exits, so the heartbeat's clock is
-    # all there is to report - which is still the difference between ffuf
-    # working through a 60k wordlist and ffuf having died.
-    hb = _Heartbeat(cmd).start()
+    if SKIP.is_set():
+        # The operator already asked to move past this stage before this
+        # call even started - honour it immediately rather than spawning
+        # something only to kill it moments later.
+        _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
+             tick=False)
+        return Proc(rc=-1, out="", err="skipped by operator", cmd=list(cmd), skipped=True)
     try:
-        p = subprocess.run(
-            argv, input=stdin, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd, env=proc_env,
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, cwd=cwd, env=proc_env,
         )
-        if p.returncode != 0:
-            _record_failure(cmd, p.stderr)
-        return Proc(rc=p.returncode, out=p.stdout, err=p.stderr, cmd=list(cmd))
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout or ""
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
+    except OSError as exc:
+        _record_failure(cmd, str(exc))
+        return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
+    # Bound to a real Popen (unlike the subprocess.run() this replaced), so
+    # this thread's own timer can act on a deadline or a skip directly - the
+    # only way a single fully-blocking call like this one can be interrupted
+    # mid-flight at all, since nothing here reads output line by line to
+    # give a check-in point of its own the way stream_lines() has.
+    hb = _Heartbeat(cmd).bind(proc).start()
+    try:
+        out, err = proc.communicate(input=stdin, timeout=timeout)
+        if hb.was_skipped:
+            return Proc(rc=proc.returncode, out=out or "", err=err or "skipped by operator",
+                        cmd=list(cmd), skipped=True)
+        if proc.returncode != 0:
+            _record_failure(cmd, err)
+        return Proc(rc=proc.returncode, out=out or "", err=err or "", cmd=list(cmd))
+    except subprocess.TimeoutExpired:
+        # Terminate, not kill: matches stream_lines() - a tool writing a
+        # result file needs the chance to close it.
+        _stop(proc)
+        out, err = proc.communicate()
         hb.timed_out(timeout)
-        return Proc(rc=-1, out=out, err="timeout after %ss" % timeout,
+        return Proc(rc=-1, out=out or "", err="timeout after %ss" % timeout,
                     cmd=list(cmd), timed_out=True)
     except (OSError, ValueError) as exc:
         _record_failure(cmd, str(exc))
@@ -366,6 +426,12 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                  stdin: str = "") -> Iterator[str]:
     """Yield stdout lines as they arrive. Keeps peak memory flat."""
     env.augment_path()
+    if SKIP.is_set():
+        # See run()'s identical check: honour a skip already in effect
+        # before spawning anything, rather than starting only to kill it.
+        _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
+             tick=False)
+        return
     _record(cmd)
     # A real file rather than a pipe for stderr: a chatty tool could otherwise
     # fill a pipe's OS buffer and deadlock while we're only draining stdout.
@@ -386,7 +452,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             proc.stdin.close()
         except OSError:
             pass
-    hb = _Heartbeat(cmd)
+    # Bound to the real process: a tool that says nothing at all only ever
+    # gets noticed by this thread's own timer, not by the per-line checks
+    # below, which never run if there is no line to run them on.
+    hb = _Heartbeat(cmd).bind(proc)
     status = _LINE_STATUS.get(hb.name)
     try:
         assert proc.stdout is not None
@@ -407,6 +476,12 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                 if status is not None:
                     hb.detail = status(line) or hb.detail
                 yield line
+            if hb.was_skipped:
+                # The heartbeat thread already stopped the process; just stop
+                # reading from it. Checked here too, not only relying on that
+                # thread's own timer, so a chatty tool notices between two
+                # lines rather than waiting up to a whole heartbeat interval.
+                break
             if time.time() > deadline:
                 # The caller has already consumed everything up to here and
                 # cannot otherwise tell a finished tool from a cut-off one, so
@@ -430,9 +505,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             _stop(proc, grace=5.0)
-        # A kill of our own is recorded above; the returncode it produces is
-        # the same event, not a second failure.
-        if proc.returncode and not timed_out:
+        # A kill of our own - by the deadline above or by a skip - is
+        # recorded there; the returncode it produces is the same event, not
+        # a second failure.
+        if proc.returncode and not timed_out and not hb.was_skipped:
             stderr_buf.seek(0)
             _record_failure(cmd, stderr_buf.read())
         stderr_buf.close()

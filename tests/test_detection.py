@@ -8,6 +8,7 @@ the tool usable.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import sys
@@ -1670,6 +1671,133 @@ class ToolProgressSinkTests(unittest.TestCase):
                          "nothing is running, so nothing should report running")
 
 
+@contextlib.contextmanager
+def _skip_after(delay):
+    """Set tools.SKIP from a background thread after `delay`s, mimicking the
+    operator's key press arriving mid-call. Always clears it afterward -
+    SKIP is a module-level singleton, so a test that left it set would leak
+    into whichever test runs next."""
+    import threading
+    from assay import tools
+    timer = threading.Timer(delay, tools.SKIP.set)
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+        tools.SKIP.clear()
+
+
+class SkipRunTests(unittest.TestCase):
+    """tools.run() (ffuf's own primitive): a single blocking subprocess.run()
+    call with no line-by-line read loop of its own to check anything mid-
+    flight - the case that motivated binding the heartbeat to a real Popen
+    instead of just timing subprocess.run()."""
+
+    CHATTY = ["bash", "-c", "sleep 5"]
+
+    def tearDown(self):
+        from assay import tools
+        tools.SKIP.clear()
+
+    def test_a_skip_mid_call_cuts_it_short(self):
+        import time
+        from assay import tools
+        told = []
+        t = time.time()
+        with _sink(told), _fast_heartbeat(), _skip_after(0.15):
+            p = tools.run(self.CHATTY, timeout=30.0)
+        self.assertLess(time.time() - t, 5.0, "must not wait out the full sleep")
+        self.assertTrue(p.skipped)
+        self.assertFalse(p.ok)
+        self.assertTrue(any("skipped" in m for m, _tick in told), told)
+
+    def test_a_skip_already_set_is_honoured_before_spawning(self):
+        """No wait at all - and nothing to clean up, since nothing started."""
+        import time
+        from assay import tools
+        told = []
+        tools.SKIP.set()
+        t = time.time()
+        with _sink(told):
+            p = tools.run(self.CHATTY, timeout=30.0)
+        self.assertLess(time.time() - t, 1.0)
+        self.assertTrue(p.skipped)
+        self.assertEqual(p.err, "skipped by operator")
+
+    def test_no_skip_runs_normally(self):
+        from assay import tools
+        p = tools.run(["bash", "-c", "echo hi"], timeout=30.0)
+        self.assertTrue(p.ok)
+        self.assertFalse(p.skipped)
+        self.assertEqual(p.out.strip(), "hi")
+
+
+class SkipStreamLinesTests(unittest.TestCase):
+    """stream_lines(): both a silent tool (only the heartbeat thread can
+    notice) and a chatty one (the per-line check can notice sooner)."""
+
+    def tearDown(self):
+        from assay import tools
+        tools.SKIP.clear()
+
+    def test_a_silent_tool_is_cut_short_by_the_heartbeat_thread(self):
+        import time
+        from assay import tools
+        told = []
+        t = time.time()
+        with _sink(told), _fast_heartbeat(), _skip_after(0.15):
+            out = list(tools.stream_lines(["bash", "-c", "sleep 5"], timeout=30.0))
+        self.assertLess(time.time() - t, 5.0)
+        self.assertEqual(out, [])
+        self.assertTrue(any("skipped" in m for m, _tick in told), told)
+
+    def test_a_chatty_tool_notices_between_two_lines(self):
+        """The heartbeat thread only spawns with a progress sink installed
+        (see _Heartbeat.start()) - always true in a real scan, since Engine
+        sets one unconditionally, but this test needs _sink() to match."""
+        from assay import tools
+        script = "for i in $(seq 1 100); do echo x; sleep 0.05; done"
+        with _sink([]), _fast_heartbeat(), _skip_after(0.15):
+            out = list(tools.stream_lines(["bash", "-c", script], timeout=30.0))
+        self.assertLess(len(out), 100, "must have been cut short, not run to completion")
+
+    def test_a_skip_already_set_yields_nothing_and_does_not_spawn(self):
+        from assay import tools
+        tools.SKIP.set()
+        out = list(tools.stream_lines(["bash", "-c", "echo should-not-appear"], timeout=30.0))
+        self.assertEqual(out, [])
+
+    def test_a_skipped_run_is_not_logged_as_a_generic_failure(self):
+        """A negative returncode from our own SIGTERM must not read as the
+        tool having crashed - it was told to stop, not that it broke."""
+        from assay import tools
+        recs = []
+        original = tools._record_failure
+        tools._record_failure = lambda cmd, err: recs.append(str(err))
+        try:
+            with _fast_heartbeat(), _skip_after(0.15):
+                list(tools.stream_lines(["bash", "-c", "sleep 5"], timeout=30.0))
+        finally:
+            tools._record_failure = original
+        self.assertEqual(recs, [])
+
+    def test_no_skip_streams_normally(self):
+        from assay import tools
+        out = list(tools.stream_lines(["bash", "-c", "echo a; echo b"], timeout=30.0))
+        self.assertEqual(out, ["a", "b"])
+
+
+class ProcOkTests(unittest.TestCase):
+    def test_skipped_is_not_ok(self):
+        from assay.tools import Proc
+        self.assertFalse(Proc(rc=0, out="", err="", skipped=True).ok)
+
+    def test_a_clean_run_is_still_ok(self):
+        from assay.tools import Proc
+        self.assertTrue(Proc(rc=0, out="", err="").ok)
+
+
 class ToolProgressLabelTests(unittest.TestCase):
     """The sink labels a command with whatever stage is currently talking."""
 
@@ -2043,6 +2171,157 @@ class RunDirTests(unittest.TestCase):
         from assay.config import Config
         self.assertEqual(
             Config(targets=["a.test"]).apply_run_dir("/out", flat=True), "/out")
+
+
+class StageLogTests(unittest.TestCase):
+    """A durable record of which stages ran and how they ended - what
+    --resume needs to know beyond "does a file exist"."""
+
+    def _store(self):
+        import tempfile, os
+        from assay.store import Store
+        return Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+
+    def test_an_unattempted_stage_has_no_status(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        self.assertIsNone(s.stage_status("urls"))
+        s.close()
+
+    def test_a_completed_stage_is_reported_as_such(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        sid = s.stage_started("probe")
+        s.stage_finished(sid, "completed")
+        self.assertEqual(s.stage_status("probe"), "completed")
+        s.close()
+
+    def test_a_skipped_stage_is_distinguished_from_completed(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        sid = s.stage_started("urls")
+        s.stage_finished(sid, "skipped")
+        self.assertEqual(s.stage_status("urls"), "skipped")
+        s.close()
+
+    def test_status_reflects_the_most_recent_attempt_not_the_first(self):
+        """A stage retried on a later run must not still read as whatever it
+        was the first time - --resume needs to know what happened LAST."""
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.stage_finished(s.stage_started("ports"), "skipped")
+        s.start_run("standard", ["t"])
+        s.stage_finished(s.stage_started("ports"), "completed")
+        self.assertEqual(s.stage_status("ports"), "completed")
+        s.close()
+
+    def test_status_persists_across_a_reopened_database(self):
+        """--resume runs as a fresh process against the same out_dir - the
+        in-memory Store instance from the prior run is long gone."""
+        from assay.store import Store
+        s = self._store()
+        db_path = s.path
+        s.start_run("standard", ["t"])
+        s.stage_finished(s.stage_started("probe"), "completed")
+        s.close()
+
+        reopened = Store(db_path)
+        self.assertEqual(reopened.stage_status("probe"), "completed")
+        reopened.close()
+
+    def test_a_stage_left_running_when_the_process_died_is_visible(self):
+        """No stage_finished() call ever landed - the process was killed or
+        crashed mid-stage. --resume must be able to tell "never finished"
+        apart from "completed", not default to trusting it."""
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.stage_started("urls")
+        self.assertEqual(s.stage_status("urls"), "running")
+        s.close()
+
+    def test_history_reports_one_row_per_stage_the_most_recent_attempt(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.stage_finished(s.stage_started("resolve"), "completed")
+        s.stage_finished(s.stage_started("ports"), "skipped")
+        s.stage_finished(s.stage_started("ports"), "completed")  # retried
+        history = {r["stage"]: r["status"] for r in s.stage_history()}
+        self.assertEqual(history, {"resolve": "completed", "ports": "completed"})
+        s.close()
+
+
+class WebTargetPersistenceTests(unittest.TestCase):
+    """save_web_target()/web_targets(): a lossless round trip, since the
+    version this replaced only kept 3 of WebTarget's dozen-plus fields -
+    silently, which --resume hydrating ctx.web from it would have inherited."""
+
+    def _store(self):
+        import tempfile, os
+        from assay.store import Store
+        return Store(os.path.join(tempfile.mkdtemp(), "assay.db"))
+
+    def _wt(self, **kw):
+        from assay.models import WebTarget
+        base = dict(url="https://a.test/", host="a.test", port=443, scheme="https",
+                   status=200, title="Home", server="nginx", tech=["nginx"],
+                   content_type="text/html", length=1234, words=88,
+                   headers={"X-Frame-Options": "DENY"}, body_sample="<html>hi</html>",
+                   cert={"cn": "a.test"}, redirect_chain=["https://a.test/old"],
+                   final_url="https://a.test/", favicon_hash=-123456)
+        base.update(kw)
+        return WebTarget(**base)
+
+    def test_every_field_survives_the_round_trip(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        wt = self._wt()
+        s.save_web_target(wt)
+        [back] = s.web_targets()
+        for f in dataclasses.fields(wt):
+            self.assertEqual(getattr(back, f.name), getattr(wt, f.name), f.name)
+        s.close()
+
+    def test_a_row_saved_before_this_existed_still_hydrates(self):
+        """The old, lossy save_web() call this replaced - a database from
+        before this fix must not make web_targets() raise."""
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.save_web("https://old.test/", "old.test", 443, 200, "Old", "nginx",
+                  ["nginx"], {"content_type": "text/html", "final_url": "https://old.test/",
+                              "length": 500})
+        [wt] = s.web_targets()
+        self.assertEqual(wt.url, "https://old.test/")
+        self.assertEqual(wt.scheme, "https", "derived from the URL when data lacks it")
+        self.assertEqual(wt.length, 500)
+        self.assertEqual(wt.headers, {}, "absent, not fabricated")
+        s.close()
+
+    def test_a_plain_http_url_with_no_stored_scheme_still_derives_it(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.save_web("http://old.test/", "old.test", 80, 200, "", "", [], {})
+        [wt] = s.web_targets()
+        self.assertEqual(wt.scheme, "http")
+        s.close()
+
+    def test_multiple_targets_all_come_back(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.save_web_target(self._wt(url="https://a.test/", host="a.test"))
+        s.save_web_target(self._wt(url="https://b.test/", host="b.test", port=8443))
+        self.assertEqual(sorted(wt.url for wt in s.web_targets()),
+                         ["https://a.test/", "https://b.test/"])
+        s.close()
+
+    def test_saving_the_same_url_twice_updates_not_duplicates(self):
+        s = self._store()
+        s.start_run("standard", ["t"])
+        s.save_web_target(self._wt(title="First"))
+        s.save_web_target(self._wt(title="Second"))
+        targets = s.web_targets()
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].title, "Second")
+        s.close()
 
 
 class DiffTests(unittest.TestCase):
