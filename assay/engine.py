@@ -610,11 +610,7 @@ class Engine:
                     continue
                 seen.add(wt.key())
                 self.ctx.web.append(wt)
-                self.store.save_web(wt.url, wt.host, wt.port, wt.status, wt.title,
-                                    wt.server, wt.tech,
-                                    {"content_type": wt.content_type,
-                                     "final_url": wt.final_url,
-                                     "length": wt.length})
+                self.store.save_web_target(wt)
         self._filter_gateway()
         self.ctx.say("probe", "%d live web endpoint(s)" % len(self.ctx.web))
 
@@ -655,10 +651,7 @@ class Engine:
                     continue
                 seen.add(wt.key())
                 self.ctx.web.append(wt)
-                self.store.save_web(wt.url, wt.host, wt.port, wt.status, wt.title,
-                                    wt.server, wt.tech,
-                                    {"content_type": wt.content_type,
-                                     "final_url": wt.final_url, "length": wt.length})
+                self.store.save_web_target(wt)
                 added += 1
         except Exception as exc:
             # httpx is an optimisation, never a requirement - but say so rather

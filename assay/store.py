@@ -11,9 +11,11 @@ import os
 import sqlite3
 import threading
 import time
+from dataclasses import asdict, fields
 from typing import Any, Dict, Iterable, Iterator, List, Optional
+from urllib.parse import urlsplit
 
-from assay.models import Evidence, Finding
+from assay.models import Evidence, Finding, WebTarget
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -48,10 +50,22 @@ CREATE TABLE IF NOT EXISTS ai_chains (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, severity TEXT,
     finding_ids TEXT, impact TEXT, steps TEXT, source TEXT DEFAULT 'ai'
 );
-CREATE TABLE IF NOT EXISTS progress (
-    key TEXT PRIMARY KEY, value TEXT, updated REAL
+CREATE TABLE IF NOT EXISTS stage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    stage TEXT,
+    status TEXT,
+    started REAL, finished REAL
 );
+CREATE INDEX IF NOT EXISTS idx_stage_log_stage ON stage_log(stage, id DESC);
 """
+# The schema had an EMPTY, never-read-or-written "progress" table here before
+# this - aspirational scaffolding for exactly this feature that was never
+# wired up. Replaced rather than left beside stage_log: a database with two
+# tables both named for "track what the scan is doing," one of them dead,
+# is a trap for the next person who goes looking. An existing database keeps
+# its old empty progress table on disk (CREATE TABLE IF NOT EXISTS never
+# drops anything); it is simply never touched again.
 
 
 class Store:
@@ -127,6 +141,52 @@ class Store:
                 "UPDATE runs SET finished=? WHERE id=?", (time.time(), self.run_id)
             )
             self._conn.commit()
+
+    # -- stage log -----------------------------------------------------
+    # A durable record of which named stages ran, and how they ended -
+    # completed on their own, cut short by the operator's skip key, or left
+    # "running" because the process died mid-stage. --resume reads this to
+    # decide what a prior run actually finished, rather than inferring it
+    # from whatever artifacts happen to be lying around (which is still how
+    # the ports stage decides - see Engine._apply_resume - since a raw nmap
+    # XML says more than "completed" does about exactly which hosts).
+    def stage_started(self, stage: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO stage_log (run_id, stage, status, started)"
+                " VALUES (?,?,'running',?)",
+                (self.run_id, stage, time.time()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def stage_finished(self, stage_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE stage_log SET status=?, finished=? WHERE id=?",
+                (status, time.time(), stage_id),
+            )
+            self._conn.commit()
+
+    def stage_status(self, stage: str) -> Optional[str]:
+        """How `stage` last ended, across every run against this database -
+        None if it has never been attempted at all."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM stage_log WHERE stage=? ORDER BY id DESC LIMIT 1",
+                (stage,),
+            ).fetchone()
+            return row["status"] if row else None
+
+    def stage_history(self) -> List[sqlite3.Row]:
+        """The most recent attempt at each stage, for a human-readable
+        summary of what a prior run did and did not get through."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT stage, status, started, finished FROM stage_log"
+                " WHERE id IN (SELECT MAX(id) FROM stage_log GROUP BY stage)"
+                " ORDER BY started"
+            ).fetchall()
 
     def close(self) -> None:
         with self._lock:
@@ -298,6 +358,59 @@ class Store:
                  json.dumps(data), time.time(), self.run_id, self.run_id),
             )
             self._conn.commit()
+
+    # Stored as their own SQL columns for save_web()'s ON CONFLICT/ordering;
+    # every other WebTarget field goes into the catch-all `data` blob.
+    _WEB_TARGET_COLUMNS = {"url", "host", "port", "status", "title", "server", "tech"}
+    _WEB_TARGET_FIELDS = {f.name for f in fields(WebTarget)}
+
+    def save_web_target(self, wt: WebTarget) -> None:
+        """Persist a WebTarget completely enough to reconstruct it later.
+
+        dataclasses.asdict() rather than a hand-picked field list: the
+        version this replaced only kept content_type/final_url/length, so a
+        --resume that rebuilt ctx.web from this table would have come back
+        with headers, cert, favicon_hash and the crawl's own body_sample all
+        silently empty rather than absent - worse than not resuming the
+        stage at all, since nothing said they were missing. Every field
+        WebTarget has, present or future, ends up in `data` unless it
+        already has its own column.
+        """
+        data = {k: v for k, v in asdict(wt).items() if k not in self._WEB_TARGET_COLUMNS}
+        self.save_web(wt.url, wt.host, wt.port, wt.status, wt.title,
+                      wt.server, wt.tech, data)
+
+    def web_targets(self) -> List[WebTarget]:
+        """Reconstruct every stored WebTarget - the inverse of
+        save_web_target(), and what --resume rebuilds ctx.web from instead
+        of re-probing every candidate.
+
+        A row saved before save_web_target() existed only has
+        content_type/final_url/length in `data`; scheme and everything else
+        come back as WebTarget's own defaults (empty, not fabricated) rather
+        than raising on a missing key, so an old database degrades to "not
+        much to resume from" instead of refusing to start.
+        """
+        out: List[WebTarget] = []
+        for row in self.web_rows():
+            try:
+                data = json.loads(row["data"] or "{}")
+            except ValueError:
+                data = {}
+            try:
+                tech = json.loads(row["tech"] or "[]")
+            except ValueError:
+                tech = []
+            scheme = data.get("scheme") or urlsplit(row["url"]).scheme or "http"
+            extra = {k: v for k, v in data.items()
+                     if k in self._WEB_TARGET_FIELDS and k not in self._WEB_TARGET_COLUMNS
+                     and k != "scheme"}
+            out.append(WebTarget(
+                url=row["url"], host=row["host"], port=row["port"], scheme=scheme,
+                status=row["status"] or 0, title=row["title"] or "",
+                server=row["server"] or "", tech=tech, **extra,
+            ))
+        return out
 
     def web_rows(self) -> List[sqlite3.Row]:
         with self._lock:
