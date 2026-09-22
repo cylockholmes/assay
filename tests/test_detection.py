@@ -4868,6 +4868,204 @@ class ApplyResumeTests(unittest.TestCase):
         self.assertEqual(eng._apply_resume([t1], "nmap"), [])
 
 
+class RunStageTests(unittest.TestCase):
+    """Engine._run_stage: the wrapper every top-level stage goes through -
+    clears any skip left from the stage before it, records the outcome
+    durably, and never lets an exception masquerade as a clean skip."""
+
+    def _engine(self, resume=False):
+        import tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        return Engine(Config(targets=["10.0.0.1"], out_dir=self.out,
+                             resume=resume, journal=False))
+
+    def tearDown(self):
+        from assay import tools
+        tools.SKIP.clear()
+
+    def test_a_normal_stage_is_recorded_completed(self):
+        eng = self._engine()
+        eng._run_stage("resolve", lambda: None)
+        self.assertEqual(eng.store.stage_status("resolve"), "completed")
+
+    def test_an_exception_is_recorded_failed_and_still_propagates(self):
+        eng = self._engine()
+
+        def boom():
+            raise ValueError("nope")
+
+        with self.assertRaises(ValueError):
+            eng._run_stage("probe", boom)
+        self.assertEqual(eng.store.stage_status("probe"), "failed")
+
+    def test_a_skip_set_during_the_stage_is_recorded_skipped(self):
+        from assay import tools
+        eng = self._engine()
+
+        def during():
+            tools.SKIP.set()
+
+        eng._run_stage("urls", during)
+        self.assertEqual(eng.store.stage_status("urls"), "skipped")
+
+    def test_a_skip_does_not_leak_into_the_next_stage(self):
+        """The whole reason this clears SKIP at the START of a stage, not
+        just after: a press near the end of one stage must not also cut the
+        very first call of the next one short for no reason asked."""
+        from assay import tools
+        eng = self._engine()
+        tools.SKIP.set()  # simulating: still set from whatever ran before
+        eng._run_stage("resolve", lambda: None)
+        self.assertEqual(eng.store.stage_status("resolve"), "completed")
+        self.assertFalse(tools.SKIP.is_set())
+
+
+class RunModuleSkipTests(unittest.TestCase):
+    """The other half of skip's stage-wide reach: once set, a worker must
+    decline NEW module work, not just let already-running calls cut short
+    on their own. Content discovery - one ffuf call per web target - is
+    exactly the shape this matters for."""
+
+    def _engine(self):
+        import tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        return Engine(Config(targets=["10.0.0.1"], out_dir=self.out, journal=False))
+
+    def tearDown(self):
+        from assay import tools
+        tools.SKIP.clear()
+
+    def test_a_module_is_skipped_once_the_flag_is_set(self):
+        from assay import tools
+        from assay.modules import Module
+
+        class _Spy(Module):
+            name = "spy"
+            stage = "probe"
+            scope = "global"
+            called = False
+
+            def run_global(self, ctx):
+                self.called = True
+                return []
+
+        eng = self._engine()
+        m = _Spy()
+        tools.SKIP.set()
+        result = eng._run_module(m, "global", None)
+        self.assertEqual(result, [])
+        self.assertFalse(m.called, "the module body must never run at all")
+
+    def test_without_a_skip_the_module_runs_normally(self):
+        from assay.modules import Module
+
+        class _Spy(Module):
+            name = "spy"
+            stage = "probe"
+            scope = "global"
+
+            def run_global(self, ctx):
+                return ["ran"]
+
+        eng = self._engine()
+        self.assertEqual(eng._run_module(_Spy(), "global", None), ["ran"])
+
+
+class ApplyProbeResumeTests(unittest.TestCase):
+    """Engine._apply_probe_resume: reuse a prior run's confirmed live
+    endpoints, matched by (host, port) since a candidate doesn't know its
+    scheme until probed - and never let a fully-resumed probe skip the
+    gateway filter or baseline calibration that a fresh one always gets."""
+
+    def _engine(self, resume=True):
+        import tempfile
+        from assay.config import Config
+        from assay.engine import Engine
+        self.out = tempfile.mkdtemp()
+        return Engine(Config(targets=["10.0.0.1", "10.0.0.2"], out_dir=self.out,
+                             resume=resume, journal=False, detect_gateway=False))
+
+    def _complete_probe_with(self, eng, *web_targets):
+        """Simulate a prior run whose probe stage completed with these
+        WebTargets already on disk."""
+        sid = eng.store.stage_started("probe")
+        for wt in web_targets:
+            eng.store.save_web_target(wt)
+        eng.store.stage_finished(sid, "completed")
+
+    def _candidates(self, eng):
+        from assay.models import Port, Target
+        t1 = Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1")
+        t2 = Target(raw="10.0.0.2", host="10.0.0.2", ip="10.0.0.2")
+        return [(t1, Port(port=443)), (t2, Port(port=8080))]
+
+    def test_a_covered_candidate_is_dropped_and_restored_to_ctx_web(self):
+        from assay.models import WebTarget
+        eng = self._engine()
+        wt = WebTarget(url="https://10.0.0.1:443/", host="10.0.0.1", port=443,
+                       scheme="https", status=200)
+        self._complete_probe_with(eng, wt)
+        remaining = eng._apply_probe_resume(self._candidates(eng))
+        self.assertEqual([(t.host, p.port) for t, p in remaining], [("10.0.0.2", 8080)])
+        self.assertEqual([w.url for w in eng.ctx.web], ["https://10.0.0.1:443/"])
+
+    def test_probe_never_attempted_before_probes_everything(self):
+        eng = self._engine()
+        candidates = self._candidates(eng)
+        self.assertEqual(eng._apply_probe_resume(candidates), candidates)
+
+    def test_a_skipped_prior_probe_is_not_trusted(self):
+        eng = self._engine()
+        sid = eng.store.stage_started("probe")
+        eng.store.stage_finished(sid, "skipped")
+        candidates = self._candidates(eng)
+        self.assertEqual(eng._apply_probe_resume(candidates), candidates)
+
+    def test_completed_but_nothing_recorded_falls_through_to_a_fresh_probe(self):
+        """Completed and genuinely found zero live endpoints - honour that
+        rather than pretending there is nothing to check ever again."""
+        eng = self._engine()
+        sid = eng.store.stage_started("probe")
+        eng.store.stage_finished(sid, "completed")
+        candidates = self._candidates(eng)
+        self.assertEqual(eng._apply_probe_resume(candidates), candidates)
+
+    def test_full_stage_still_gateway_filters_and_calibrates_on_a_full_resume(self):
+        """Both of these used to run only on the code path that actually
+        called httpx/the native pool - a fully-resumed probe (0 candidates
+        left) skipped straight past them entirely."""
+        from assay.models import Port, Target, WebTarget
+        eng = self._engine()
+        # What _stage_resolve() would have populated - a real run needs
+        # ports on ctx.targets before it ever builds a candidate list, and
+        # this test bypasses resolve entirely to isolate the probe stage.
+        eng.ctx.targets = [
+            Target(raw="10.0.0.1", host="10.0.0.1", ip="10.0.0.1", ports=[Port(port=443)]),
+            Target(raw="10.0.0.2", host="10.0.0.2", ip="10.0.0.2", ports=[Port(port=8080)]),
+        ]
+
+        wt = WebTarget(url="https://10.0.0.1:443/", host="10.0.0.1", port=443,
+                       scheme="https", status=200)
+        self._complete_probe_with(eng, wt)
+        # A second target so _apply_probe_resume covers everything the fresh
+        # candidate list would have asked for.
+        wt2 = WebTarget(url="http://10.0.0.2:8080/", host="10.0.0.2", port=8080,
+                        scheme="http", status=200)
+        eng.store.save_web_target(wt2)
+
+        called = []
+        eng._filter_gateway = lambda: called.append("filter")
+        eng._calibrate = lambda: called.append("calibrate")
+        eng._stage_probe()
+        self.assertEqual(called, ["filter", "calibrate"])
+        self.assertEqual(sorted(w.url for w in eng.ctx.web),
+                         ["http://10.0.0.2:8080/", "https://10.0.0.1:443/"])
+
+
 class PreservePreviousXmlTests(unittest.TestCase):
     """The file resume is about to overwrite must not simply vanish."""
 

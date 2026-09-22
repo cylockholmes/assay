@@ -118,16 +118,18 @@ class Engine:
         say("oob", self.oob.start())
         self.ctx.oob = self.oob
 
-        self._stage_resolve()
+        self._run_stage("resolve", self._stage_resolve)
         if self.cfg.expand:
-            self._stage_recon()
+            self._run_stage("recon", self._stage_recon)
         if self.cfg.portscan:
-            self._stage_portscan()
-            self._stage_discover_hostnames()
-            self._stage_nmapview()
-        self._stage_probe()
+            self._run_stage("ports", lambda: (
+                self._stage_portscan(),
+                self._stage_discover_hostnames(),
+                self._stage_nmapview(),
+            ))
+        self._run_stage("probe", self._stage_probe)
         if self.cfg.module_enabled("crawl"):
-            self._stage_urls()
+            self._run_stage("urls", self._stage_urls)
         # Content discovery runs after the other URL sources so it can add to
         # the same pool, and before the checks that consume it.
         if self.cfg.opts.get("content_discovery") and self.ctx.web:
@@ -136,13 +138,13 @@ class Engine:
             elif not tools.default_wordlist(self.cfg.profile):
                 self.ctx.say("probe", "content discovery skipped: no wordlist found "
                                       "(install seclists or dirb)")
-        self._stage_modules("probe")
-        self._stage_modules("analyze")
+        self._run_stage("modules:probe", lambda: self._stage_modules("probe"))
+        self._run_stage("modules:analyze", lambda: self._stage_modules("analyze"))
         if self.cfg.opts.get("active_web"):
-            self._stage_modules("active")
-        self._stage_modules("external")
+            self._run_stage("modules:active", lambda: self._stage_modules("active"))
+        self._run_stage("modules:external", lambda: self._stage_modules("external"))
 
-        self._stage_correlate()
+        self._run_stage("correlate", self._stage_correlate)
 
         fired = self.oob.fired()
         if fired:
@@ -169,6 +171,33 @@ class Engine:
             say("scope", "blocked %d out-of-scope host(s): %s"
                 % (len(blocked), ", ".join(blocked[:5])))
         return self.ctx
+
+    def _run_stage(self, name: str, fn: Callable[[], None]) -> None:
+        """Wrap one named top-level stage for the operator's skip key and
+        the durable record --resume reads.
+
+        Clears tools.SKIP before running: a skip is left set for the rest of
+        whatever stage it was pressed during (see tools.SKIP's own comment),
+        and without this, a skip pressed near the end of one stage would
+        still be sitting there when the next stage's very first tool call
+        checked it, cutting that one short too for no reason the operator
+        asked for.
+
+        An exception is recorded as "failed" and re-raised - never silently
+        turned into "skipped", which would make --resume trust a stage that
+        actually crashed. A stage the process dies inside entirely (killed,
+        not raised) is left at whatever stage_started() wrote: "running",
+        which --resume must treat the same as never having finished.
+        """
+        tools.SKIP.clear()
+        sid = self.store.stage_started(name)
+        try:
+            fn()
+        except Exception:
+            self.store.stage_finished(sid, "failed")
+            raise
+        status = "skipped" if tools.SKIP.is_set() else "completed"
+        self.store.stage_finished(sid, status)
 
     # -- stage 1: resolve ------------------------------------------------
     def _stage_resolve(self) -> None:
@@ -584,38 +613,92 @@ class Engine:
             self.ctx.say("probe", "no HTTP candidates found")
             return
 
-        self.ctx.say("probe", "probing %d host:port candidate(s)" % len(candidates))
-        seen: Set[str] = {w.key() for w in self.ctx.web}
+        if self.cfg.resume:
+            candidates = self._apply_probe_resume(candidates)
 
-        # httpx probes far faster than a Python thread pool once there are many
-        # candidates. Below that threshold the process spawn costs more than it
-        # saves, so the native path stays.
-        if self.ctx.has("httpx") and len(candidates) >= 25:
-            got = self._probe_via_httpx(candidates, seen)
-            if got:
-                self.ctx.say("probe", "httpx: %d live endpoint(s)" % got)
-                self._calibrate()
-                return
-        with ThreadPoolExecutor(max_workers=self.tune["concurrency"]) as pool:
-            futures = [pool.submit(self._probe_one, t, p) for t, p in candidates]
-            for fut in as_completed(futures):
-                # as_completed yields in this thread, so the seen-set below is
-                # only ever touched here - no race, unlike the worker bodies.
-                try:
-                    wt = fut.result()
-                except Exception as exc:        # one endpoint must not sink the run
-                    self.ctx.say("error", "probe failed: %s" % type(exc).__name__)
-                    continue
-                if wt is None or wt.key() in seen:
-                    continue
-                seen.add(wt.key())
-                self.ctx.web.append(wt)
-                self.store.save_web_target(wt)
+        # Gateway-filtering and calibration must run exactly once, however
+        # this ends up populating ctx.web - resumed entirely, resumed in
+        # part, probed fresh, or (a pre-existing gap this also fixes) found
+        # entirely via the httpx fast path below. Two of those three used to
+        # return before reaching _filter_gateway() at all, which only ever
+        # mutates ctx.web in memory and never touches what is already on
+        # disk: a run that skipped it could see gateway noise the Store
+        # itself still holds from before filtering ever ran.
+        if candidates:
+            self.ctx.say("probe", "probing %d host:port candidate(s)" % len(candidates))
+            seen: Set[str] = {w.key() for w in self.ctx.web}
+
+            used_httpx = False
+            # httpx probes far faster than a Python thread pool once there are
+            # many candidates. Below that threshold the process spawn costs
+            # more than it saves, so the native path stays.
+            if self.ctx.has("httpx") and len(candidates) >= 25:
+                got = self._probe_via_httpx(candidates, seen)
+                if got:
+                    self.ctx.say("probe", "httpx: %d live endpoint(s)" % got)
+                    used_httpx = True
+
+            if not used_httpx:
+                with ThreadPoolExecutor(max_workers=self.tune["concurrency"]) as pool:
+                    futures = [pool.submit(self._probe_one, t, p) for t, p in candidates]
+                    for fut in as_completed(futures):
+                        # as_completed yields in this thread, so the seen-set
+                        # below is only ever touched here - no race, unlike
+                        # the worker bodies.
+                        try:
+                            wt = fut.result()
+                        except Exception as exc:  # one endpoint must not sink the run
+                            self.ctx.say("error", "probe failed: %s" % type(exc).__name__)
+                            continue
+                        if wt is None or wt.key() in seen:
+                            continue
+                        seen.add(wt.key())
+                        self.ctx.web.append(wt)
+                        self.store.save_web_target(wt)
+
         self._filter_gateway()
         self.ctx.say("probe", "%d live web endpoint(s)" % len(self.ctx.web))
 
         # Calibrate soft-404 baselines up front; every content check depends on it.
         self._calibrate()
+
+    def _apply_probe_resume(self, candidates: List[Tuple[Target, "Port"]]
+                            ) -> List[Tuple[Target, "Port"]]:
+        """--resume: reuse whatever the probe stage already confirmed live,
+        the same spirit as _apply_resume() reusing a prior nmap.xml.
+
+        Only consults the store when "probe" last ended "completed" (see
+        Engine._run_stage): a prior attempt that was skipped, still
+        "running" (the process died mid-stage) or never attempted has
+        nothing honest to restore from, and falls through to probing
+        everything, same as without --resume at all.
+
+        Matched by (host, port), not the full WebTarget.key() - candidates
+        here don't know their scheme yet (that's what probing determines),
+        so host:port is the identity a prior probe and this run's candidate
+        list actually share.
+        """
+        if self.store.stage_status("probe") != "completed":
+            return candidates
+        hydrated = self.store.web_targets()
+        if not hydrated:
+            self.ctx.say("probe", "--resume: no live endpoints recorded from a "
+                                  "previous run, probing fresh")
+            return candidates
+        covered = {(wt.host, wt.port) for wt in hydrated}
+        seen = {w.key() for w in self.ctx.web}
+        added = 0
+        for wt in hydrated:
+            if wt.key() in seen:
+                continue
+            seen.add(wt.key())
+            self.ctx.web.append(wt)
+            added += 1
+        remaining = [(t, p) for t, p in candidates if (t.host, p.port) not in covered]
+        self.ctx.say("probe", "--resume: %d endpoint(s) recovered from a previous run; "
+                              "%d candidate(s) still to probe"
+                     % (added, len(remaining)))
+        return remaining
 
     def _probe_via_httpx(self, candidates, seen: Set[str]) -> int:
         targets = ["%s:%d" % (t.host, p.port) for t, p in candidates]
@@ -955,6 +1038,17 @@ class Engine:
                 self.ctx.say(stage, "%d/%d" % (done, len(jobs)), advance=1)
 
     def _run_module(self, module, kind: str, subject) -> List[Finding]:
+        # Every job for this stage was already submitted to the pool before
+        # _stage_modules() started draining it (as_completed doesn't support
+        # cancelling a future that hasn't started yet), so this is the one
+        # place a worker thread that is about to pick up NEW work - as
+        # opposed to one already mid-call, which the tools.SKIP checks inside
+        # run()/stream_lines() themselves handle - can decline it instead.
+        # Content discovery (ffuf, one call per web target) is exactly the
+        # shape of module this matters for: skip stops the SIXTIETH ffuf
+        # call from ever starting, not just the one already running.
+        if tools.SKIP.is_set():
+            return []
         if kind == "web":
             return module.run_web(self.ctx, subject)
         if kind == "host":
