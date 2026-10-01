@@ -76,7 +76,7 @@ class SqliModule(Module):
 
         for url in candidate_urls(ctx, wt):
             for p in existing_params(url):
-                if p.startswith("sift_"):
+                if p.startswith("assay_"):
                     continue
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:

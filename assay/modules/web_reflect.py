@@ -146,7 +146,7 @@ class ReflectionModule(Module):
             if not params and url == (wt.final_url or wt.url):
                 params = COMMON_PARAMS[:6]
             for p in params:
-                if p.startswith("sift_"):
+                if p.startswith("assay_"):
                     continue
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:
