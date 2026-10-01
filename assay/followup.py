@@ -190,6 +190,27 @@ def vet(raw: str, cfg: Config) -> Command:
     return cmd
 
 
+def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> Tuple[Optional[str], List[str]]:
+    """Decide whether a command's output may go back to the AI (PLAN-LOOP §3).
+
+    Returns (sendable_text, leaks). sendable_text is None when the output must
+    stay local - because the tool is not send-eligible, or because redaction
+    left residual client identifiers (leaks non-empty). Only a send-eligible
+    tool whose redacted output passes verify() comes back as text to send.
+
+    `verify()` catches only KNOWN entities (seeded terms + minted tokens), so
+    this reduces but cannot eliminate residual risk; that is exactly why
+    resend is opt-in and high-risk tools are excluded by send_eligible().
+    """
+    if not output or not send_eligible(tool):
+        return None, []
+    redacted = redactor.text(output)[:cap]
+    leaks = redactor.verify(redacted)
+    if leaks:
+        return None, leaks
+    return redacted, []
+
+
 def plan_followups(vetted: List[Command], auto_mode: str = "passive",
                    rate_cap_per_host: int = 5) -> Tuple[List[Command], List[Command], List[Command]]:
     """Partition vetted commands into (auto_run, queued, refused) for one round.

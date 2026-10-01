@@ -211,8 +211,18 @@ class AIConfig:
 
 
 def build_payload(findings: List[Finding], assets: Dict[str, Any],
-                  cfg: AIConfig, redactor: Redactor) -> Tuple[Dict[str, Any], List[str]]:
-    """Return (redacted payload, residual leaks). Non-empty leaks == do not send."""
+                  cfg: AIConfig, redactor: Redactor,
+                  followups: Optional[List[Dict[str, Any]]] = None
+                  ) -> Tuple[Dict[str, Any], List[str]]:
+    """Return (redacted payload, residual leaks). Non-empty leaks == do not send.
+
+    `followups` are results of commands the loop ran in earlier rounds, already
+    redacted and individually verified by the caller (PLAN-LOOP §3). They are
+    included so the model can re-triage in light of what the verification
+    commands actually returned. They are re-redacted here too (a no-op on the
+    tokens they already carry) so the whole-payload verify() below still covers
+    them as a backstop.
+    """
     items: List[Dict[str, Any]] = []
     for f in findings[: cfg.max_findings]:
         item: Dict[str, Any] = {
@@ -247,6 +257,8 @@ def build_payload(findings: List[Finding], assets: Dict[str, Any],
         },
         "findings": items,
     }
+    if followups:
+        payload["followup_results"] = followups
 
     redacted = redactor.obj(payload)
     blob = json.dumps(redacted, indent=2, sort_keys=True)

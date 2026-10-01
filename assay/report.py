@@ -49,6 +49,60 @@ _TOOL_STATE = {
 }
 
 
+def _followup_proof_section(store: Store) -> str:
+    """Proof-of-testing (PLAN-LOOP §5.2): the AI loop's followup commands and
+    their REAL (un-redacted) output, grouped by finding, for screenshotting
+    into a submission. Reveal-by-default - the leaked data is the proof. This
+    is local-only and never what goes to the model (that is the redacted
+    `output_sent`, shown separately so you can see exactly what left the box).
+    """
+    try:
+        rows = store.followup_results()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+
+    by_finding: Dict[str, List] = {}
+    for r in rows:
+        by_finding.setdefault(r["finding_title"] or r["finding_id"] or "(unattributed)", []).append(r)
+
+    groups = []
+    for title, items in by_finding.items():
+        entries = []
+        for r in items:
+            argv = r["argv"] or ""
+            local = (r["output_local"] or "").rstrip()
+            sent_note = ('<span class="tr-state tr-none">sent redacted</span>'
+                         if r["sent"] else '<span class="tr-state tr-skip">local only</span>')
+            sent_block = ""
+            if r["sent"] and (r["output_sent"] or "").strip():
+                sent_block = ('<div class="dim" style="margin-top:6px">what was sent to the '
+                              'model (redacted):</div><pre class="tr-out">%s</pre>'
+                              % _e(r["output_sent"]))
+            entries.append(
+                '<div class="tr-row">'
+                '<div class="cmdwrap"><code>%s</code>'
+                '<button class="copy" data-copy="%s">copy</button></div>'
+                '<div class="dim">round %s &middot; %s &middot; rc %s &middot; %s</div>'
+                '<pre class="tr-out">%s</pre>%s</div>'
+                % (_e(argv), _e(argv), _e(r["round"]), _e(r["tool"]), _e(r["rc"]),
+                   sent_note, _e(local) if local else '<span class="dim">(no output)</span>',
+                   sent_block)
+            )
+        groups.append('<h3 style="font-size:14px;margin:16px 0 4px">%s</h3>%s'
+                      % (_e(title), "".join(entries)))
+
+    return (
+        '<section class="bucket" id="proof">'
+        '<h2>Proof of testing <span class="count">%d</span></h2>'
+        '<p class="blurb">Every command the AI loop ran, grouped by finding, with its '
+        'real output - screenshot these straight into a submission. This is local '
+        'evidence (0600, never sent); where a redacted slice was fed back to the '
+        'model it is shown beneath, so what left the box is auditable.</p>%s</section>'
+    ) % (len(rows), "".join(groups))
+
+
 def _tool_runs_section(store: Store) -> str:
     """A verifiable record of every external tool invocation: what ran, how it
     ended, and - crucially for a "no findings" result - the exact command and
@@ -124,6 +178,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
         parts.append(_chains_section(chains, findings))
 
     out_dir = os.path.dirname(os.path.abspath(out_path))
+    parts.append(_followup_proof_section(store))
     parts.append(_tool_runs_section(store))
     parts.append(_inventory(store))
     parts.append(_software_section(out_dir))
