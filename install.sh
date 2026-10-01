@@ -83,6 +83,21 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$HERE/.venv/bin/assay" "$HOME/.local/bin/assay"
 ok "linked to ~/.local/bin/assay"
 
+# ------------------------------------------------------------- git hooks ----
+# Activate the pre-commit guard that blocks real client/target data (real
+# hostnames, public IPs, scope terms) from being committed. core.hooksPath is
+# a local setting, so every clone must opt in - this does it for you.
+say "Git pre-commit guard"
+if git -C "$HERE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$HERE" config core.hooksPath .githooks; then
+    ok "pre-commit guard active (.githooks/) - add live scope terms to .githooks/forbidden-terms.txt"
+  else
+    warn "could not set core.hooksPath; activate it by hand: git config core.hooksPath .githooks"
+  fi
+else
+  warn "not a git checkout; skipped the pre-commit guard"
+fi
+
 # ---------------------------------------------------------------- tools ----
 # Delegated to `assay install` so the tool list has exactly one definition.
 if [ "$MINIMAL" -eq 1 ]; then

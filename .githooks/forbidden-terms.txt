@@ -1,0 +1,12 @@
+# Forbidden terms — one per line, case-insensitive substring match.
+# The pre-commit guard blocks any commit whose staged additions contain any of
+# these. Add the CURRENT engagement's scope terms here (client codenames, real
+# hostnames, registrable domains) while you work a target, and remove them when
+# the engagement ends. Lines starting with # are ignored.
+#
+# This file is tracked but the terms are not sensitive on their own; still,
+# prefer short registrable domains over full internal hostnames.
+#
+# Examples (delete these, add your own):
+# acme-corp.com
+# project-codename
