@@ -14,6 +14,34 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+
+def git_build_meta() -> str:
+    """Short git description of the source tree ('c5268e5' or 'c5268e5-dirty'),
+    or "" when not in a git checkout (an installed wheel) or git is missing.
+
+    Lives here, with the other host-environment helpers, because env.py is one
+    of the few modules allowed to spawn a process directly - git runs on the
+    host and never crosses the WSL bridge. Best-effort and silent: versioning
+    must never make a command fail.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def _git(*args: str) -> str:
+        try:
+            p = subprocess.run(("git", "-C", here, *args),
+                               capture_output=True, text=True, timeout=2)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    sha = _git("rev-parse", "--short=7", "HEAD")
+    if not sha:
+        return ""
+    # Only tracked modifications count as "dirty" - untracked scratch files
+    # (PLAN-LOOP.md, scan outputs) are not changes to the build.
+    dirty = "-dirty" if _git("status", "--porcelain", "--untracked-files=no") else ""
+    return sha + dirty
+
 # Directories Kali / Go installs drop binaries into but which are not always on
 # PATH for non-login shells.
 EXTRA_BIN_DIRS = [

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "assay"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Signal-first recon and triage for authorized offensive testing"
 requires-python = ">=3.9"
 dependencies = [
@@ -21,6 +21,10 @@ ai = ["anthropic>=0.40"]
 
 [project.scripts]
 assay = "assay.cli:main"
+
+[tool.setuptools.dynamic]
+# Single source of truth: the release version lives in assay/__init__.py.
+version = {attr = "assay.__version__"}
 
 [tool.setuptools]
 packages = ["assay", "assay.modules"]

@@ -11,7 +11,7 @@ import sys
 import textwrap
 from typing import Dict, List, Optional
 
-from assay import __version__, env, tools
+from assay import env, tools, version_string
 from assay.burp import BurpBridge
 from assay.config import BurpConfig, Config, Scope, ScopeError, PROFILES
 from assay.store import Store
@@ -44,6 +44,19 @@ examples:
 """
 
 
+class _VersionAction(argparse.Action):
+    """Print the version with its git build and exit. A custom action rather
+    than argparse's built-in 'version' so the git lookup happens only when
+    --version is actually passed, not on every invocation."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(version_string())
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="assay",
@@ -51,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--version", action="version", version="assay %s" % __version__)
+    p.add_argument("--version", action=_VersionAction,
+                   help="show the version (with git build) and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # -- scan --------------------------------------------------------------

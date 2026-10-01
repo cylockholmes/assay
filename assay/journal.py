@@ -22,6 +22,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Set
 
+from assay import version_string
+
 # Header values that are secrets. They are replaced with a shell variable so
 # the replay stays runnable without writing the credential to disk - an
 # executable file full of engagement credentials is exactly the artefact you
@@ -40,6 +42,7 @@ SECRET_HEADERS = {
 HEADER = """#!/usr/bin/env bash
 # Replay of an assay run - every request and command it issued, in order.
 #
+#   version : %s
 #   started : %s
 #   targets : %s
 #   profile : %s
@@ -81,7 +84,8 @@ class Journal:
                     % time.strftime("%Y-%m-%d %H:%M:%S"))
         self._write("# targets: %s" % ", ".join(targets[:20]))
         self._write("# profile: %s" % profile)
-        self._replay.append(HEADER % (time.strftime("%Y-%m-%d %H:%M:%S"),
+        self._replay.append(HEADER % (version_string(),
+                                      time.strftime("%Y-%m-%d %H:%M:%S"),
                                       " ".join(targets[:20]), profile))
 
     def close(self) -> None:
