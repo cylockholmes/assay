@@ -147,6 +147,7 @@ class Engine:
             self._run_stage("ports", lambda: (
                 self._stage_portscan(),
                 self._stage_discover_hostnames(),
+                self._stage_udp(),
                 self._stage_nmapview(),
             ))
         self._run_stage("probe", self._stage_probe)
@@ -345,6 +346,41 @@ class Engine:
     def _stage_portscan(self) -> None:
         targets = [t for t in self.ctx.targets if t.kind != "url"]
         self._portscan(targets)
+
+    # -- stage 2c: UDP sweep (curated ports, on by default) ---------------
+    def _stage_udp(self) -> None:
+        """Curated-port UDP sweep over every host, merged into each target's
+        ports. On by default; cfg.udp is cleared by --no-udp and --safe. UDP
+        results carry their honest open|filtered state, never relabelled open.
+        """
+        if not self.cfg.udp:
+            return
+        if not self.ctx.has("nmap"):
+            self.ctx.say("ports", "UDP sweep skipped: nmap not installed")
+            return
+        targets = [t for t in self.ctx.targets if t.kind != "url"]
+        hosts = [t.host for t in targets]
+        if not hosts:
+            return
+        self.ctx.say("ports", "UDP sweep (%d curated port(s)) across %d host(s)"
+                     % (len(tools.UDP_PORTS), len(hosts)))
+        results = tools.nmap_udp_scan(hosts, self.tune, out_dir=self.cfg.out_dir)
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        found = 0
+        for addr, nh in results.items():
+            t = by_ip.get(addr) or by_host.get(addr)
+            if t is None:
+                continue
+            # Extend, don't replace: the TCP scan already populated t.ports.
+            existing = {(p.port, p.proto) for p in t.ports}
+            for p in nh.ports:
+                if (p.port, p.proto) not in existing:
+                    t.ports.append(p)
+                    found += 1
+            self.store.save_host(t.host, t.ip or "", {
+                "ports": [p.__dict__ for p in t.ports]})
+        self.ctx.say("ports", "UDP sweep found %d responding port(s)" % found)
 
     def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
