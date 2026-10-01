@@ -79,6 +79,24 @@ TECH_SIGNATURES: List[Tuple[str, str]] = [
 ]
 
 
+class _Ledger:
+    """Adapter handed to tools.LEDGER: writes each tool invocation to the
+    Store, stamped with the stage currently running. Kept tiny and holding
+    only the store and ctx, not a closure over the whole engine."""
+
+    __slots__ = ("_store", "_ctx")
+
+    def __init__(self, store: Store, ctx: Context) -> None:
+        self._store = store
+        self._ctx = ctx
+
+    def record(self, tool: str, argv: str, rc: int, state: str,
+               duration: float, output: str) -> None:
+        self._store.record_tool_run(
+            tool=tool, argv=argv, rc=rc, state=state, duration=duration,
+            output=output, stage=self._ctx.stage)
+
+
 class Engine:
     def __init__(self, cfg: Config, progress: Optional[Callable] = None) -> None:
         cfg.ensure_dirs()
@@ -96,6 +114,10 @@ class Engine:
         self.journal = Journal(cfg.out_dir, enabled=cfg.journal)
         self.http.journal = self.journal
         tools.JOURNAL = self.journal
+        # Every external command's outcome lands in the verifiable tool-run
+        # ledger, stamped with the stage it ran under (Context.stage tracks
+        # whatever stage is currently talking).
+        tools.LEDGER = _Ledger(self.store, self.ctx)
         # Every external command now reports through the run's progress
         # hook, so a tool that works quietly still shows it is alive.
         tools.PROGRESS = self.ctx.tool_progress
@@ -125,6 +147,8 @@ class Engine:
             self._run_stage("ports", lambda: (
                 self._stage_portscan(),
                 self._stage_discover_hostnames(),
+                self._stage_deep_ports(),
+                self._stage_udp(),
                 self._stage_nmapview(),
             ))
         self._run_stage("probe", self._stage_probe)
@@ -323,6 +347,92 @@ class Engine:
     def _stage_portscan(self) -> None:
         targets = [t for t in self.ctx.targets if t.kind != "url"]
         self._portscan(targets)
+
+    # -- stage 2c: UDP sweep (curated ports, on by default) ---------------
+    def _stage_udp(self) -> None:
+        """Curated-port UDP sweep over every host, merged into each target's
+        ports. On by default; cfg.udp is cleared by --no-udp and --safe. UDP
+        results carry their honest open|filtered state, never relabelled open.
+        """
+        if not self.cfg.udp:
+            return
+        if not self.ctx.has("nmap"):
+            self.ctx.say("ports", "UDP sweep skipped: nmap not installed")
+            return
+        targets = [t for t in self.ctx.targets if t.kind != "url"]
+        hosts = [t.host for t in targets]
+        if not hosts:
+            return
+        self.ctx.say("ports", "UDP sweep (%d curated port(s)) across %d host(s)"
+                     % (len(tools.UDP_PORTS), len(hosts)))
+        results = tools.nmap_udp_scan(hosts, self.tune, out_dir=self.cfg.out_dir)
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        found = 0
+        for addr, nh in results.items():
+            t = by_ip.get(addr) or by_host.get(addr)
+            if t is None:
+                continue
+            # Extend, don't replace: the TCP scan already populated t.ports.
+            existing = {(p.port, p.proto) for p in t.ports}
+            for p in nh.ports:
+                if (p.port, p.proto) not in existing:
+                    t.ports.append(p)
+                    found += 1
+            self.store.save_host(t.host, t.ip or "", {
+                "ports": [p.__dict__ for p in t.ports]})
+        self.ctx.say("ports", "UDP sweep found %d responding port(s)" % found)
+
+    # -- stage 2b: deep TCP wave (obscure ports, serial) ------------------
+    def _stage_deep_ports(self) -> None:
+        """A second, full-range naabu sweep to catch obscure TCP ports the
+        profile's top-N sweep misses (dev/debug/management interfaces on odd
+        ports), then nmap -sV on just the newly-found ports.
+
+        Serial by design - run after the main nmap, not overlapped with it:
+        two scanners hitting one host at once is noisier and trips rate limits,
+        which on an authorized-but-watched engagement is not worth the
+        wall-clock. Skipped for the 'deep' profile, whose first sweep is
+        already full-range, and disabled by --no-deep-ports.
+        """
+        if not self.cfg.deep_ports:
+            return
+        if not (self.ctx.has("naabu") and self.ctx.has("nmap")):
+            return
+        if self.cfg.opts.get("port_spec") == "all":
+            return  # the initial sweep already covered every port
+        targets = [t for t in self.ctx.targets if t.kind != "url"]
+        hosts = [t.host for t in targets]
+        if not hosts:
+            return
+        self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(hosts))
+        swept = tools.naabu_scan(hosts, "all", self.tune)
+        known = {p.port for t in targets for p in t.ports if p.proto == "tcp"}
+        new_ports = sorted({p for ports in swept.values() for p in ports} - known)
+        if not new_ports:
+            self.ctx.say("ports", "deep sweep found no additional ports")
+            return
+        self.ctx.say("ports", "deep sweep found %d new port(s); nmap -sV on those"
+                     % len(new_ports))
+        spec = ",".join(str(p) for p in new_ports)
+        shosts = self._resolve_swept_hosts(targets, swept.keys()) or hosts
+        results = tools.nmap_scan(shosts, spec, self.tune,
+                                  out_dir=self.cfg.out_dir, xml_prefix="nmap-deep")
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        added = 0
+        for addr, nh in results.items():
+            t = by_ip.get(addr) or by_host.get(addr)
+            if t is None:
+                continue
+            existing = {(p.port, p.proto) for p in t.ports}
+            for p in nh.ports:
+                if (p.port, p.proto) not in existing:
+                    t.ports.append(p)
+                    added += 1
+            self.store.save_host(t.host, t.ip or "", {
+                "ports": [p.__dict__ for p in t.ports]})
+        self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
 
     def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these

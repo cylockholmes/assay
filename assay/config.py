@@ -306,6 +306,8 @@ class Config:
     # behaviour switches
     passive: bool = True                    # allow third-party OSINT sources
     portscan: bool = True
+    udp: bool = True                        # curated-port UDP sweep (every scan; --no-udp/--safe off)
+    deep_ports: bool = True                  # serial full-range naabu wave for obscure TCP ports
     expand: bool = True                     # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain

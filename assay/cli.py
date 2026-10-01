@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="do not record activity.log / replay.sh")
 
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
+    s.add_argument("--no-udp", action="store_true",
+                   help="skip the curated-port UDP sweep (on by default; also off under --safe)")
+    s.add_argument("--no-deep-ports", action="store_true",
+                   help="skip the serial full-range naabu wave for obscure TCP ports "
+                        "(on by default except the deep profile, which already sweeps all ports)")
     s.add_argument("--no-passive", action="store_true",
                    help="do not query third-party OSINT/CVE sources (on by default)")
     s.add_argument("--aggressive", action="store_true",
@@ -276,6 +281,21 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
         g.add_argument("--ai-followup-timeout", type=float, default=120.0,
                        metavar="SEC",
                        help="per-command timeout for --ai-followup (default: 120)")
+        # Iterative loop (PLAN-LOOP §2). Subsumes --ai + --ai-followup.
+        g.add_argument("--ai-loop", action="store_true",
+                       help="iterative triage: each round triages, then auto-runs the "
+                            "passive suggested commands (active ones queue for consent). "
+                            "Implies --ai")
+        g.add_argument("--ai-loop-rounds", type=int, default=3, metavar="N",
+                       help="max loop rounds (default: 3; the dependable stop)")
+        g.add_argument("--ai-loop-auto", choices=["passive", "none"], default="passive",
+                       help="which suggested commands auto-run without consent "
+                            "(default: passive; 'none' queues everything)")
+        g.add_argument("--ai-loop-rate", type=int, default=5, metavar="N",
+                       help="max passive auto-runs per host per round (default: 5)")
+        g.add_argument("--ai-loop-resend", action="store_true",
+                       help="feed redacted command output back to the model between "
+                            "rounds (off by default; send-eligible tools only)")
     # No default. The two backends spend different money - an API key bills
     # per token, the CLI bills whatever Claude plan it is signed in to - so
     # assay makes you say which one rather than guessing on your behalf.
@@ -454,6 +474,10 @@ def make_config(args) -> Config:
         retries=args.retries,
         passive=not getattr(args, "no_passive", False),
         portscan=not args.no_portscan,
+        # UDP runs on every scan by default; --safe (retrieval-only) and
+        # --no-udp are the two ways to turn it off.
+        udp=not getattr(args, "no_udp", False) and not getattr(args, "safe", False),
+        deep_ports=not getattr(args, "no_deep_ports", False),
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",
@@ -620,7 +644,11 @@ def cmd_scan(args) -> int:
     summary(engine.store, assets)
 
     ai_result = None
-    if getattr(args, "ai", False):
+    if getattr(args, "ai_loop", False):
+        # The loop subsumes --ai + --ai-followup: it triages and runs the
+        # passive suggested commands itself, round by round.
+        ai_result = run_ai_loop(engine.store, cfg, args, assets)
+    elif getattr(args, "ai", False):
         ai_result = run_ai(engine.store, cfg, args, assets)
         # Only after a pass that actually returned triage: a dry run, a
         # refused send or a redaction failure all leave ai_result None, and
@@ -729,7 +757,8 @@ def _redaction_map(run_dir: str):
         return None
 
 
-def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
+def run_ai(store: Store, cfg: Config, args, assets: Dict,
+           redactor=None, followups=None) -> Optional[Dict]:
     from assay import ai as ai_mod
     from assay.redact import Redactor, terms_from_context
 
@@ -738,9 +767,13 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
         console.print("[yellow]nothing to triage[/yellow]")
         return None
 
-    hosts = [r["host"] for r in store.host_rows()] + [r["host"] for r in store.web_rows()]
-    terms = terms_from_context(cfg.targets, cfg.scope.allow, hosts)
-    redactor = Redactor(extra_terms=terms)
+    # The loop reuses one redactor across rounds so its pseudonym map grows
+    # (mint-on-miss) and stays consistent; a one-shot caller passes none and
+    # we build it from the run's known client terms.
+    if redactor is None:
+        hosts = [r["host"] for r in store.host_rows()] + [r["host"] for r in store.web_rows()]
+        terms = terms_from_context(cfg.targets, cfg.scope.allow, hosts)
+        redactor = Redactor(extra_terms=terms)
 
     ai_cfg = ai_mod.AIConfig(
         enabled=True,
@@ -782,7 +815,8 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
                           "Claude desktop app and shares its sign-in[/dim]")
             return None
 
-    payload, leaks = ai_mod.build_payload(findings, assets, ai_cfg, redactor)
+    payload, leaks = ai_mod.build_payload(findings, assets, ai_cfg, redactor,
+                                          followups=followups)
     if leaks:
         console.print("[red]redaction verification FAILED - nothing was sent.[/red]")
         for l in leaks[:15]:
@@ -867,6 +901,124 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
                       % textwrap.fill(local["summary"], 96, initial_indent="  ",
                                       subsequent_indent="  "))
     return local
+
+
+def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
+    """Iterative AI triage (PLAN-LOOP §2). Each round: triage -> collect the
+    model's suggested commands -> auto-run the passive, in-scope ones (the
+    active ones are queued for `assay followup --run` consent) -> record each
+    result. One redactor is reused across rounds so its map grows consistently.
+
+    This commit lands the loop CONTROL FLOW and recording; it does not yet feed
+    command output back to the model (that is the re-scrub step, §3, gated by
+    --ai-loop-resend). Without resend a second round would re-triage identical
+    input, so the loop runs a single round and says so.
+
+    RoE gate (§0.2, minimal in-code): auto-run is refused under --safe (these
+    commands send crafted traffic) and under a permissive scope (the scope gate
+    cannot protect anything without one) - the same two hard stops the one-shot
+    followup already enforces.
+    """
+    from assay import followup
+    from assay.redact import Redactor, terms_from_context
+
+    hosts = [r["host"] for r in store.host_rows()] + [r["host"] for r in store.web_rows()]
+    redactor = Redactor(extra_terms=terms_from_context(cfg.targets, cfg.scope.allow, hosts))
+
+    rounds = max(1, int(getattr(args, "ai_loop_rounds", 3) or 3))
+    auto_mode = getattr(args, "ai_loop_auto", "passive") or "passive"
+    resend = bool(getattr(args, "ai_loop_resend", False))
+    rate_cap = int(getattr(args, "ai_loop_rate", 5) or 5)
+    limit = int(getattr(args, "ai_followup_limit", 25) or 25)
+    timeout = float(getattr(args, "ai_followup_timeout", 120.0) or 120.0)
+
+    auto_ok = auto_mode == "passive" and not cfg.safe_mode and not cfg.scope.permissive
+    if auto_mode == "passive" and cfg.safe_mode:
+        console.print("  [dim]loop auto-run disabled: --safe is set[/dim]")
+    elif auto_mode == "passive" and cfg.scope.permissive:
+        console.print("  [dim]loop auto-run disabled: scope is permissive[/dim]")
+
+    from assay.store import TOOL_OUTPUT_CAP
+
+    last: Optional[Dict] = None
+    sendable: List[Dict] = []   # redacted results accumulated across rounds
+    seen_cmds: set = set()      # commands already run, so rounds don't repeat them
+    for rnd in range(rounds):
+        console.print("\n[bold]AI loop[/bold] round %d/%d" % (rnd + 1, rounds))
+        result = run_ai(store, cfg, args, assets, redactor=redactor,
+                        followups=sendable or None)
+        if not result:
+            break
+        last = result
+
+        cmds = [c for c in followup.collect(store, redactor.map)[:limit]
+                if c.raw not in seen_cmds]
+        vetted = [followup.vet(c.raw, cfg) for c in cmds]
+        for src, v in zip(cmds, vetted):
+            v.finding_id, v.finding_title = src.finding_id, src.finding_title
+        auto, queued, refused = followup.plan_followups(
+            vetted, auto_mode if auto_ok else "none", rate_cap)
+
+        console.print("  [dim]%d new suggested: %d auto-run, %d queued for consent, "
+                      "%d refused[/dim]" % (len(vetted), len(auto), len(queued), len(refused)))
+
+        new_sendable: List[Dict] = []
+        for v in auto:
+            console.print("  [bold]$ %s[/bold]" % v.display)
+            followup.run(v, timeout=timeout)
+            seen_cmds.add(v.raw)
+            state = "ok" if v.rc == 0 else "broke"
+            tool = v.argv[0].split("/")[-1] if v.argv else "?"
+
+            # Re-scrub (§3). The raw output stays LOCAL always (proof page).
+            # Only send-eligible tools are candidates to go back, and only when
+            # --ai-loop-resend is on: redact through the SHARED map, cap, then
+            # verify() per result - residue drops THIS result, never the run.
+            sent_text, did_send = "", False
+            if resend:
+                red, leaks = followup.rescrub(v.output, tool, redactor, cap=TOOL_OUTPUT_CAP)
+                if red is not None:
+                    sent_text, did_send = red, True
+                    new_sendable.append({
+                        "finding_id": v.finding_id,
+                        "command": redactor.text(v.display),
+                        "tool": tool,
+                        "output": red,
+                    })
+                elif leaks:
+                    console.print("    [yellow]not sent[/yellow] - %d residual item(s) "
+                                  "after redaction (kept local only)" % len(leaks))
+                elif v.output:
+                    console.print("    [dim]local-only (%s output not send-eligible)[/dim]" % tool)
+
+            store.record_followup_result(
+                round=rnd, finding_id=v.finding_id, finding_title=v.finding_title,
+                tool=tool, argv=v.display, tier=v.tier, rc=v.rc or 0, state=state,
+                output_local=v.output, output_sent=sent_text, sent=did_send)
+            store.set_status(v.finding_id, "followup-run",
+                             notes="$ %s\n(exit %s)\n%s" % (v.display, v.rc, v.output[:2000]))
+
+        for v in queued:
+            why = "active - needs consent" if v.tier != "passive" else "over rate cap"
+            console.print("  [yellow]QUEUE[/yellow] %s [dim](%s)[/dim]" % (v.display, why))
+        if queued:
+            console.print("  [dim]run queued commands with: assay followup --run[/dim]")
+
+        if not resend:
+            if rounds > 1:
+                console.print("  [dim]single round: --ai-loop-resend is off, so "
+                              "feeding output back is disabled (re-triage would be "
+                              "identical)[/dim]")
+            break
+        sendable.extend(new_sendable)
+        # Fixpoint stop: a round that fed nothing new back and left nothing
+        # queued cannot change the next triage, so stop rather than re-sending
+        # an identical payload. The round cap remains the dependable bound.
+        if not new_sendable and not queued:
+            console.print("  [dim]nothing new to feed back - stopping[/dim]")
+            break
+
+    return last
 
 
 def cmd_ai(args) -> int:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import shutil
 import re
 import subprocess
@@ -132,6 +133,37 @@ def human_duration(seconds: float) -> str:
 
 # Set by the engine so external commands land in the run journal too.
 JOURNAL = None
+
+# Set by the engine so every external command's outcome (command, exit, a
+# capped slice of output) lands in the verifiable tool-run ledger. Ambient
+# like JOURNAL and for the same reason: run() and stream_lines() are the two
+# spawn primitives the whole tool layer funnels through, so recording here
+# catches every invocation without threading a handle through every caller.
+LEDGER = None
+
+
+def _ledger(tool: str, argv: List[str], rc: int, state: str,
+            duration: float, output: str) -> None:
+    """Record one tool invocation in the ledger, if one is attached. Never
+    raises - the ledger must not be able to take a scan down with it."""
+    if LEDGER is None:
+        return
+    try:
+        LEDGER.record(tool=tool, argv=" ".join(shlex.quote(a) for a in argv),
+                      rc=rc, state=state, duration=duration, output=output)
+    except Exception:
+        pass
+
+
+def _ledger_proc(p: "Proc", t0: float) -> "Proc":
+    """Ledger a finished run() Proc and return it unchanged, so each return
+    site in run() stays a one-liner."""
+    state = ("skipped" if p.skipped else "timeout" if p.timed_out
+             else "ok" if p.rc == 0 else "broke")
+    out = (p.out or "") + (("\n" + p.err) if p.err else "")
+    _ledger(p.cmd[0].split("/")[-1] if p.cmd else "?", p.cmd, p.rc, state,
+            time.time() - t0, out)
+    return p
 
 # Set by the engine so a command that takes minutes can say it is still alive.
 # Ambient like JOURNAL, and for the same reason: every subprocess assay spawns
@@ -368,6 +400,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
     """
     env.augment_path()
     _record(cmd)
+    t0 = time.time()
     argv = list(cmd)
     proc_env = None
     if env_extra:
@@ -384,7 +417,8 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         # something only to kill it moments later.
         _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
              tick=False)
-        return Proc(rc=-1, out="", err="skipped by operator", cmd=list(cmd), skipped=True)
+        return _ledger_proc(
+            Proc(rc=-1, out="", err="skipped by operator", cmd=list(cmd), skipped=True), t0)
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -392,7 +426,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         )
     except OSError as exc:
         _record_failure(cmd, str(exc))
-        return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
+        return _ledger_proc(Proc(rc=-1, out="", err=str(exc), cmd=list(cmd)), t0)
     # Bound to a real Popen (unlike the subprocess.run() this replaced), so
     # this thread's own timer can act on a deadline or a skip directly - the
     # only way a single fully-blocking call like this one can be interrupted
@@ -402,22 +436,25 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
     try:
         out, err = proc.communicate(input=stdin, timeout=timeout)
         if hb.was_skipped:
-            return Proc(rc=proc.returncode, out=out or "", err=err or "skipped by operator",
-                        cmd=list(cmd), skipped=True)
+            return _ledger_proc(
+                Proc(rc=proc.returncode, out=out or "", err=err or "skipped by operator",
+                     cmd=list(cmd), skipped=True), t0)
         if proc.returncode != 0:
             _record_failure(cmd, err)
-        return Proc(rc=proc.returncode, out=out or "", err=err or "", cmd=list(cmd))
+        return _ledger_proc(
+            Proc(rc=proc.returncode, out=out or "", err=err or "", cmd=list(cmd)), t0)
     except subprocess.TimeoutExpired:
         # Terminate, not kill: matches stream_lines() - a tool writing a
         # result file needs the chance to close it.
         _stop(proc)
         out, err = proc.communicate()
         hb.timed_out(timeout)
-        return Proc(rc=-1, out=out or "", err="timeout after %ss" % timeout,
-                    cmd=list(cmd), timed_out=True)
+        return _ledger_proc(
+            Proc(rc=-1, out=out or "", err="timeout after %ss" % timeout,
+                 cmd=list(cmd), timed_out=True), t0)
     except (OSError, ValueError) as exc:
         _record_failure(cmd, str(exc))
-        return Proc(rc=-1, out="", err=str(exc), cmd=list(cmd))
+        return _ledger_proc(Proc(rc=-1, out="", err=str(exc), cmd=list(cmd)), t0)
     finally:
         hb.stop()
 
@@ -750,17 +787,87 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
         # only question is whether the wait is spent silently. --stats-every
         # makes nmap narrate it, stream_lines turns that into progress, and
         # nothing downstream cares if no one is reading.
+        t0 = time.time()
         for _ in stream_lines(cmd, timeout=timeout):
             pass
+        parsed = parse_nmap_xml(xml_path) if os.path.exists(xml_path) else {}
+        # Ledger the sweep's outcome. The full XML is on disk; this is the
+        # at-a-glance "nmap ran, found N open port(s) across M host(s)" (or
+        # none, or no XML at all) that makes the port scan verifiable.
+        ports = sum(len(h.ports) for h in parsed.values())
         if not os.path.exists(xml_path):
-            return {}
-        return parse_nmap_xml(xml_path)
+            summary, state = "nmap produced no XML (nothing scanned or scan cut short)", "broke"
+        elif ports:
+            summary = "\n".join(
+                "%s: %s" % (addr, ", ".join(
+                    "%d/%s%s" % (p.port, p.proto, " " + p.service if p.service else "")
+                    for p in h.ports))
+                for addr, h in sorted(parsed.items()))
+            state = "findings"
+        else:
+            summary, state = "no open ports across %d host(s)" % len(hosts), "no-findings"
+        _ledger("nmap", cmd, 0, state, time.time() - t0, summary)
+        return parsed
 
     results = _run(nmap_port_args(port_spec), "%s.xml" % xml_prefix)
     extra_args = nmap_extra_port_args(port_spec)
     if extra_args:
         _merge_nmap_hosts(results, _run(extra_args, "%s-extra.xml" % xml_prefix))
     return results
+
+
+# Curated high-value UDP ports. Deliberately NOT --top-ports: a full UDP sweep
+# is punishingly slow (closed ports rely on rate-limited ICMP unreachables), so
+# this is a hand-picked set where each port maps to a real, reportable finding -
+# DNS, SNMP, NTP amplification, TFTP, IKE, NetBIOS, SSDP, mDNS, rpcbind, IPMI,
+# memcached, XDMCP, chargen, RIP, MSSQL browser.
+UDP_PORTS = [19, 53, 69, 111, 123, 137, 138, 161, 162, 177, 500, 520,
+             623, 1434, 1900, 4500, 5353, 11211]
+
+
+def nmap_udp_scan(hosts: List[str], tune: Dict, out_dir: str = ".",
+                  xml_prefix: str = "nmap-udp",
+                  timeout: Optional[float] = None) -> Dict[str, NmapHost]:
+    """Curated-port UDP service scan. Returns scanned address -> NmapHost, with
+    ports carrying their honest `open` / `open|filtered` state (UDP usually
+    cannot tell the two apart).
+
+    Separate from nmap_scan() on purpose: UDP needs its own, much more
+    forgiving timing (a wide sweep would otherwise never finish) and its own
+    XML file so it does not clobber the TCP scan's - the same per-prefix
+    hazard nmap_scan() documents.
+    """
+    if not hosts:
+        return {}
+    ports = ",".join(str(p) for p in UDP_PORTS)
+    # Low version-intensity and a tight per-host budget: UDP is slow and
+    # lossy by nature, so bound it hard rather than chase certainty.
+    base = ["nmap", "-Pn", "-sU", "-sV", "--version-intensity", "0",
+            "-T3" if tune.get("constrained") else "-T4",
+            "--max-retries", "1", "--host-timeout", "5m",
+            "-p", ports]
+    xml_path = os.path.join(out_dir, "raw", "%s.xml" % xml_prefix)
+    os.makedirs(os.path.dirname(xml_path), exist_ok=True)
+    cmd = base + ["-oX", env.to_wsl_path(xml_path)] + hosts
+    deadline = timeout if timeout is not None else max(300.0, 180.0 * len(hosts))
+    t0 = time.time()
+    for _ in stream_lines(["nmap", "--stats-every", "10s"] + cmd[1:], timeout=deadline):
+        pass
+    parsed = parse_nmap_xml(xml_path, include_open_filtered=True) if os.path.exists(xml_path) else {}
+    n = sum(len(h.ports) for h in parsed.values())
+    if not os.path.exists(xml_path):
+        summary, state = "nmap produced no UDP XML (nothing scanned or cut short)", "broke"
+    elif n:
+        summary = "\n".join(
+            "%s: %s" % (addr, ", ".join(
+                "%d/udp %s%s" % (p.port, p.state, " " + p.service if p.service else "")
+                for p in h.ports))
+            for addr, h in sorted(parsed.items()))
+        state = "findings"
+    else:
+        summary, state = "no UDP ports responded across %d host(s)" % len(hosts), "no-findings"
+    _ledger("nmap", cmd, 0, state, time.time() - t0, summary)
+    return parsed
 
 
 # --------------------------------------------------------------------------
@@ -960,14 +1067,21 @@ def _salvage_nmap_xml(path: str):
         return None
 
 
-def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
+def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> Dict[str, NmapHost]:
     """Parse nmap's XML into scanned address -> NmapHost.
 
     Keyed by the numeric address nmap scanned (always present - nmap resolves
     a hostname target to an address before it ever probes a port), not by a
     reverse-DNS name. See nmap_scan()'s docstring for why that distinction
     matters.
+
+    `include_open_filtered` keeps ports in the `open|filtered` state, which is
+    UDP's dominant result (no reply means nmap cannot tell open from filtered).
+    TCP parsing leaves it False so only genuinely open ports count; the UDP
+    scan passes True and the state is carried through honestly rather than
+    being relabelled "open".
     """
+    keep_states = {"open", "open|filtered"} if include_open_filtered else {"open"}
     out: Dict[str, NmapHost] = {}
     try:
         root = ET.parse(path).getroot()
@@ -994,13 +1108,14 @@ def parse_nmap_xml(path: str) -> Dict[str, NmapHost]:
         ports: List[Port] = []
         for p in host_el.findall("ports/port"):
             state_el = p.find("state")
-            if state_el is None or state_el.get("state") != "open":
+            pstate = state_el.get("state") if state_el is not None else ""
+            if pstate not in keep_states:
                 continue
             svc = p.find("service")
             ports.append(Port(
                 port=int(p.get("portid", "0")),
                 proto=p.get("protocol", "tcp"),
-                state="open",
+                state=pstate,
                 service=(svc.get("name", "") if svc is not None else ""),
                 product=(svc.get("product", "") if svc is not None else ""),
                 version=(svc.get("version", "") if svc is not None else ""),
@@ -1148,6 +1263,7 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
                "-c", str(tune.get("concurrency", 10))] + port_args
         found: Dict[str, List[int]] = {}
+        t0 = time.time()
         # naabu only ever emits a line for a port it found open, so there is no
         # honest "N of 384 swept" to report - what stream_lines counts as it
         # streams is exactly the open ports found so far, which is enough to
@@ -1158,6 +1274,15 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                 p = obj.get("port")
                 if h and p:
                     found.setdefault(str(h), []).append(int(p))
+        # Ledger the sweep so a zero-port result is a visible, verifiable
+        # outcome rather than silence - this is the case that made a scan's
+        # report impossible to trust ("did naabu find nothing, or break?").
+        total = sum(len(v) for v in found.values())
+        summary = ("\n".join("%s: %s" % (h, ",".join(str(x) for x in sorted(set(v))))
+                             for h, v in sorted(found.items()))
+                   if found else "no open ports found across %d host(s)" % len(hosts))
+        _ledger("naabu", cmd + ["-list", "%d host(s)" % len(hosts)], 0,
+                "findings" if found else "no-findings", time.time() - t0, summary)
         return found
 
     found = _run(spec, base)

@@ -138,13 +138,21 @@ class RedactionMap:
         return token
 
     def save(self, path: str) -> None:
+        """Write the map atomically (temp + rename) so a crash mid-write - or a
+        re-save after each loop round as the map grows (PLAN-LOOP §8) - can
+        never leave a half-written mapping that would mis-rehydrate real values.
+        """
         payload = {"reverse": self.reverse, "counters": self.counters}
-        with open(path, "w", encoding="utf-8") as fh:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
         try:
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)   # 0600, owner only
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)   # 0600, owner only
         except OSError:
             pass
+        os.replace(tmp, path)   # atomic on POSIX and Windows
 
     @classmethod
     def load(cls, path: str) -> "RedactionMap":

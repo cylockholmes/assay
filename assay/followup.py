@@ -46,6 +46,59 @@ ALLOWED = {
     "jq", "grep", "echo", "strings", "base64", "sort", "uniq", "head", "wc",
 }
 
+# Risk tiering (PLAN-LOOP §1), by the TWO independent axes that matter:
+#
+#   tier  = may this invocation AUTO-RUN without the operator saying yes?
+#   send  = may this tool's OUTPUT be sent back to the AI (when resend is on)?
+#
+# They are orthogonal: curl is cheap to auto-run but its raw body is the
+# highest-risk thing to send, so it is passive-to-run yet never send-eligible.
+#
+# PASSIVE_BINS: no packets to the target, or a single benign request. Default
+# is DENY - a binary not listed here is ACTIVE and needs consent, and even a
+# listed one is ACTIVE if its arguments look active (see _tier).
+PASSIVE_BINS = {
+    "dig", "host", "nslookup", "dnsx", "tlsx", "openssl", "whatweb", "wafw00f",
+    "gau", "waybackurls", "curl", "wget",
+    "jq", "grep", "echo", "strings", "base64", "sort", "uniq", "head", "wc",
+}
+
+# curl/wget flags that make an otherwise-passive fetch active (writes a body,
+# uploads, posts a form, or forces a non-GET method).
+_CURL_ACTIVE = {"-d", "--data", "--data-binary", "--data-raw", "--data-urlencode",
+                "-F", "--form", "-T", "--upload-file", "-X", "--request"}
+
+# SEND_ELIGIBLE: tools whose output is bounded, infra-level metadata rather
+# than raw target/attacker-controlled content, so it MAY be re-redacted and
+# sent back to the AI when output-resend is enabled. Everything else is
+# local-only (proof page / ledger), never sent. Default is DENY.
+SEND_ELIGIBLE = {
+    "dig", "host", "nslookup", "dnsx",          # DNS answers
+    "whatweb", "wafw00f", "tlsx", "nmap", "naabu",  # infra fingerprint
+    "wc", "sort", "uniq",                        # pure counts/ordering
+}
+
+
+def tier_of(argv: List[str]) -> str:
+    """'passive' (auto-run eligible) or 'active' (needs consent). Default-deny:
+    anything not provably passive is active."""
+    if not argv:
+        return "active"
+    b = argv[0].split("/")[-1]
+    if b not in PASSIVE_BINS:
+        return "active"
+    if b in ("curl", "wget"):
+        for a in argv[1:]:
+            if a in _CURL_ACTIVE or a.startswith("--data"):
+                return "active"
+    return "passive"
+
+
+def send_eligible(tool: str) -> bool:
+    """Whether this tool's output may ever be sent back to the AI (§3)."""
+    return (tool or "").split("/")[-1] in SEND_ELIGIBLE
+
+
 # Flags that turn an allowed tool into something else entirely.
 BANNED_ARGS = re.compile(
     r"^(?:-e|--exec|--eval|-oN?\s*/etc|--output-document=/|--script-args=.*unsafe)",
@@ -70,6 +123,7 @@ class Command:
     hosts: List[str] = field(default_factory=list)
     output: str = ""
     rc: Optional[int] = None
+    tier: str = "active"   # 'passive' (auto-run eligible) or 'active' (consent)
 
     @property
     def display(self) -> str:
@@ -130,9 +184,62 @@ def vet(raw: str, cfg: Config) -> Command:
 
     cmd.argv = argv
     cmd.hosts = hosts
+    cmd.tier = tier_of(argv)
     cmd.ok = True
     cmd.reason = "ready"
     return cmd
+
+
+def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> Tuple[Optional[str], List[str]]:
+    """Decide whether a command's output may go back to the AI (PLAN-LOOP §3).
+
+    Returns (sendable_text, leaks). sendable_text is None when the output must
+    stay local - because the tool is not send-eligible, or because redaction
+    left residual client identifiers (leaks non-empty). Only a send-eligible
+    tool whose redacted output passes verify() comes back as text to send.
+
+    `verify()` catches only KNOWN entities (seeded terms + minted tokens), so
+    this reduces but cannot eliminate residual risk; that is exactly why
+    resend is opt-in and high-risk tools are excluded by send_eligible().
+    """
+    if not output or not send_eligible(tool):
+        return None, []
+    redacted = redactor.text(output)[:cap]
+    leaks = redactor.verify(redacted)
+    if leaks:
+        return None, leaks
+    return redacted, []
+
+
+def plan_followups(vetted: List[Command], auto_mode: str = "passive",
+                   rate_cap_per_host: int = 5) -> Tuple[List[Command], List[Command], List[Command]]:
+    """Partition vetted commands into (auto_run, queued, refused) for one round.
+
+    Default-deny all the way down:
+      * a command that did not pass vet() is refused (allow-list / shell / scope);
+      * an active-tier command is queued for consent, never auto-run;
+      * a passive command auto-runs only when auto_mode == 'passive' and it is
+        within the per-host rate cap - anything over the cap is queued, so
+        'passive' can never become a slow scan by sheer volume.
+    """
+    auto: List[Command] = []
+    queued: List[Command] = []
+    refused: List[Command] = []
+    per_host: Dict[str, int] = {}
+    for c in vetted:
+        if not c.ok:
+            refused.append(c)
+            continue
+        if c.tier != "passive" or auto_mode != "passive":
+            queued.append(c)
+            continue
+        host_key = c.hosts[0] if c.hosts else ""
+        if per_host.get(host_key, 0) >= rate_cap_per_host:
+            queued.append(c)          # over the per-host cap this round
+            continue
+        per_host[host_key] = per_host.get(host_key, 0) + 1
+        auto.append(c)
+    return auto, queued, refused
 
 
 def run(cmd: Command, timeout: float = 120.0) -> Command:
