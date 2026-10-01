@@ -109,6 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
     s.add_argument("--no-udp", action="store_true",
                    help="skip the curated-port UDP sweep (on by default; also off under --safe)")
+    s.add_argument("--no-deep-ports", action="store_true",
+                   help="skip the serial full-range naabu wave for obscure TCP ports "
+                        "(on by default except the deep profile, which already sweeps all ports)")
     s.add_argument("--no-passive", action="store_true",
                    help="do not query third-party OSINT/CVE sources (on by default)")
     s.add_argument("--aggressive", action="store_true",
@@ -459,6 +462,7 @@ def make_config(args) -> Config:
         # UDP runs on every scan by default; --safe (retrieval-only) and
         # --no-udp are the two ways to turn it off.
         udp=not getattr(args, "no_udp", False) and not getattr(args, "safe", False),
+        deep_ports=not getattr(args, "no_deep_ports", False),
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",

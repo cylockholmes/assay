@@ -147,6 +147,7 @@ class Engine:
             self._run_stage("ports", lambda: (
                 self._stage_portscan(),
                 self._stage_discover_hostnames(),
+                self._stage_deep_ports(),
                 self._stage_udp(),
                 self._stage_nmapview(),
             ))
@@ -381,6 +382,57 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in t.ports]})
         self.ctx.say("ports", "UDP sweep found %d responding port(s)" % found)
+
+    # -- stage 2b: deep TCP wave (obscure ports, serial) ------------------
+    def _stage_deep_ports(self) -> None:
+        """A second, full-range naabu sweep to catch obscure TCP ports the
+        profile's top-N sweep misses (dev/debug/management interfaces on odd
+        ports), then nmap -sV on just the newly-found ports.
+
+        Serial by design - run after the main nmap, not overlapped with it:
+        two scanners hitting one host at once is noisier and trips rate limits,
+        which on an authorized-but-watched engagement is not worth the
+        wall-clock. Skipped for the 'deep' profile, whose first sweep is
+        already full-range, and disabled by --no-deep-ports.
+        """
+        if not self.cfg.deep_ports:
+            return
+        if not (self.ctx.has("naabu") and self.ctx.has("nmap")):
+            return
+        if self.cfg.opts.get("port_spec") == "all":
+            return  # the initial sweep already covered every port
+        targets = [t for t in self.ctx.targets if t.kind != "url"]
+        hosts = [t.host for t in targets]
+        if not hosts:
+            return
+        self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(hosts))
+        swept = tools.naabu_scan(hosts, "all", self.tune)
+        known = {p.port for t in targets for p in t.ports if p.proto == "tcp"}
+        new_ports = sorted({p for ports in swept.values() for p in ports} - known)
+        if not new_ports:
+            self.ctx.say("ports", "deep sweep found no additional ports")
+            return
+        self.ctx.say("ports", "deep sweep found %d new port(s); nmap -sV on those"
+                     % len(new_ports))
+        spec = ",".join(str(p) for p in new_ports)
+        shosts = self._resolve_swept_hosts(targets, swept.keys()) or hosts
+        results = tools.nmap_scan(shosts, spec, self.tune,
+                                  out_dir=self.cfg.out_dir, xml_prefix="nmap-deep")
+        by_host = {t.host: t for t in targets}
+        by_ip = {t.ip: t for t in targets if t.ip}
+        added = 0
+        for addr, nh in results.items():
+            t = by_ip.get(addr) or by_host.get(addr)
+            if t is None:
+                continue
+            existing = {(p.port, p.proto) for p in t.ports}
+            for p in nh.ports:
+                if (p.port, p.proto) not in existing:
+                    t.ports.append(p)
+                    added += 1
+            self.store.save_host(t.host, t.ip or "", {
+                "ports": [p.__dict__ for p in t.ports]})
+        self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
 
     def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
