@@ -296,6 +296,9 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
         g.add_argument("--ai-loop-resend", action="store_true",
                        help="feed redacted command output back to the model between "
                             "rounds (off by default; send-eligible tools only)")
+        g.add_argument("--ai-loop-budget", type=float, default=0.0, metavar="USD",
+                       help="additional cumulative-cost ceiling for the loop, API "
+                            "backend only (0 = off; rounds remain the universal cap)")
     # No default. The two backends spend different money - an API key bills
     # per token, the CLI bills whatever Claude plan it is signed in to - so
     # assay makes you say which one rather than guessing on your behalf.
@@ -909,16 +912,18 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
     active ones are queued for `assay followup --run` consent) -> record each
     result. One redactor is reused across rounds so its map grows consistently.
 
-    This commit lands the loop CONTROL FLOW and recording; it does not yet feed
-    command output back to the model (that is the re-scrub step, §3, gated by
-    --ai-loop-resend). Without resend a second round would re-triage identical
-    input, so the loop runs a single round and says so.
+    With --ai-loop-resend, a round's send-eligible output is re-scrubbed (§3)
+    and fed into the next round; without it the loop runs a single round, since
+    re-triaging identical input would just repeat itself. Stops are the round
+    cap (dependable), a fixpoint (nothing new fed back and nothing queued), and
+    an optional USD budget on the API backend (§4).
 
     RoE gate (§0.2, minimal in-code): auto-run is refused under --safe (these
     commands send crafted traffic) and under a permissive scope (the scope gate
     cannot protect anything without one) - the same two hard stops the one-shot
     followup already enforces.
     """
+    from assay import ai as ai_mod
     from assay import followup
     from assay.redact import Redactor, terms_from_context
 
@@ -931,6 +936,13 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
     rate_cap = int(getattr(args, "ai_loop_rate", 5) or 5)
     limit = int(getattr(args, "ai_followup_limit", 25) or 25)
     timeout = float(getattr(args, "ai_followup_timeout", 120.0) or 120.0)
+    # §4 budget: rounds are the universal ceiling; a USD budget is an ADDITIONAL
+    # cap that only means anything on the API backend (the CLI bills to a plan,
+    # where the reported cost is an equivalent, not a charge), so it is ignored
+    # for claude-cli.
+    budget_usd = float(getattr(args, "ai_loop_budget", 0.0) or 0.0)
+    backend = getattr(args, "ai_backend", "") or ""
+    spent_usd = 0.0
 
     auto_ok = auto_mode == "passive" and not cfg.safe_mode and not cfg.scope.permissive
     if auto_mode == "passive" and cfg.safe_mode:
@@ -1016,6 +1028,14 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
         # an identical payload. The round cap remains the dependable bound.
         if not new_sendable and not queued:
             console.print("  [dim]nothing new to feed back - stopping[/dim]")
+            break
+        # §4 USD budget (API backend only): stop before the NEXT round's send
+        # once cumulative spend would exceed the ceiling.
+        spent_usd += float((last.get("_usage") or {}).get("cost_estimate_usd", 0.0) or 0.0)
+        if budget_usd and backend == ai_mod.BACKEND_API and spent_usd >= budget_usd:
+            console.print("  [yellow]budget reached[/yellow] - ~$%.3f spent of $%.2f "
+                          "ceiling; stopping before the next round"
+                          % (spent_usd, budget_usd))
             break
 
     return last
