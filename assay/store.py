@@ -58,7 +58,28 @@ CREATE TABLE IF NOT EXISTS stage_log (
     started REAL, finished REAL
 );
 CREATE INDEX IF NOT EXISTS idx_stage_log_stage ON stage_log(stage, id DESC);
+CREATE TABLE IF NOT EXISTS tool_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    stage TEXT,
+    tool TEXT,
+    argv TEXT,
+    rc INTEGER,
+    state TEXT,
+    duration REAL,
+    bytes_out INTEGER,
+    output TEXT,
+    started REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_runs_run ON tool_runs(run_id, id);
 """
+
+# How much of a tool's output the ledger keeps. Enough to verify a negative
+# ("naabu ran, returned nothing") or read an error, without turning the
+# database into a dumping ground for a tool that streamed a hundred thousand
+# lines. The full output, un-truncated, lives in the raw/ artifacts a tool
+# writes itself (nmap XML and the like); this is the at-a-glance record.
+TOOL_OUTPUT_CAP = 8192
 # The schema had an EMPTY, never-read-or-written "progress" table here before
 # this - aspirational scaffolding for exactly this feature that was never
 # wired up. Replaced rather than left beside stage_log: a database with two
@@ -186,6 +207,44 @@ class Store:
                 "SELECT stage, status, started, finished FROM stage_log"
                 " WHERE id IN (SELECT MAX(id) FROM stage_log GROUP BY stage)"
                 " ORDER BY started"
+            ).fetchall()
+
+    # -- tool-run ledger -----------------------------------------------
+    # One row per external tool invocation: the exact command, how it ended,
+    # and a capped slice of its output. This is what makes a report
+    # verifiable - a "no findings" you can confirm by reading the command and
+    # its (empty) output, and a tool that broke told apart from one that ran
+    # cleanly and found nothing. `state` is one of:
+    #   findings     ran, produced results (set by the calling module)
+    #   no-findings  ran cleanly, empty result (set by the calling module)
+    #   ok           ran, exit 0, outcome not classified by the caller
+    #   broke        non-zero exit, or spawn error
+    #   timeout      hit its deadline
+    #   skipped      moved past by the operator's skip key
+    def record_tool_run(self, tool: str, argv: str, rc: int, state: str,
+                        duration: float = 0.0, output: str = "",
+                        stage: str = "") -> None:
+        full = output or ""
+        kept = full if len(full) <= TOOL_OUTPUT_CAP else (
+            full[:TOOL_OUTPUT_CAP] + "\n... [output truncated at %d bytes]" % TOOL_OUTPUT_CAP)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO tool_runs (run_id, stage, tool, argv, rc, state,"
+                " duration, bytes_out, output, started) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (self.run_id, stage, tool, argv, rc, state, duration,
+                 len(full), kept, time.time()),
+            )
+            self._conn.commit()
+
+    def tool_runs(self, run_id: Optional[int] = None) -> List[sqlite3.Row]:
+        """Every tool invocation for a run, in order. Defaults to the current
+        run; `assay report` on a prior run passes that run's id."""
+        rid = self.run_id if run_id is None else run_id
+        with self._lock:
+            return self._conn.execute(
+                "SELECT stage, tool, argv, rc, state, duration, bytes_out,"
+                " output, started FROM tool_runs WHERE run_id=? ORDER BY id",
+                (rid,),
             ).fetchall()
 
     def close(self) -> None:

@@ -79,6 +79,24 @@ TECH_SIGNATURES: List[Tuple[str, str]] = [
 ]
 
 
+class _Ledger:
+    """Adapter handed to tools.LEDGER: writes each tool invocation to the
+    Store, stamped with the stage currently running. Kept tiny and holding
+    only the store and ctx, not a closure over the whole engine."""
+
+    __slots__ = ("_store", "_ctx")
+
+    def __init__(self, store: Store, ctx: Context) -> None:
+        self._store = store
+        self._ctx = ctx
+
+    def record(self, tool: str, argv: str, rc: int, state: str,
+               duration: float, output: str) -> None:
+        self._store.record_tool_run(
+            tool=tool, argv=argv, rc=rc, state=state, duration=duration,
+            output=output, stage=self._ctx.stage)
+
+
 class Engine:
     def __init__(self, cfg: Config, progress: Optional[Callable] = None) -> None:
         cfg.ensure_dirs()
@@ -96,6 +114,10 @@ class Engine:
         self.journal = Journal(cfg.out_dir, enabled=cfg.journal)
         self.http.journal = self.journal
         tools.JOURNAL = self.journal
+        # Every external command's outcome lands in the verifiable tool-run
+        # ledger, stamped with the stage it ran under (Context.stage tracks
+        # whatever stage is currently talking).
+        tools.LEDGER = _Ledger(self.store, self.ctx)
         # Every external command now reports through the run's progress
         # hook, so a tool that works quietly still shows it is alive.
         tools.PROGRESS = self.ctx.tool_progress

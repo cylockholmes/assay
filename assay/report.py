@@ -34,6 +34,63 @@ def _e(s) -> str:
     return html.escape("" if s is None else str(s), quote=True)
 
 
+# How each ledger state is labelled and coloured in the tool-run table. The
+# point of the whole section is that these are distinguishable at a glance -
+# a tool that found nothing must not look like one that broke.
+_TOOL_STATE = {
+    "findings":    ("findings", "tr-ok"),
+    "no-findings": ("no findings", "tr-none"),
+    "ok":          ("ran", "tr-ok"),
+    "no-run":      ("not run", "tr-skip"),
+    "not-run":     ("not run", "tr-skip"),
+    "skipped":     ("skipped", "tr-skip"),
+    "timeout":     ("timed out", "tr-bad"),
+    "broke":       ("broke", "tr-bad"),
+}
+
+
+def _tool_runs_section(store: Store) -> str:
+    """A verifiable record of every external tool invocation: what ran, how it
+    ended, and - crucially for a "no findings" result - the exact command and
+    its (possibly empty) output, so a reviewer can confirm the negative."""
+    try:
+        rows = store.tool_runs()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+
+    items = []
+    for r in rows:
+        label, cls = _TOOL_STATE.get(r["state"], (r["state"] or "ran", "tr-ok"))
+        dur = human_duration(r["duration"] or 0)
+        argv = r["argv"] or ""
+        out = (r["output"] or "").rstrip()
+        rc = r["rc"]
+        meta = "stage %s &middot; rc %s &middot; %s" % (
+            _e(r["stage"] or "-"), _e(rc), _e(dur))
+        body = (
+            '<div class="cmdwrap"><code>%s</code>'
+            '<button class="copy" data-copy="%s">copy</button></div>'
+            '<pre class="tr-out">%s</pre>'
+        ) % (_e(argv), _e(argv), _e(out) if out else '<span class="dim">(no output)</span>')
+        items.append(
+            '<details class="tr-row">'
+            '<summary><span class="tr-state %s">%s</span>'
+            '<b>%s</b> <span class="dim">%s</span></summary>%s</details>'
+            % (cls, _e(label), _e(r["tool"]), meta, body)
+        )
+
+    return (
+        '<section class="bucket" id="tool-runs">'
+        '<h2>Tool runs <span class="count">%d</span></h2>'
+        '<p class="blurb">Every external command this run issued, how it ended, '
+        'and its output - so a "no findings" result is verifiable, not just '
+        'absent, and a tool that broke is told apart from one that found '
+        'nothing.</p>%s</section>'
+    ) % (len(rows), "".join(items))
+
+
 def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
           scan_meta: Optional[Dict] = None, live: bool = False,
           status: Optional[Dict] = None) -> str:
@@ -67,6 +124,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
         parts.append(_chains_section(chains, findings))
 
     out_dir = os.path.dirname(os.path.abspath(out_path))
+    parts.append(_tool_runs_section(store))
     parts.append(_inventory(store))
     parts.append(_software_section(out_dir))
     parts.append(_nmap_section(out_dir))
@@ -670,6 +728,15 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 .tags a{color:var(--acc);font-size:11px;text-decoration:none;margin-left:4px}
 details{margin-top:12px}
 summary{cursor:pointer;color:var(--dim);font-size:12px}
+.tr-row{margin-top:6px;border:1px solid var(--line);border-radius:6px;padding:7px 10px}
+.tr-row summary{color:var(--fg);display:flex;align-items:center;gap:9px}
+.tr-row summary b{font-family:ui-monospace,Menlo,monospace}
+.tr-state{border-radius:5px;padding:1px 8px;font-size:11px;font-weight:700;text-transform:uppercase;color:#0b0d10}
+.tr-state.tr-ok{background:#2f7a4d;color:#fff}
+.tr-state.tr-none{background:#6b7280;color:#fff}
+.tr-state.tr-skip{background:#b7791f;color:#fff}
+.tr-state.tr-bad{background:#b4452f;color:#fff}
+.tr-out{white-space:pre-wrap;word-break:break-word;margin:8px 0 0;max-height:320px;overflow:auto;font-size:12px}
 .ev{margin-top:8px}
 .ev-label{color:var(--dim);font-size:11px;margin-bottom:3px}
 pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px 12px;overflow-x:auto;font-size:11.5px;margin:0;white-space:pre-wrap;word-break:break-word;max-height:340px}
