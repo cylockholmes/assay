@@ -46,6 +46,59 @@ ALLOWED = {
     "jq", "grep", "echo", "strings", "base64", "sort", "uniq", "head", "wc",
 }
 
+# Risk tiering (PLAN-LOOP §1), by the TWO independent axes that matter:
+#
+#   tier  = may this invocation AUTO-RUN without the operator saying yes?
+#   send  = may this tool's OUTPUT be sent back to the AI (when resend is on)?
+#
+# They are orthogonal: curl is cheap to auto-run but its raw body is the
+# highest-risk thing to send, so it is passive-to-run yet never send-eligible.
+#
+# PASSIVE_BINS: no packets to the target, or a single benign request. Default
+# is DENY - a binary not listed here is ACTIVE and needs consent, and even a
+# listed one is ACTIVE if its arguments look active (see _tier).
+PASSIVE_BINS = {
+    "dig", "host", "nslookup", "dnsx", "tlsx", "openssl", "whatweb", "wafw00f",
+    "gau", "waybackurls", "curl", "wget",
+    "jq", "grep", "echo", "strings", "base64", "sort", "uniq", "head", "wc",
+}
+
+# curl/wget flags that make an otherwise-passive fetch active (writes a body,
+# uploads, posts a form, or forces a non-GET method).
+_CURL_ACTIVE = {"-d", "--data", "--data-binary", "--data-raw", "--data-urlencode",
+                "-F", "--form", "-T", "--upload-file", "-X", "--request"}
+
+# SEND_ELIGIBLE: tools whose output is bounded, infra-level metadata rather
+# than raw target/attacker-controlled content, so it MAY be re-redacted and
+# sent back to the AI when output-resend is enabled. Everything else is
+# local-only (proof page / ledger), never sent. Default is DENY.
+SEND_ELIGIBLE = {
+    "dig", "host", "nslookup", "dnsx",          # DNS answers
+    "whatweb", "wafw00f", "tlsx", "nmap", "naabu",  # infra fingerprint
+    "wc", "sort", "uniq",                        # pure counts/ordering
+}
+
+
+def tier_of(argv: List[str]) -> str:
+    """'passive' (auto-run eligible) or 'active' (needs consent). Default-deny:
+    anything not provably passive is active."""
+    if not argv:
+        return "active"
+    b = argv[0].split("/")[-1]
+    if b not in PASSIVE_BINS:
+        return "active"
+    if b in ("curl", "wget"):
+        for a in argv[1:]:
+            if a in _CURL_ACTIVE or a.startswith("--data"):
+                return "active"
+    return "passive"
+
+
+def send_eligible(tool: str) -> bool:
+    """Whether this tool's output may ever be sent back to the AI (§3)."""
+    return (tool or "").split("/")[-1] in SEND_ELIGIBLE
+
+
 # Flags that turn an allowed tool into something else entirely.
 BANNED_ARGS = re.compile(
     r"^(?:-e|--exec|--eval|-oN?\s*/etc|--output-document=/|--script-args=.*unsafe)",
@@ -70,6 +123,7 @@ class Command:
     hosts: List[str] = field(default_factory=list)
     output: str = ""
     rc: Optional[int] = None
+    tier: str = "active"   # 'passive' (auto-run eligible) or 'active' (consent)
 
     @property
     def display(self) -> str:
@@ -130,6 +184,7 @@ def vet(raw: str, cfg: Config) -> Command:
 
     cmd.argv = argv
     cmd.hosts = hosts
+    cmd.tier = tier_of(argv)
     cmd.ok = True
     cmd.reason = "ready"
     return cmd
