@@ -26,6 +26,11 @@ targets.txt
 burp*.xml
 *-scope.json
 
+# --- tests: kept local, never published -----------------------------------
+# The test suite stays on the developer's machine (it still runs) but is not
+# part of the public repo. Stripped from history too.
+tests/
+
 # --- python ---------------------------------------------------------------
 .venv/
 venv/
