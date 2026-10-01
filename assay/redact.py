@@ -25,21 +25,9 @@ import stat
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
-# Domains that belong to the security community, not to the client. These are
-# the only hostnames allowed through, because they appear in our own reference
-# links and carry no client information.
-ALLOWED_DOMAINS = {
-    "owasp.org", "cwe.mitre.org", "portswigger.net", "nvd.nist.gov",
-    "cve.mitre.org", "example.com", "example.net", "example.org",
-    "github.com", "projectdiscovery.io", "rfc-editor.org", "w3.org",
-    "localhost", "ietf.org", "mitre.org", "first.org",
-}
-
-# Technology tokens that look like hostnames but are product names.
-TECH_WORDS = {
-    "spring.io", "asp.net", "vue.js", "node.js", "next.js", "nuxt.js",
-    "jquery.js", "angular.js", "react.js", "d3.js", "bootstrap.css",
-}
+# The redaction allowlist (public domains never pseudonymised) lives in its own
+# module so it can be read and tuned on its own. See domain_allowlist.py.
+from assay.domain_allowlist import ALLOWED_DOMAINS, TECH_WORDS
 
 
 def _rx(pattern: str, flags: int = 0) -> Pattern:
