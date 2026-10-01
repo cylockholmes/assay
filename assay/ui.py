@@ -7,10 +7,19 @@ VM, so refresh is throttled and the findings table is capped.
 
 from __future__ import annotations
 
+import select
 import shutil
+import sys
+import threading
 import time
 from collections import deque
-from typing import Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional
+
+try:  # POSIX-only; without them the live skip key is simply unavailable
+    import termios
+    import tty
+except ImportError:
+    termios = tty = None
 
 from rich.align import Align
 from rich.box import ROUNDED, SIMPLE
@@ -65,6 +74,13 @@ class Dashboard:
         self.stage_started = time.time()
         self._live: Optional[Live] = None
         self._last_render = 0.0
+        # The live skip key. `skip_available` is set by cmd_scan only when a
+        # KeyListener actually armed, so the header never advertises [s] when
+        # nothing is listening. `skip_requested` is flipped by the key handler
+        # (on its own thread) and read back here, the owning render thread -
+        # the handler must not touch any richer state than this one bool.
+        self.skip_available = False
+        self.skip_requested = False
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self) -> "Dashboard":
@@ -97,6 +113,7 @@ class Dashboard:
         if stage != "error":
             if stage != self.stage:
                 self.stage_started = time.time()
+                self.skip_requested = False   # the ack clears when its stage ends
             self.stage = stage
         self.detail = msg
         if advance == 0:
@@ -134,6 +151,13 @@ class Dashboard:
     def _render(self):
         width = shutil.get_terminal_size((100, 30)).columns
 
+        if self.skip_requested:
+            skip = (("   skip requested", "yellow bold"),)
+        elif self.skip_available:
+            skip = (("   [s]", "dim bold"), (" skip", "dim"))
+        else:
+            skip = ()
+
         head = Table.grid(expand=True)
         head.add_column(justify="left")
         head.add_column(justify="right")
@@ -144,7 +168,7 @@ class Dashboard:
                           ("   stage ", "dim"), (self.stage, "bold cyan"),
                           ("  %s" % human_duration(time.time() - self.stage_started),
                            "dim"),
-                          ("   [s]", "dim bold"), (" skip", "dim")),
+                          *skip),
             Text.assemble(
                 (str(self.counts.get("CHASE", 0)), "bold red"), (" chase  ", "dim"),
                 (str(self.counts.get("LOOK", 0)), "yellow"), (" look  ", "dim"),
@@ -202,23 +226,20 @@ class KeyListener:
     """
 
     def __init__(self) -> None:
-        self._thread: Optional["threading.Thread"] = None
-        self._stop_evt: Optional["threading.Event"] = None
-        self.on_key: Optional["Callable[[str], None]"] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_evt: Optional[threading.Event] = None
+        self.on_key: Optional[Callable[[str], None]] = None
 
-    def start(self) -> None:
-        import sys
-        if self._thread is not None or not sys.stdin.isatty():
-            return
-        try:
-            import termios  # noqa: F401 - existence check; used in _loop
-            import tty      # noqa: F401
-        except ImportError:
-            return
-        import threading
+    def start(self) -> bool:
+        """Arm the listener. Returns whether it actually did - False when
+        there is no tty or termios/tty are unavailable, so the caller can
+        avoid advertising a key that nothing is listening for."""
+        if self._thread is not None or termios is None or not sys.stdin.isatty():
+            return False
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        return True
 
     def stop(self) -> None:
         if self._stop_evt is not None:
@@ -229,10 +250,6 @@ class KeyListener:
         self._stop_evt = None
 
     def _loop(self) -> None:
-        import select
-        import sys
-        import termios
-        import tty
         fd = sys.stdin.fileno()
         try:
             old = termios.tcgetattr(fd)
@@ -248,7 +265,13 @@ class KeyListener:
                 if not ready:
                     continue
                 ch = sys.stdin.read(1)
-                if ch and self.on_key:
+                if not ch:
+                    # select() reported readable but the read came back empty:
+                    # stdin has hit EOF (it was closed). Without this the loop
+                    # would spin at full CPU - select() stays readable on EOF,
+                    # so the 0.25s timeout never gets a chance to idle it.
+                    break
+                if self.on_key:
                     try:
                         self.on_key(ch)
                     except Exception:  # a bad handler must not kill input

@@ -592,13 +592,16 @@ def cmd_scan(args) -> int:
         skip_listener = KeyListener()
 
         def on_key(ch: str) -> None:
+            # Runs on the listener's own thread, so it only sets the SKIP
+            # mechanism and flips a single flag the owning render thread reads.
+            # It must not call into dash.progress(): that mutates shared
+            # Dashboard state and draws from the wrong thread.
             if ch.lower() == "s":
                 tools.SKIP.set()
-                dash.progress(dash.stage, "skip requested - moving past %s"
-                              % dash.stage, 0)
+                dash.skip_requested = True
 
         skip_listener.on_key = on_key
-        skip_listener.start()
+        dash.skip_available = skip_listener.start()
         try:
             engine.run()
         except KeyboardInterrupt:
