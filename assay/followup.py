@@ -190,6 +190,37 @@ def vet(raw: str, cfg: Config) -> Command:
     return cmd
 
 
+def plan_followups(vetted: List[Command], auto_mode: str = "passive",
+                   rate_cap_per_host: int = 5) -> Tuple[List[Command], List[Command], List[Command]]:
+    """Partition vetted commands into (auto_run, queued, refused) for one round.
+
+    Default-deny all the way down:
+      * a command that did not pass vet() is refused (allow-list / shell / scope);
+      * an active-tier command is queued for consent, never auto-run;
+      * a passive command auto-runs only when auto_mode == 'passive' and it is
+        within the per-host rate cap - anything over the cap is queued, so
+        'passive' can never become a slow scan by sheer volume.
+    """
+    auto: List[Command] = []
+    queued: List[Command] = []
+    refused: List[Command] = []
+    per_host: Dict[str, int] = {}
+    for c in vetted:
+        if not c.ok:
+            refused.append(c)
+            continue
+        if c.tier != "passive" or auto_mode != "passive":
+            queued.append(c)
+            continue
+        host_key = c.hosts[0] if c.hosts else ""
+        if per_host.get(host_key, 0) >= rate_cap_per_host:
+            queued.append(c)          # over the per-host cap this round
+            continue
+        per_host[host_key] = per_host.get(host_key, 0) + 1
+        auto.append(c)
+    return auto, queued, refused
+
+
 def run(cmd: Command, timeout: float = 120.0) -> Command:
     """Execute a vetted command through tools.run().
 

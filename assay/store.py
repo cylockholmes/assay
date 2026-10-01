@@ -72,6 +72,23 @@ CREATE TABLE IF NOT EXISTS tool_runs (
     started REAL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_runs_run ON tool_runs(run_id, id);
+CREATE TABLE IF NOT EXISTS followup_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    round INTEGER,
+    finding_id TEXT,
+    finding_title TEXT,
+    tool TEXT,
+    argv TEXT,
+    tier TEXT,
+    rc INTEGER,
+    state TEXT,
+    output_local TEXT,   -- un-redacted, real host: the proof surface (never sent)
+    output_sent TEXT,    -- redacted+capped text actually sent to the AI, or ''
+    sent INTEGER,        -- 1 if any redacted output was sent back to the model
+    created REAL
+);
+CREATE INDEX IF NOT EXISTS idx_followup_run ON followup_results(run_id, id);
 """
 
 # How much of a tool's output the ledger keeps. Enough to verify a negative
@@ -244,6 +261,38 @@ class Store:
             return self._conn.execute(
                 "SELECT stage, tool, argv, rc, state, duration, bytes_out,"
                 " output, started FROM tool_runs WHERE run_id=? ORDER BY id",
+                (rid,),
+            ).fetchall()
+
+    # -- AI loop followup results (PLAN-LOOP §6) ------------------------
+    # One row per command the loop ran, keyed by (run, round, finding). Holds
+    # BOTH sides: output_local is the un-redacted real output for the proof
+    # page, output_sent is the redacted+capped text (if any) that went back to
+    # the model. The two never mix - the proof surface is local-only.
+    def record_followup_result(self, round: int, finding_id: str, finding_title: str,
+                               tool: str, argv: str, tier: str, rc: int, state: str,
+                               output_local: str = "", output_sent: str = "",
+                               sent: bool = False) -> None:
+        local = output_local or ""
+        if len(local) > TOOL_OUTPUT_CAP:
+            local = local[:TOOL_OUTPUT_CAP] + "\n... [output truncated at %d bytes]" % TOOL_OUTPUT_CAP
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO followup_results (run_id, round, finding_id,"
+                " finding_title, tool, argv, tier, rc, state, output_local,"
+                " output_sent, sent, created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.run_id, round, finding_id, finding_title, tool, argv, tier,
+                 rc, state, local, output_sent or "", 1 if sent else 0, time.time()),
+            )
+            self._conn.commit()
+
+    def followup_results(self, run_id: Optional[int] = None) -> List[sqlite3.Row]:
+        rid = self.run_id if run_id is None else run_id
+        with self._lock:
+            return self._conn.execute(
+                "SELECT round, finding_id, finding_title, tool, argv, tier, rc,"
+                " state, output_local, output_sent, sent, created"
+                " FROM followup_results WHERE run_id=? ORDER BY id",
                 (rid,),
             ).fetchall()
 
