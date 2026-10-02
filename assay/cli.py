@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
     s.add_argument("--no-udp", action="store_true",
                    help="skip the curated-port UDP sweep (on by default; also off under --safe)")
+    s.add_argument("--rescan", action="store_true",
+                   help="scan every target even if a previous run of this "
+                        "engagement already covered it; by default hosts "
+                        "already fully scanned are skipped (their stored "
+                        "results still flow into the report)")
     s.add_argument("--sweep-batches", type=int, default=None, metavar="N",
                    help="split the port sweep into N batches so a time limit costs "
                         "a slice, not the whole sweep; a batch that times out is "
@@ -533,6 +538,7 @@ def make_config(args) -> Config:
         udp=not getattr(args, "no_udp", False) and not getattr(args, "safe", False),
         deep_ports=not getattr(args, "no_deep_ports", False),
         sweep_batches=int(getattr(args, "sweep_batches", 0) or 0),
+        rescan=bool(getattr(args, "rescan", False)),
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",
@@ -590,11 +596,56 @@ def _burp_config(args) -> BurpConfig:
 # --------------------------------------------------------------------------
 
 
+def _decide_rescan(cfg) -> None:
+    """Look at what this engagement already scanned and decide whether to redo
+    the covered hosts. Runs before the live view so it can prompt cleanly.
+
+    --rescan (or the first-run question) already settled it -> respect that.
+    Otherwise: if some target hosts were fully scanned in an earlier run, show
+    how many and, on a terminal, ask. Default is to skip them - the efficient,
+    still-complete choice, since new and partially-swept hosts are always
+    scanned and the skipped ones' stored results still reach the report.
+    """
+    from assay import tools
+    from assay.store import Store
+    if cfg.rescan:
+        return
+    spec = cfg.opts.get("port_spec", "top-1000")
+    store = Store(cfg.db_path())
+    try:
+        hist = store.scan_history()
+    finally:
+        store.close()
+    if not hist:
+        return
+    covered = [h for h in cfg.targets
+               if hist.get(h) is not None
+               and not int(hist[h]["timed_out"] or 0)
+               and tools.spec_covers(hist[h]["port_spec"], spec)]
+    if not covered:
+        return
+    console.print("  [dim]%d of %d target host(s) were fully scanned (%s) in an "
+                  "earlier run of this engagement[/dim]"
+                  % (len(covered), len(cfg.targets), spec))
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        console.print("  [dim]skipping them (pass --rescan to redo); new and "
+                      "partially-swept hosts are still scanned[/dim]")
+        return
+    try:
+        answer = input("  re-scan those already-covered hosts? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    cfg.rescan = answer in ("y", "yes")
+    console.print("  [dim]%s[/dim]" % ("re-scanning everything"
+                  if cfg.rescan else "skipping already-covered hosts"))
+
+
 def cmd_scan(args) -> int:
     from assay.engine import Engine
     from assay import report as report_mod
 
     cfg = make_config(args)
+    _decide_rescan(cfg)
 
     if getattr(args, "install_missing", False):
         _do_install(assume_yes=args.quiet)

@@ -693,6 +693,52 @@ NMAP_CHECKPOINTS = 4
 NMAP_MIN_HOSTGROUP = 16
 
 
+_SPEC_RANK = {"top-100": 1, "top-1000": 2, "all": 3}
+
+
+def _csv_ports(spec: str):
+    """A spec written as explicit ports -> the set of ints, else None."""
+    if not spec or spec in _SPEC_RANK:
+        return None
+    out = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a.isdigit() and b.isdigit():
+                out.update(range(int(a), int(b) + 1))
+            else:
+                return None
+        elif part.isdigit():
+            out.add(int(part))
+        else:
+            return None
+    return out
+
+
+def spec_covers(recorded: str, requested: str) -> bool:
+    """Is a sweep at `recorded` at least as thorough as one at `requested`?
+
+    Used to decide whether a host already scanned needs scanning again. It is
+    deliberately conservative: when coverage cannot be proven (two specs that
+    are not comparable), it returns False so the host is re-scanned rather
+    than silently skipped. "Don't miss anything" beats "save a little time".
+    """
+    if recorded == requested:
+        return True
+    if recorded == "all":
+        return True
+    if requested == "all":
+        return False
+    r, q = _SPEC_RANK.get(recorded), _SPEC_RANK.get(requested)
+    if r and q:
+        return r >= q
+    rs, qs = _csv_ports(recorded), _csv_ports(requested)
+    if rs is not None and qs is not None:
+        return qs <= rs
+    return False
+
+
 def port_count(spec: str) -> int:
     """How many ports a spec asks for. For budgeting time, not for scanning."""
     if spec == "all":

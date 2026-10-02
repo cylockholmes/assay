@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS followup_results (
     created REAL
 );
 CREATE INDEX IF NOT EXISTS idx_followup_run ON followup_results(run_id, id);
+-- What was actually port-scanned, and how thoroughly, so a later run against
+-- the same engagement can skip a host already covered and spend its time on
+-- the ones that are new or were only partially swept. Keyed by host: one row
+-- per host, holding the BROADEST port spec it has been cleanly swept at.
+CREATE TABLE IF NOT EXISTS scan_history (
+    host TEXT PRIMARY KEY,
+    ip TEXT,
+    port_spec TEXT,      -- the sweep spec this host was covered at (e.g. all, top-1000)
+    completed REAL,      -- when the clean sweep finished
+    timed_out INTEGER,   -- 1 if the most thorough attempt was cut off (never "done")
+    run_id INTEGER
+);
 """
 
 # How much of a tool's output the ledger keeps. Enough to verify a negative
@@ -451,6 +463,55 @@ class Store:
                 (host, ip, json.dumps(data), time.time(), self.run_id, self.run_id),
             )
             self._conn.commit()
+
+    # -- scan history (cross-run coverage) --------------------------------
+    # "Has this host already been port-scanned thoroughly enough that redoing
+    # it would only burn time?" A row is written when a sweep finishes cleanly;
+    # a timed-out host is recorded too, but flagged, so it is never mistaken
+    # for complete and is re-swept next time.
+    def record_scan_complete(self, host: str, ip: str, port_spec: str,
+                             timed_out: bool, covers=None) -> None:
+        """Upsert one host's coverage, keeping the most thorough result seen.
+
+        `covers(a, b)` -> True when spec a is at least as thorough as spec b;
+        the engine passes its own so "all" is known to subsume "top-1000".
+        A new clean sweep replaces a stored timed-out one, and a broader spec
+        replaces a narrower one; a narrower-or-equal clean re-sweep only
+        refreshes the timestamp.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT port_spec, timed_out FROM scan_history WHERE host=?",
+                (host,)).fetchone()
+            spec, to = port_spec, 1 if timed_out else 0
+            if row is not None:
+                old_spec, old_to = row["port_spec"], int(row["timed_out"] or 0)
+                # Keep the broader spec unless this one is broader; a clean
+                # result always beats a stored timeout at the same breadth.
+                keep_old = False
+                if callable(covers):
+                    if covers(old_spec, port_spec) and not covers(port_spec, old_spec):
+                        keep_old = not old_to or timed_out
+                if keep_old:
+                    spec = old_spec
+                    to = old_to if (old_to and timed_out) else min(old_to, 1 if timed_out else 0)
+            self._conn.execute(
+                "INSERT INTO scan_history (host, ip, port_spec, completed, timed_out,"
+                " run_id) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(host) DO UPDATE SET ip=excluded.ip,"
+                " port_spec=excluded.port_spec, completed=excluded.completed,"
+                " timed_out=excluded.timed_out, run_id=excluded.run_id",
+                (host, ip, spec, time.time(), to, self.run_id))
+            self._conn.commit()
+
+    def scan_history(self) -> Dict[str, sqlite3.Row]:
+        """host -> its coverage row (port_spec, completed, timed_out, run_id)."""
+        with self._lock:
+            try:
+                rows = self._conn.execute("SELECT * FROM scan_history").fetchall()
+            except sqlite3.DatabaseError:
+                return {}
+        return {r["host"]: r for r in rows}
 
     def save_web(self, url: str, host: str, port: int, status: int, title: str,
                  server: str, tech: List[str], data: Dict) -> None:

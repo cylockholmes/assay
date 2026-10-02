@@ -309,6 +309,10 @@ class Config:
     udp: bool = True                        # curated-port UDP sweep (every scan; --no-udp/--safe off)
     # Port-sweep batching: split the host list so a time limit loses a slice,
     # not the sweep. 0 = size batches automatically.
+    # Re-scan a host even when the history says it was already covered. Default
+    # False: skip hosts a previous run of this engagement fully swept, and
+    # spend the time on new or partially-swept ones instead.
+    rescan: bool = False
     sweep_batches: int = 0
     sweep_max_splits: int = 3               # how often a timed-out batch is halved and re-run
     deep_ports: bool = True                  # serial full-range naabu wave for obscure TCP ports

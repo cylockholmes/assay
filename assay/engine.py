@@ -346,7 +346,80 @@ class Engine:
     # -- stage 2: port scan ----------------------------------------------
     def _stage_portscan(self) -> None:
         targets = [t for t in self.ctx.targets if t.kind != "url"]
+        targets = self._skip_already_scanned(targets)
         self._portscan(targets)
+
+    # -- scan history: skip hosts already covered, record what gets done ----
+    def _skip_already_scanned(self, targets: List[Target]) -> List[Target]:
+        """Drop hosts a previous run already swept thoroughly enough, loading
+        their stored ports so the rest of the pipeline still sees them.
+
+        New hosts (never recorded) and ones only partially swept (a narrower
+        spec, or a sweep that timed out) are always kept. --rescan keeps
+        everything. The decision itself - whether to honour the history at all
+        - is made once in cli before the live view starts and arrives as
+        cfg.rescan, so nothing here blocks on a prompt mid-render.
+        """
+        if self.cfg.rescan or not targets:
+            return targets
+        # Coverage is keyed on the profile's port spec, not the AI-port-
+        # augmented one: _with_ai_ports always adds the same handful of ports
+        # to every sweep, so they are covered whenever the base spec is, and
+        # keeping them out of the key makes "top-1000" comparable to "all".
+        spec = self.cfg.opts.get("port_spec", "top-1000")
+        hist = self.store.scan_history()
+        if not hist:
+            return targets
+        done, fresh = [], []
+        for t in targets:
+            row = hist.get(t.host)
+            if (row is not None and not int(row["timed_out"] or 0)
+                    and tools.spec_covers(row["port_spec"], spec)):
+                done.append(t)
+            else:
+                fresh.append(t)
+        if not done:
+            return targets
+        self._load_stored_ports(done)
+        self.ctx.say("ports", "%d host(s) already fully scanned (%s) in an earlier "
+                              "run - skipping; %d new/partial to scan "
+                              "(--rescan redoes all)" % (len(done), spec, len(fresh)))
+        return fresh
+
+    def _load_stored_ports(self, targets: List[Target]) -> None:
+        """Repopulate t.ports for a skipped host from the store, so probing
+        and the modules run on it without re-sweeping."""
+        by_host = {r["host"]: r for r in self.store.host_rows()}
+        for t in targets:
+            row = by_host.get(t.host)
+            if row is None:
+                continue
+            try:
+                data = json.loads(row["data"] or "{}")
+            except ValueError:
+                continue
+            ports = []
+            for d in data.get("ports", []):
+                try:
+                    ports.append(Port(**d))
+                except TypeError:
+                    pass
+            if ports:
+                t.ports = ports
+            if row["ip"] and not t.ip:
+                t.ip = row["ip"]
+
+    def _record_coverage(self, hosts: List[str], spec: str) -> None:
+        """Note in the scan history that these hosts were swept at `spec`.
+        A host in the just-finished sweep's missed set is recorded as timed
+        out, so it is re-swept next time rather than treated as complete."""
+        missed = getattr(self, "_sweep_missed", set())
+        by_host = {t.host: t for t in self.ctx.targets}
+        for h in hosts:
+            t = by_host.get(h)
+            self.store.record_scan_complete(
+                h, (t.ip if t else "") or "", spec, h in missed,
+                covers=tools.spec_covers)
 
     # -- stage 2c: UDP sweep (curated ports, on by default) ---------------
     def _stage_udp(self) -> None:
@@ -454,6 +527,7 @@ class Engine:
             say=lambda m: self.ctx.say("ports", m),
             progress_path=os.path.join(raw_dir, "naabu-progress-%s.json" % tag),
             resume=self.cfg.resume)
+        self._sweep_missed = set(missed)
         path = os.path.join(raw_dir, "unscanned-%s.txt" % tag)
         if missed:
             try:
@@ -489,7 +563,9 @@ class Engine:
         if not hosts:
             return
         spec = self.cfg.opts.get("port_spec", "top-1000")
+        orig_spec = spec                      # coverage key: profile spec, pre-augmentation
         spec = self._with_ai_ports(spec)
+        self._sweep_missed = set()
 
         if self.cfg.resume:
             targets = self._apply_resume(targets, xml_prefix)
@@ -503,7 +579,9 @@ class Engine:
         if self.ctx.has("naabu") and self.ctx.has("nmap") and len(hosts) > 1:
             self.ctx.say("ports", "naabu sweep (%s) across %d host(s)"
                          % (spec, len(hosts)))
+            record_hosts = list(hosts)
             swept = self._naabu(hosts, spec, xml_prefix)
+            self._record_coverage(record_hosts, orig_spec)
             open_ports = sorted({p for ports in swept.values() for p in ports})
             if open_ports:
                 self.ctx.say("ports", "naabu found %d distinct open port(s); "
