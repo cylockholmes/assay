@@ -76,7 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "path to a host list, CSV or Burp scope export. Mix "
                         "freely.")
     s.add_argument("-f", "--targets-file", help=argparse.SUPPRESS)
-    s.add_argument("-p", "--profile", choices=sorted(PROFILES), default="standard")
+    s.add_argument("-p", "--profile", choices=sorted(PROFILES), default=None,
+                   help="scan depth (default: standard, or asked interactively)")
+    s.add_argument("--no-prompt", action="store_true",
+                   help="do not ask the first-run option questions; use flag "
+                        "defaults (also implied when there is no terminal)")
     s.add_argument("-o", "--out", default="./assay-out",
                    help="root output directory; each engagement gets its own subfolder")
     s.add_argument("-n", "--codename", default="",
@@ -176,10 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-report", action="store_true")
     s.add_argument("--no-live", action="store_true",
                    help="do not update the report while the scan runs")
+    # Opening is the default; --open is accepted but hidden for old scripts.
     s.add_argument("--open", dest="open", action="store_true", default=True,
-                   help="open the report as soon as it starts filling in (default)")
+                   help=argparse.SUPPRESS)
     s.add_argument("--no-open", dest="open", action="store_false",
-                   help="leave the report closed; just print its path")
+                   help="do not open the report in a browser; just print its path")
     s.add_argument("-q", "--quiet", action="store_true")
 
     # -- other commands ----------------------------------------------------
@@ -189,9 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("report", help="rebuild the HTML report from a previous run")
     r.add_argument("-o", "--out", default="./assay-out")
     r.add_argument("--open", dest="open", action="store_true", default=True,
-                   help="open the rebuilt report (default)")
+                   help=argparse.SUPPRESS)
     r.add_argument("--no-open", dest="open", action="store_false",
-                   help="leave the report closed; just print its path")
+                   help="do not open the rebuilt report; just print its path")
 
     a = sub.add_parser("ai", help="run AI triage over an existing run")
     a.add_argument("-o", "--out", default="./assay-out")
@@ -300,8 +305,9 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
                        help="iterative triage: each round triages, then auto-runs the "
                             "passive suggested commands (active ones queue for consent). "
                             "Implies --ai")
-        g.add_argument("--ai-loop-rounds", type=int, default=3, metavar="N",
-                       help="max loop rounds (default: 3; the dependable stop)")
+        g.add_argument("--ai-loop-rounds", type=int, default=None, metavar="N",
+                       help="max loop rounds (default: 3, or asked interactively; "
+                            "the dependable stop)")
         g.add_argument("--ai-loop-auto", choices=["passive", "none"], default="passive",
                        help="which suggested commands auto-run without consent "
                             "(default: passive; 'none' queues everything)")
@@ -409,6 +415,23 @@ def _ask_codename(targets: List[str]) -> str:
     return answer.strip()
 
 
+def _ask_scan_options(args) -> None:
+    """The first-run questions, in place of remembering flags. Skipped without
+    a terminal, so scripted runs behave exactly as they always did."""
+    from assay import wizard
+    if not wizard.interactive():
+        return
+    try:
+        from rich.markup import escape
+        # Prompts contain "[Y/n]", which rich would parse as a markup tag.
+        chosen = wizard.ask_options(
+            args, lambda q: console.input(escape(q)), console.print)
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n  [dim]questions skipped - using defaults for the rest[/dim]")
+        return
+    console.print("  [dim]running: %s[/dim]" % ", ".join(chosen))
+
+
 def make_config(args) -> Config:
     from assay import targets as tload
 
@@ -473,6 +496,10 @@ def make_config(args) -> Config:
     codename = getattr(args, "codename", "") or ""
     if not codename and not getattr(args, "quiet", False):
         codename = _ask_codename(targets)
+
+    if not getattr(args, "quiet", False) and not getattr(args, "no_prompt", False):
+        _ask_scan_options(args)
+    args.profile = args.profile or "standard"
 
     tune = env.autotune()
     cfg = Config(
