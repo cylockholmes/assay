@@ -406,7 +406,7 @@ class Engine:
         if not hosts:
             return
         self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(hosts))
-        swept = tools.naabu_scan(hosts, "all", self.tune)
+        swept = self._naabu(hosts, "all", "deep")
         known = {p.port for t in targets for p in t.ports if p.proto == "tcp"}
         new_ports = sorted({p for ports in swept.values() for p in ports} - known)
         if not new_ports:
@@ -433,6 +433,46 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in t.ports]})
         self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
+
+    def _naabu(self, hosts: List[str], spec: str, tag: str) -> Dict[str, List[int]]:
+        """Batched naabu sweep that records what it could not cover.
+
+        Deep scans get a much longer per-batch allowance than the default 3h
+        cap, and every profile re-splits and retries a batch that times out.
+        Hosts still unswept at the end are written to raw/unscanned-<tag>.txt
+        and reported, so a partial sweep is never mistaken for a full one.
+        """
+        cap = 12 * 3600.0 if self.cfg.profile == "deep" else tools.NAABU_TIMEOUT_CAP
+        raw_dir = os.path.join(self.cfg.out_dir, "raw")
+        try:
+            os.makedirs(raw_dir, exist_ok=True)
+        except OSError:
+            pass
+        found, missed = tools.naabu_sweep(
+            hosts, spec, self.tune, batches=self.cfg.sweep_batches,
+            max_splits=self.cfg.sweep_max_splits, batch_cap=cap,
+            say=lambda m: self.ctx.say("ports", m),
+            progress_path=os.path.join(raw_dir, "naabu-progress-%s.json" % tag),
+            resume=self.cfg.resume)
+        path = os.path.join(raw_dir, "unscanned-%s.txt" % tag)
+        if missed:
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(missed) + "\n")
+            except OSError:
+                pass
+            self.ctx.say("ports", "%d host(s) were NOT fully swept (%s) - rerun with "
+                                  "--resume, or raise --sweep-batches; list in %s"
+                         % (len(missed), spec, path))
+            tools._ledger("naabu-coverage", ["naabu", spec, "%d host(s)" % len(hosts)],
+                          1, "timeout", 0.0,
+                          "NOT swept (%d): %s" % (len(missed), ", ".join(missed[:200])))
+        else:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return found
 
     def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
@@ -463,7 +503,7 @@ class Engine:
         if self.ctx.has("naabu") and self.ctx.has("nmap") and len(hosts) > 1:
             self.ctx.say("ports", "naabu sweep (%s) across %d host(s)"
                          % (spec, len(hosts)))
-            swept = tools.naabu_scan(hosts, spec, self.tune)
+            swept = self._naabu(hosts, spec, xml_prefix)
             open_ports = sorted({p for ports in swept.values() for p in ports})
             if open_ports:
                 self.ctx.say("ports", "naabu found %d distinct open port(s); "

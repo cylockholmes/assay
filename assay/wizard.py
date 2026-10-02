@@ -86,6 +86,15 @@ def ask_options(args, ask: Ask, say: Callable[[str], None] = print) -> List[str]
         if not _yes_no(ask, "deep port wave?", True, "full-range, obscure TCP ports"):
             args.no_deep_ports = True
 
+    # Coverage: a long sweep split into batches loses a slice if it times out,
+    # not everything. Only worth asking on the full-range profile.
+    if args.profile == "deep" and getattr(args, "sweep_batches", None) is None:
+        args.sweep_batches = _number(
+            ask, "split the port sweep into how many batches? (0 = automatic)",
+            0, 0, 50)
+        if args.sweep_batches:
+            chosen.append("%d sweep batches" % args.sweep_batches)
+
     # Intrusiveness.
     if not safe and not getattr(args, "aggressive", False):
         args.aggressive = _yes_no(ask, "aggressive checks?", False,

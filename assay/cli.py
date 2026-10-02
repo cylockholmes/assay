@@ -127,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-portscan", action="store_true", help="targets are already URLs")
     s.add_argument("--no-udp", action="store_true",
                    help="skip the curated-port UDP sweep (on by default; also off under --safe)")
+    s.add_argument("--sweep-batches", type=int, default=None, metavar="N",
+                   help="split the port sweep into N batches so a time limit costs "
+                        "a slice, not the whole sweep; a batch that times out is "
+                        "halved and re-run. Default: sized automatically (or "
+                        "asked on deep). Hosts still unswept are listed in "
+                        "raw/unscanned-*.txt; --resume continues from them")
     s.add_argument("--no-deep-ports", action="store_true",
                    help="skip the serial full-range naabu wave for obscure TCP ports "
                         "(on by default except the deep profile, which already sweeps all ports)")
@@ -526,6 +532,7 @@ def make_config(args) -> Config:
         # --no-udp are the two ways to turn it off.
         udp=not getattr(args, "no_udp", False) and not getattr(args, "safe", False),
         deep_ports=not getattr(args, "no_deep_ports", False),
+        sweep_batches=int(getattr(args, "sweep_batches", 0) or 0),
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",

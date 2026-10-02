@@ -1187,7 +1187,8 @@ NAABU_TIMEOUT_CAP = 3 * 3600.0
 NAABU_SLACK = 3.0
 
 
-def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict) -> float:
+def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict,
+                  cap: float = NAABU_TIMEOUT_CAP) -> float:
     """How long hosts x ports probes take at the configured rate, plus slack.
 
     A flat cap was wrong here for the same reason it was wrong for nmap: the
@@ -1197,7 +1198,7 @@ def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict) -> float:
     """
     rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
     probes = max(1, len(hosts)) * port_count(port_spec)
-    return min(NAABU_TIMEOUT_CAP, NAABU_BASE_TIMEOUT + NAABU_SLACK * probes / rate)
+    return min(cap, NAABU_BASE_TIMEOUT + NAABU_SLACK * probes / rate)
 
 
 @contextlib.contextmanager
@@ -1236,7 +1237,11 @@ def _target_list_file(items: Sequence[str]):
 
 
 def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
-               timeout: Optional[float] = None) -> Dict[str, List[int]]:
+               timeout: Optional[float] = None,
+               status: Optional[Dict] = None) -> Dict[str, List[int]]:
+    """`status`, when given, gets "timed_out"/"skipped" set to True if a pass
+    was cut off. naabu only emits lines for open ports, so the result alone
+    cannot say whether every host was actually swept."""
     # Kept as two separate passes (base + extra), mirroring nmap_scan: relying
     # on naabu to union -top-ports with a -p list in one invocation is
     # unverified, and nmap's equivalent combination turned out to be an
@@ -1277,6 +1282,11 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # Ledger the sweep so a zero-port result is a visible, verifiable
         # outcome rather than silence - this is the case that made a scan's
         # report impossible to trust ("did naabu find nothing, or break?").
+        if status is not None:
+            if SKIP.is_set():
+                status["skipped"] = True
+            elif time.time() - t0 >= deadline - 1.0:
+                status["timed_out"] = True
         total = sum(len(v) for v in found.values())
         summary = ("\n".join("%s: %s" % (h, ",".join(str(x) for x in sorted(set(v))))
                              for h, v in sorted(found.items()))
@@ -1293,6 +1303,113 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                 if p not in existing:
                     existing.append(p)
     return found
+
+
+# Aim each batch at no more than this much probing, so a timeout loses a
+# slice of the work rather than the whole sweep.
+NAABU_BATCH_TARGET_SECONDS = 2 * 3600.0
+NAABU_MAX_BATCHES = 50
+
+
+def plan_batches(hosts: Sequence[str], port_spec: str, tune: Dict,
+                 requested: int = 0) -> List[List[str]]:
+    """Split hosts into sweep batches. `requested` 0 means size them from the
+    estimated probe time; otherwise exactly that many (never more than hosts)."""
+    hosts = list(hosts)
+    if not hosts:
+        return []
+    if requested and requested > 0:
+        n = requested
+    else:
+        rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
+        est = len(hosts) * port_count(port_spec) / rate
+        n = int(-(-est // NAABU_BATCH_TARGET_SECONDS))
+    n = max(1, min(n, NAABU_MAX_BATCHES, len(hosts)))
+    size = -(-len(hosts) // n)
+    return [hosts[i:i + size] for i in range(0, len(hosts), size)]
+
+
+def naabu_sweep(hosts: List[str], port_spec: str, tune: Dict, batches: int = 0,
+                max_splits: int = 3, batch_cap: float = NAABU_TIMEOUT_CAP,
+                say=None, progress_path: Optional[str] = None,
+                resume: bool = False, scan=None) -> Tuple[Dict[str, List[int]], List[str]]:
+    """Sweep in batches so a time limit never silently drops hosts.
+
+    A batch that times out is split in half and both halves are queued again,
+    up to `max_splits` levels deep, so work that did not finish is redone in
+    smaller pieces instead of being lost. Ports found before a cutoff are
+    kept. A batch the user skipped is not retried. Whatever still has not
+    been swept at the end is returned, so the caller can say exactly what was
+    missed. `progress_path` records finished hosts and their ports; with `resume`
+    a later run reads it back and skips them.
+
+    Returns (open ports by host, hosts that were not fully swept).
+    """
+    scan = scan or naabu_scan
+    say = say or (lambda msg: None)
+    found: Dict[str, List[int]] = {}
+    done: set = set()
+
+    if resume and progress_path and os.path.isfile(progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as fh:
+                prev = json.load(fh)
+            if prev.get("spec") == port_spec:
+                done = set(prev.get("done") or [])
+                for h, ports in (prev.get("found") or {}).items():
+                    found[h] = list(ports)
+        except (OSError, ValueError):
+            done = set()
+    pending = [h for h in hosts if h not in done]
+    if done:
+        say("naabu: %d host(s) already swept in an earlier run, skipping"
+            % (len(hosts) - len(pending)))
+
+    def save() -> None:
+        if not progress_path:
+            return
+        try:
+            with open(progress_path, "w", encoding="utf-8") as fh:
+                json.dump({"spec": port_spec, "done": sorted(done),
+                           "found": found}, fh)
+        except OSError:
+            pass
+
+    queue: List[Tuple[List[str], int]] = [
+        (b, 0) for b in plan_batches(pending, port_spec, tune, batches)]
+    total = len(queue)
+    unscanned: List[str] = []
+    n = 0
+    while queue:
+        batch, depth = queue.pop(0)
+        n += 1
+        label = "batch %d/%d" % (min(n, total), total) if depth == 0 \
+            else "retry (split x%d)" % depth
+        say("naabu %s: %d host(s)" % (label, len(batch)))
+        st: Dict = {}
+        deadline = naabu_timeout(batch, port_spec, tune, cap=batch_cap)
+        part = scan(batch, port_spec, tune, timeout=deadline, status=st)
+        for h, ports in part.items():
+            have = found.setdefault(h, [])
+            for p in ports:
+                if p not in have:
+                    have.append(p)
+        if st.get("skipped"):
+            say("naabu: skipped by request - %d host(s) not swept" % len(batch))
+            unscanned.extend(batch)
+            continue
+        if st.get("timed_out"):
+            if depth >= max_splits or len(batch) < 2:
+                say("naabu: %d host(s) still timed out after retries" % len(batch))
+                unscanned.extend(batch)
+                continue
+            mid = len(batch) // 2
+            say("naabu: batch hit its limit - splitting and re-running")
+            queue[0:0] = [(batch[:mid], depth + 1), (batch[mid:], depth + 1)]
+            continue
+        done.update(batch)
+        save()
+    return found, unscanned
 
 
 # --------------------------------------------------------------------------

@@ -307,6 +307,10 @@ class Config:
     passive: bool = True                    # allow third-party OSINT sources
     portscan: bool = True
     udp: bool = True                        # curated-port UDP sweep (every scan; --no-udp/--safe off)
+    # Port-sweep batching: split the host list so a time limit loses a slice,
+    # not the sweep. 0 = size batches automatically.
+    sweep_batches: int = 0
+    sweep_max_splits: int = 3               # how often a timed-out batch is halved and re-run
     deep_ports: bool = True                  # serial full-range naabu wave for obscure TCP ports
     expand: bool = True                     # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
