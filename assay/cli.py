@@ -308,8 +308,12 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
         g.add_argument("--ai-loop-rate", type=int, default=5, metavar="N",
                        help="max passive auto-runs per host per round (default: 5)")
         g.add_argument("--ai-loop-resend", action="store_true",
-                       help="feed redacted command output back to the model between "
-                            "rounds (off by default; send-eligible tools only)")
+                       help=argparse.SUPPRESS)   # now the default; kept for old scripts
+        g.add_argument("--ai-loop-no-resend", action="store_true",
+                       help="do not feed command results back to the model "
+                            "(single round). By default results go back redacted: "
+                            "full output for send-eligible tools, a content-free "
+                            "digest for the rest")
         g.add_argument("--ai-loop-budget", type=float, default=0.0, metavar="USD",
                        help="additional cumulative-cost ceiling for the loop, API "
                             "backend only (0 = off; rounds remain the universal cap)")
@@ -946,7 +950,9 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
 
     rounds = max(1, int(getattr(args, "ai_loop_rounds", 3) or 3))
     auto_mode = getattr(args, "ai_loop_auto", "passive") or "passive"
-    resend = bool(getattr(args, "ai_loop_resend", False))
+    # assay -> claude -> assay -> claude: results go back unless switched off.
+    # Every one is redacted through the shared map and verify()'d first.
+    resend = not bool(getattr(args, "ai_loop_no_resend", False))
     rate_cap = int(getattr(args, "ai_loop_rate", 5) or 5)
     limit = int(getattr(args, "ai_followup_limit", 25) or 25)
     timeout = float(getattr(args, "ai_followup_timeout", 120.0) or 120.0)
@@ -977,13 +983,20 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
             break
         last = result
 
+        # The last round is judgement only. Anything run now could never be
+        # shown to the model, so the loop ends on Claude's verdict, not on
+        # unread output; the commands queue for `assay followup --run`.
+        final_round = resend and rounds > 1 and rnd == rounds - 1
         cmds = [c for c in followup.collect(store, redactor.map)[:limit]
                 if c.raw not in seen_cmds]
         vetted = [followup.vet(c.raw, cfg) for c in cmds]
         for src, v in zip(cmds, vetted):
             v.finding_id, v.finding_title = src.finding_id, src.finding_title
         auto, queued, refused = followup.plan_followups(
-            vetted, auto_mode if auto_ok else "none", rate_cap)
+            vetted, auto_mode if auto_ok and not final_round else "none", rate_cap)
+        if final_round and vetted:
+            console.print("  [dim]final round: not running new commands, their "
+                          "output could not be reviewed[/dim]")
 
         console.print("  [dim]%d new suggested: %d auto-run, %d queued for consent, "
                       "%d refused[/dim]" % (len(vetted), len(auto), len(queued), len(refused)))
@@ -1014,8 +1027,19 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
                 elif leaks:
                     console.print("    [yellow]not sent[/yellow] - %d residual item(s) "
                                   "after redaction (kept local only)" % len(leaks))
-                elif v.output:
-                    console.print("    [dim]local-only (%s output not send-eligible)[/dim]" % tool)
+                elif v.output or v.rc:
+                    # Not send-eligible: the body stays local, but the model
+                    # still learns that it ran and how it ended. Same shared
+                    # map, same verify() backstop as everything else.
+                    red = redactor.text(followup.digest(v.output, v.rc))
+                    if not redactor.verify(red):
+                        sent_text, did_send = red, True
+                        new_sendable.append({
+                            "finding_id": v.finding_id,
+                            "command": redactor.text(v.display),
+                            "tool": tool,
+                            "output": red,
+                        })
 
             store.record_followup_result(
                 round=rnd, finding_id=v.finding_id, finding_title=v.finding_title,
@@ -1032,8 +1056,8 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
 
         if not resend:
             if rounds > 1:
-                console.print("  [dim]single round: --ai-loop-resend is off, so "
-                              "feeding output back is disabled (re-triage would be "
+                console.print("  [dim]single round: --ai-loop-no-resend is set, so "
+                              "results are not fed back (re-triage would be "
                               "identical)[/dim]")
             break
         sendable.extend(new_sendable)

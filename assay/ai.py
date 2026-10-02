@@ -97,6 +97,17 @@ Then identify chains: sets of findings that are individually low or medium but \
 together demonstrate materially higher impact. This is where most of the value is. \
 Be strict - only propose a chain if each step genuinely enables the next.
 
+Iteration. The scan may be run through several rounds. When the input contains \
+`followup_results`, those are the redacted results of commands you proposed earlier, \
+run locally by the researcher's tooling; each has the finding_id it was for, the \
+command, and either its output or a digest when the output was withheld. Treat them \
+as new evidence: confirm, downgrade or discard findings accordingly, and say in the \
+rationale which result moved your verdict. A digest (exit code, size, HTTP status) \
+means the content was withheld on purpose - do not ask for it again. In `commands`, \
+propose only checks whose answer you do not already have: never repeat a command that \
+already appears in `followup_results`. When a finding is settled, return an empty \
+`commands` list for it.
+
 Calibration rules:
 - Missing security headers, verbose banners and TLS hygiene are almost never \
   reportable alone. Mark them "discard" unless they enable a specific chain you \

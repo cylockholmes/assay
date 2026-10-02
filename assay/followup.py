@@ -211,6 +211,27 @@ def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> Tuple[Optional
     return redacted, []
 
 
+_HTTP_STATUS = re.compile(r"^HTTP/[\d.]+\s+(\d{3})", re.M)
+
+
+def digest(output: str, rc: Optional[int]) -> str:
+    """Content-free summary of output that may not be sent verbatim.
+
+    Tools outside SEND_ELIGIBLE (curl, openssl, ...) can return arbitrary
+    target-controlled text, so their bodies stay local. The model still needs
+    to know the command ran and roughly what happened, so it gets the exit
+    code, size and - where present - the HTTP status, never the content.
+    """
+    out = output or ""
+    parts = ["exit %s" % (rc if rc is not None else "?"),
+             "%d bytes" % len(out.encode("utf-8", "replace")),
+             "%d lines" % (out.count("\n") + (1 if out and not out.endswith("\n") else 0))]
+    codes = _HTTP_STATUS.findall(out)
+    if codes:
+        parts.append("HTTP status %s" % ", ".join(codes[:4]))
+    return "output withheld (not send-eligible): " + "; ".join(parts)
+
+
 def plan_followups(vetted: List[Command], auto_mode: str = "passive",
                    rate_cap_per_host: int = 5) -> Tuple[List[Command], List[Command], List[Command]]:
     """Partition vetted commands into (auto_run, queued, refused) for one round.
