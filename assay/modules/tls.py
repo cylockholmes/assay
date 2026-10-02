@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import socket
 import ssl
 from typing import List, Optional, Tuple
@@ -210,6 +211,10 @@ class TlsModule(Module):
                 tags=["tls", "recon"],
                 evidence=[Evidence(kind="tls", label="subjectAltName",
                                    output="\n".join(extra[:40]))],
-                dedupe_key="tls-sans|%s" % where,
+                # Keyed on the name set, not host:port - one certificate
+                # fronting many hosts/ports is one disclosure, not a hundred.
+                dedupe_key="tls-sans|%s" % hashlib.sha1(
+                    "\n".join(sorted(s.lower() for s in sans)).encode()
+                ).hexdigest()[:16],
             ))
         return out

@@ -143,8 +143,54 @@ def rdap_lookup(domain: str, http) -> Tuple[int, str]:
 # --------------------------------------------------------------------------
 
 
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+_TLDS: Optional[Set[str]] = None
+
+
+def iana_tlds(http) -> Set[str]:
+    """TLDs the RDAP bootstrap knows about. Empty set if it can't be fetched."""
+    global _TLDS
+    if _TLDS is None:
+        r = http.get("https://data.iana.org/rdap/dns.json",
+                     through_burp=False, timeout=15.0, infra=True)
+        found: Set[str] = set()
+        if r.ok and r.status == 200:
+            try:
+                for svc in json.loads(r.body).get("services", []):
+                    found.update(t.lower() for t in svc[0])
+            except (ValueError, IndexError, TypeError, AttributeError):
+                pass
+        if not found:
+            return found          # don't cache a failure
+        _TLDS = found
+    return _TLDS
+
+
+def well_formed(domain: str, http) -> str:
+    """'' if the name could really be registered, else why it can't be.
+
+    A CSP or script blob regularly yields strings shaped like hostnames whose
+    last label is no TLD ("citrix.agmacepa"). RDAP 404s those exactly as it
+    does a free domain, so without this they report as takeovers.
+    """
+    labels = domain.lower().split(".")
+    if len(labels) < 2 or not all(_LABEL.match(l) for l in labels):
+        return "not a valid hostname"
+    tlds = iana_tlds(http)
+    if not tlds:
+        return "could not load the IANA TLD list to validate the name"
+    if labels[-1] not in tlds:
+        return "'.%s' is not a delegated top-level domain" % labels[-1]
+    return ""
+
+
 def check(domain: str, http) -> DomainStatus:
     st = DomainStatus(domain=domain)
+    bad = well_formed(domain, http)
+    if bad:
+        st.registered = None
+        st.reason = "skipped: " + bad
+        return st
     st.ns, dns_state = ns_records(domain)
 
     if st.ns:

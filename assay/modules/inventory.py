@@ -80,6 +80,7 @@ class InventoryModule(Module):
                 "category": row["category"],
                 "sources": row["sources"],
                 "where": row["where"],
+                "proof": row["proof"],
                 "cves": [{"id": m.cve_id, "severity": m.severity, "score": m.score,
                          "summary": m.summary, "url": m.url} for m in matches],
             })
@@ -127,10 +128,26 @@ class InventoryModule(Module):
                   "?keywordSearch=%s+%s' | jq ." % (name.replace(" ", "+"), version),
             refs=[m.url for m in matches[:8]],
             tags=["inventory", "cve", "noise-prone"],
-            evidence=[Evidence(kind="note", label="NVD keywordSearch match",
-                               output=", ".join(m.cve_id for m in matches))],
+            evidence=_proof_evidence(row) + [
+                Evidence(kind="note", label="NVD keywordSearch match",
+                         output=", ".join(m.cve_id for m in matches))],
             dedupe_key="cve|%s|%s" % (name.lower(), version),
         )
+
+
+def _proof_evidence(row: Dict) -> List[Evidence]:
+    """Where the version number itself was read, one entry per place seen, so
+    the hunter can re-check it before trusting the CVE lookup built on it."""
+    out = []
+    for p in row.get("proof", [])[:6]:
+        out.append(Evidence(
+            kind="command" if p.get("repro") else "note",
+            label="%s %s seen via %s at %s" % (
+                row["name"], row["version"], p["source"], p["where"]),
+            request=p.get("repro", ""),
+            output=p.get("proof", ""),
+            matched=row["version"]))
+    return out
 
 
 def _row_key(row: Dict) -> str:

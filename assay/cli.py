@@ -325,7 +325,7 @@ def _ai_flags(p: argparse.ArgumentParser, standalone: bool = False) -> None:
     g.add_argument("--ai-claude-bin", default="claude",
                    help="claude-cli backend: binary name or path "
                         "(default: claude)")
-    g.add_argument("--ai-model", default="claude-opus-5")
+    g.add_argument("--ai-model", default="claude-opus-4-8")
     g.add_argument("--ai-max", type=int, default=60, help="max findings to send")
     g.add_argument("--ai-evidence", action="store_true",
                    help="include redacted evidence snippets (default: metadata only)")

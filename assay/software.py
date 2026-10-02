@@ -12,6 +12,7 @@ vulnerable.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -25,6 +26,8 @@ class Software:
     category: str           # service | web-component | cms
     where: str               # host:port or URL it was seen at
     source: str               # how it was detected, e.g. "nmap service detection"
+    proof: str = ""           # the literal text the version was read from
+    repro: str = ""           # shell command that shows the same text again
 
     def key(self) -> Tuple[str, str]:
         return (self.name.lower(), self.version)
@@ -88,6 +91,18 @@ def _from_header(value: str) -> List[Tuple[str, str]]:
     return out
 
 
+def _snippet(blob: str, m: "re.Match", pad: int = 70) -> str:
+    """The match with surrounding text, whitespace collapsed, so the reader
+    can see the tag or filename the version came out of."""
+    lo, hi = max(0, m.start() - pad), min(len(blob), m.end() + pad)
+    text = re.sub(r"\s+", " ", blob[lo:hi]).strip()
+    return ("..." if lo else "") + text + ("..." if hi < len(blob) else "")
+
+
+def _grep_repro(url: str, pattern: str) -> str:
+    return "curl -sk %s | grep -oiE %s" % (shlex.quote(url), shlex.quote(pattern))
+
+
 def collect_from_web(wt: WebTarget) -> List[Software]:
     """Server/X-Powered-By headers, generator meta tags, and bundled JS/CSS
     libraries - the components a web application actually ships.
@@ -97,24 +112,32 @@ def collect_from_web(wt: WebTarget) -> List[Software]:
 
     if wt.server:
         for name, version in _from_header(wt.server):
-            found.append(Software(name, version, "service", where, "Server header"))
+            found.append(Software(
+                name, version, "service", where, "Server header",
+                proof="Server: %s" % wt.server,
+                repro="curl -skI %s | grep -i '^server:'" % shlex.quote(where)))
     powered = wt.headers.get("X-Powered-By") or wt.headers.get("x-powered-by")
     if powered:
         for name, version in _from_header(powered):
-            found.append(Software(name, version, "service", where,
-                                  "X-Powered-By header"))
+            found.append(Software(
+                name, version, "service", where, "X-Powered-By header",
+                proof="X-Powered-By: %s" % powered,
+                repro="curl -skI %s | grep -i '^x-powered-by:'"
+                      % shlex.quote(where)))
 
     blob = wt.body_sample or ""
     for name, rx in _JS_LIB_RE:
         m = rx.search(blob)
         if m:
-            found.append(Software(name, m.group(1), "web-component", where,
-                                  "asset reference"))
+            found.append(Software(
+                name, m.group(1), "web-component", where, "asset reference",
+                proof=_snippet(blob, m), repro=_grep_repro(where, rx.pattern)))
     for name, rx in _GENERATOR_RE:
         m = rx.search(blob)
         if m:
-            found.append(Software(name, m.group(1), "cms", where,
-                                  "generator meta tag"))
+            found.append(Software(
+                name, m.group(1), "cms", where, "generator meta tag",
+                proof=_snippet(blob, m), repro=_grep_repro(where, rx.pattern)))
 
     # wt.tech (Engine._fingerprint) already carries broader signature matches
     # with no version - fold in whatever this pass has not already found a
@@ -125,7 +148,10 @@ def collect_from_web(wt: WebTarget) -> List[Software]:
         if name.lower() in seen:
             continue
         seen.add(name.lower())
-        found.append(Software(name, "", "web-component", where, "signature match"))
+        found.append(Software(
+            name, "", "web-component", where, "signature match",
+            proof="matched a technology signature in the response "
+                  "(no version present)"))
     return found
 
 
@@ -136,8 +162,12 @@ def collect_from_host(target: Target) -> List[Software]:
         if not port.product or not port.version:
             continue
         where = "%s:%d" % (target.host, port.port)
-        found.append(Software(port.product, port.version, "service", where,
-                              "nmap service detection"))
+        found.append(Software(
+            port.product, port.version, "service", where,
+            "nmap service detection",
+            proof="nmap -sV reported %s/%s: product=%r version=%r"
+                  % (port.port, port.proto, port.product, port.version),
+            repro="nmap -sV -Pn -p %d %s" % (port.port, target.host)))
     return found
 
 
@@ -147,9 +177,13 @@ def merge(items: List[Software]) -> List[Dict]:
     for it in items:
         row = rows.setdefault(it.key(), {
             "name": it.name, "version": it.version, "category": it.category,
-            "sources": set(), "where": [],
+            "sources": set(), "where": [], "proof": [],
         })
         row["sources"].add(it.source)
+        entry = {"where": it.where, "source": it.source,
+                 "proof": it.proof, "repro": it.repro}
+        if entry not in row["proof"]:
+            row["proof"].append(entry)
         if it.where not in row["where"]:
             row["where"].append(it.where)
     out = []

@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from assay.models import Finding
 from assay.redact import Redactor, terms_from_context
 
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-4-8"
 INPUT_PRICE_PER_MTOK = 5.00
 OUTPUT_PRICE_PER_MTOK = 25.00
 

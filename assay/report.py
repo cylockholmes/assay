@@ -237,12 +237,12 @@ def _live_script(status: Optional[Dict] = None,
   <span class="dot"></span>
   %s
   <span class="dim">%s</span>
-  <label class="cbx"><input type="checkbox" id="autorefresh" checked> auto-refresh</label>
+  <label class="cbx"><input type="checkbox" id="autorefresh"> auto-refresh</label>
   <span class="dim" id="nextin"></span>
 </div>
 <script>
 (function () {
-  var KEY = 'assay.scroll', CB = 'assay.autorefresh';
+  var KEY = 'assay.scroll', CB = 'assay.autorefresh.v2';
   var box = document.getElementById('autorefresh');
   try {
     var pref = localStorage.getItem(CB);
@@ -382,10 +382,21 @@ def _render_software(path: str) -> str:
         where = r.get("where") or []
         where_txt = ", ".join(where[:3]) + (" +%d more" % (len(where) - 3)
                                             if len(where) > 3 else "")
+        proofs = r.get("proof") or []
+        proof_html = "".join(
+            '<div class="dim">%s &middot; %s</div><pre>%s%s</pre>' % (
+                _e(p.get("source", "")), _e(p.get("where", "")),
+                _e(p.get("proof", "")),
+                ("\n$ " + _e(p["repro"])) if p.get("repro") else "")
+            for p in proofs[:6])
+        proof_cell = (
+            '<details><summary>%d</summary>%s</details>' % (len(proofs), proof_html)
+            if proofs else '<span class="dim">-</span>')
         trs.append(
-            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td>%s</td></tr>'
             % (_e(r.get("name", "")), _e(r.get("version") or "?"),
-               _e(r.get("category", "")), _e(where_txt), cve_html))
+               _e(r.get("category", "")), _e(where_txt), proof_cell, cve_html))
 
     if cve_total:
         cve_note = (
@@ -406,7 +417,7 @@ def _render_software(path: str) -> str:
         'could identify: nmap service detection on the host side, and HTTP headers, '
         'generator tags and bundled JS libraries on the web side.</p>%s'
         '<div class="tw"><table><thead><tr><th>name</th><th>version</th>'
-        '<th>category</th><th>seen at</th><th>known CVEs</th></tr></thead>'
+        '<th>category</th><th>seen at</th><th>proof</th><th>known CVEs</th></tr></thead>'
         '<tbody>%s</tbody></table></div>'
         '</section>'
     ) % (len(rows), cve_note, "".join(trs))
