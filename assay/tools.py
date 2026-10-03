@@ -141,6 +141,10 @@ JOURNAL = None
 # catches every invocation without threading a handle through every caller.
 LEDGER = None
 
+# How much of a streamed tool's stdout the ledger keeps (the head; the full output
+# is consumed by the caller and not retained).
+_LEDGER_OUT_CAP = 8192
+
 
 def _ledger(tool: str, argv: List[str], rc: int, state: str,
             duration: float, output: str) -> None:
@@ -460,14 +464,24 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
 
 
 def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
-                 stdin: str = "") -> Iterator[str]:
-    """Yield stdout lines as they arrive. Keeps peak memory flat."""
+                 stdin: str = "", ledger: bool = True) -> Iterator[str]:
+    """Yield stdout lines as they arrive. Keeps peak memory flat.
+
+    Every invocation is written to the tool-runs ledger, as run() does -
+    httpx, nuclei, katana and the rest stream, so without this they never
+    appeared there. Callers that record a richer summary of their own (nmap,
+    naabu) pass ledger=False so the run is not listed twice.
+    """
     env.augment_path()
+    t0 = time.time()
     if SKIP.is_set():
         # See run()'s identical check: honour a skip already in effect
         # before spawning anything, rather than starting only to kill it.
         _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
              tick=False)
+        if ledger:
+            _ledger(cmd[0].split("/")[-1] if cmd else "?", list(cmd), -1,
+                    "skipped", 0.0, "skipped by operator")
         return
     _record(cmd)
     # A real file rather than a pipe for stderr: a chatty tool could otherwise
@@ -482,6 +496,9 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     except OSError as exc:
         _record_failure(cmd, str(exc))
         stderr_buf.close()
+        if ledger:
+            _ledger(cmd[0].split("/")[-1] if cmd else "?", list(cmd), -1,
+                    "broke", time.time() - t0, str(exc))
         return
     if stdin and proc.stdin:
         try:
@@ -494,6 +511,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     # below, which never run if there is no line to run them on.
     hb = _Heartbeat(cmd).bind(proc)
     status = _LINE_STATUS.get(hb.name)
+    n_lines = 0
+    head: List[str] = []
+    head_len = 0
+    completed = False
     try:
         assert proc.stdout is not None
         # `timeout` was accepted and never enforced: only the finally's
@@ -510,6 +531,10 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                 # hundred thousand URLs would otherwise pay for a message
                 # nobody reads. The heartbeat thread formats when it fires.
                 hb.count += 1
+                n_lines += 1
+                if head_len < _LEDGER_OUT_CAP:
+                    head.append(line)
+                    head_len += len(line) + 1
                 if status is not None:
                     hb.detail = status(line) or hb.detail
                 yield line
@@ -531,6 +556,8 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
                 _stop(proc)
                 hb.timed_out(timeout)
                 break
+        else:
+            completed = True
     finally:
         hb.stop()
         if proc.stdout:
@@ -545,15 +572,38 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
         # A kill of our own - by the deadline above or by a skip - is
         # recorded there; the returncode it produces is the same event, not
         # a second failure.
+        stderr_buf.seek(0)
+        err_text = stderr_buf.read()
         if proc.returncode and not timed_out and not hb.was_skipped:
-            stderr_buf.seek(0)
-            _record_failure(cmd, stderr_buf.read())
+            _record_failure(cmd, err_text)
         stderr_buf.close()
+        if ledger:
+            # A caller that stopped reading (hit its own cap) closes the pipe,
+            # which makes the tool exit nonzero - that is not a failure.
+            if hb.was_skipped:
+                state = "skipped"
+            elif timed_out:
+                state = "timeout"
+            elif completed and proc.returncode:
+                state = "broke"
+            else:
+                state = "ok"
+            summary = "%d line(s) of output%s" % (
+                n_lines, "" if completed or timed_out else " (caller stopped reading early)")
+            body = "\n".join(head)
+            if head_len >= _LEDGER_OUT_CAP:
+                body += "\n... [first %d bytes shown]" % _LEDGER_OUT_CAP
+            _ledger(cmd[0].split("/")[-1] if cmd else "?", list(cmd),
+                    proc.returncode if proc.returncode is not None else -1,
+                    state, time.time() - t0,
+                    "\n".join(x for x in (summary, body,
+                                          ("stderr: " + err_text.strip()[-1500:])
+                                          if err_text.strip() else "") if x))
 
 
 def stream_json(cmd: Sequence[str], timeout: float = 900.0,
-                stdin: str = "") -> Iterator[dict]:
-    for line in stream_lines(cmd, timeout=timeout, stdin=stdin):
+                stdin: str = "", ledger: bool = True) -> Iterator[dict]:
+    for line in stream_lines(cmd, timeout=timeout, stdin=stdin, ledger=ledger):
         if not line.startswith("{"):
             continue
         try:
@@ -834,7 +884,7 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
         # makes nmap narrate it, stream_lines turns that into progress, and
         # nothing downstream cares if no one is reading.
         t0 = time.time()
-        for _ in stream_lines(cmd, timeout=timeout):
+        for _ in stream_lines(cmd, timeout=timeout, ledger=False):
             pass
         parsed = parse_nmap_xml(xml_path) if os.path.exists(xml_path) else {}
         # Ledger the sweep's outcome. The full XML is on disk; this is the
@@ -897,7 +947,8 @@ def nmap_udp_scan(hosts: List[str], tune: Dict, out_dir: str = ".",
     cmd = base + ["-oX", env.to_wsl_path(xml_path)] + hosts
     deadline = timeout if timeout is not None else max(300.0, 180.0 * len(hosts))
     t0 = time.time()
-    for _ in stream_lines(["nmap", "--stats-every", "10s"] + cmd[1:], timeout=deadline):
+    for _ in stream_lines(["nmap", "--stats-every", "10s"] + cmd[1:], timeout=deadline,
+                          ledger=False):
         pass
     parsed = parse_nmap_xml(xml_path, include_open_filtered=True) if os.path.exists(xml_path) else {}
     n = sum(len(h.ports) for h in parsed.values())
@@ -1320,7 +1371,8 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # streams is exactly the open ports found so far, which is enough to
         # tell a working sweep from a wedged one.
         with _target_list_file(hosts) as path:
-            for obj in stream_json(cmd + ["-list", path], timeout=deadline):
+            for obj in stream_json(cmd + ["-list", path], timeout=deadline,
+                               ledger=False):
                 h = obj.get("host") or obj.get("ip")
                 p = obj.get("port")
                 if h and p:
@@ -1633,7 +1685,15 @@ def subfinder_enum(domain: str, timeout: float = 300.0) -> List[str]:
 
 def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = None,
                   extensions: str = "", timeout: float = 600.0) -> List[dict]:
-    """Content discovery with ffuf's own auto-calibration to suppress soft-404s."""
+    """Content discovery with ffuf's own auto-calibration to suppress soft-404s.
+
+    A wordlist times the extension list is hundreds of thousands of requests,
+    which at a polite rate never fits `timeout`. ffuf only writes its -o file
+    when it exits on its own, so the hard kill from run() threw away every hit
+    found so far. -maxtime makes ffuf stop itself shortly before that deadline
+    and write what it has; wordlists are frequency-ordered, so the partial
+    result is the most likely paths.
+    """
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     tmp.close()
     base = url.rstrip("/")
@@ -1642,6 +1702,7 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = No
         "-ac", "-acc", "-mc", "200,201,204,301,302,307,401,403,405,500",
         "-fs", "0", "-t", str(tune.get("ffuf_threads", 10)),
         "-rate", str(int(tune.get("rate", 30))),
+        "-maxtime", str(int(max(30.0, timeout - 30.0))),
         "-timeout", "8", "-s", "-of", "json",
         "-o", env.to_wsl_path(tmp.name), "-noninteractive",
     ]
@@ -1752,9 +1813,13 @@ def arjun_params(url: str, tune: Dict, timeout: float = 300.0) -> List[str]:
     """Discover parameters a crawl cannot see. Returns parameter names."""
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     tmp.close()
+    # No --stable: as I recall it forces one thread and a multi-second delay
+    # between requests, which cannot finish inside `timeout` (verify with
+    # `arjun --help` on the Kali box). Politeness comes from the thread cap
+    # instead: the engine runs up to 6 of these at once, so 4 threads each
+    # bounds it at about 24 concurrent requests.
     cmd = ["arjun", "-u", url, "-oJ", tmp.name, "-q",
-           "-t", str(min(tune.get("ffuf_threads", 8), 12)),
-           "--stable"]
+           "-t", str(min(tune.get("ffuf_threads", 4), 4))]
     run(cmd, timeout=timeout)
     try:
         with open(tmp.name, "r", encoding="utf-8") as fh:
