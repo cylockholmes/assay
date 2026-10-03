@@ -638,16 +638,18 @@ def _start_here(findings: List[Finding], ai_by_fid: Dict[str, Dict]) -> str:
     rows = []
     for i, f in enumerate(top, 1):
         ai = ai_by_fid.get(f.fingerprint())
-        step = ""
+        # AI next-step text is prose and safe to clip; f.repro is a literal
+        # command whose target URL is the whole point, so it must never be
+        # cut (the .sh-cmd CSS scrolls horizontally instead).
         if ai and ai.get("next_steps"):
-            step = ai["next_steps"][0]
-        elif f.repro:
+            step = ai["next_steps"][0][:220]
+        else:
             step = f.repro
         rows.append(
             '<li><a href="#f-%s">%s</a>'
             '<div class="sh-why">%s</div>'
             '<code class="sh-cmd">%s</code></li>'
-            % (f.fingerprint(), _e(f.title), _e(f.impact[:190]), _e(step[:220]))
+            % (f.fingerprint(), _e(f.title), _e(f.impact[:190]), _e(step))
         )
     return ('<section class="start"><h2>Start here</h2><ol>%s</ol></section>'
             % "".join(rows))
