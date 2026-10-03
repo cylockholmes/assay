@@ -64,8 +64,11 @@ def _followup_proof_section(store: Store) -> str:
     if not rows:
         return ""
 
+    ran_rows = [r for r in rows if r["state"] != "queued"]
+    queued_rows = [r for r in rows if r["state"] == "queued"]
+
     by_finding: Dict[str, List] = {}
-    for r in rows:
+    for r in ran_rows:
         by_finding.setdefault(r["finding_title"] or r["finding_id"] or "(unattributed)", []).append(r)
 
     groups = []
@@ -94,14 +97,38 @@ def _followup_proof_section(store: Store) -> str:
         groups.append('<h3 style="font-size:14px;margin:16px 0 4px">%s</h3>%s'
                       % (_e(title), "".join(entries)))
 
+    queued_block = ""
+    if queued_rows:
+        # These passed vet() but were never approved - without this block the
+        # report shows no trace that they exist, and the reminder to run them
+        # lives only in scrollback from the scan itself.
+        q_entries = "".join(
+            '<div class="tr-row">'
+            '<div class="cmdwrap"><code>%s</code>'
+            '<button class="copy" data-copy="%s">copy</button></div>'
+            '<div class="dim">round %s &middot; %s for: %s &middot; '
+            '<span class="tr-state tr-skip">queued - %s</span></div></div>'
+            % (_e(r["argv"] or ""), _e(r["argv"] or ""), _e(r["round"]), _e(r["tool"]),
+               _e(r["finding_title"] or r["finding_id"] or ""), _e(r["output_local"] or "needs consent"))
+            for r in queued_rows
+        )
+        queued_block = (
+            '<h3 style="font-size:14px;margin:20px 0 4px">Queued, not yet run '
+            '<span class="count">%d</span></h3>'
+            '<p class="blurb">Passed the allow-list, shell and scope checks but needs '
+            'explicit approval before it runs. Nothing below has executed. Run '
+            '<code>assay followup --run</code> to review and approve each one.</p>%s'
+            % (len(queued_rows), q_entries)
+        )
+
     return (
         '<section class="bucket" id="proof">'
         '<h2>Proof of testing <span class="count">%d</span></h2>'
         '<p class="blurb">Every command the AI loop ran, grouped by finding, with its '
         'real output - screenshot these straight into a submission. This is local '
         'evidence (0600, never sent); where a redacted slice was fed back to the '
-        'model it is shown beneath, so what left the box is auditable.</p>%s</section>'
-    ) % (len(rows), "".join(groups))
+        'model it is shown beneath, so what left the box is auditable.</p>%s%s</section>'
+    ) % (len(ran_rows), "".join(groups), queued_block)
 
 
 def _tool_runs_section(store: Store) -> str:

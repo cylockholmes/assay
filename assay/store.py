@@ -282,7 +282,7 @@ class Store:
     # page, output_sent is the redacted+capped text (if any) that went back to
     # the model. The two never mix - the proof surface is local-only.
     def record_followup_result(self, round: int, finding_id: str, finding_title: str,
-                               tool: str, argv: str, tier: str, rc: int, state: str,
+                               tool: str, argv: str, tier: str, rc: Optional[int], state: str,
                                output_local: str = "", output_sent: str = "",
                                sent: bool = False) -> None:
         local = output_local or ""

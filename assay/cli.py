@@ -1136,6 +1136,15 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
         for v in queued:
             why = "active - needs consent" if v.tier != "passive" else "over rate cap"
             console.print("  [yellow]QUEUE[/yellow] %s [dim](%s)[/dim]" % (v.display, why))
+            tool = v.argv[0].split("/")[-1] if v.argv else "?"
+            # Recorded so the report can list what's waiting and remind the
+            # reader to run `assay followup --run` - without this, a queued
+            # command that nobody approves before the report is generated
+            # leaves no trace anywhere.
+            store.record_followup_result(
+                round=rnd, finding_id=v.finding_id, finding_title=v.finding_title,
+                tool=tool, argv=v.display, tier=v.tier, rc=None, state="queued",
+                output_local=why)
         if queued:
             console.print("  [dim]run queued commands with: assay followup --run[/dim]")
 
