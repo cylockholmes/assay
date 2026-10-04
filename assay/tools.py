@@ -1386,8 +1386,17 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
             elif time.time() - t0 >= deadline - 1.0:
                 status["timed_out"] = True
         total = sum(len(v) for v in found.values())
-        summary = ("\n".join("%s: %s" % (h, ",".join(str(x) for x in sorted(set(v))))
-                             for h, v in sorted(found.items()))
+        # Candidates only: naabu is a fast SYN sweep with false positives
+        # against firewalls and tarpits. nmap -sV decides what is really open
+        # (see Engine._reconcile_naabu for what it dropped). Long lists are
+        # clipped so one noisy host cannot bury the rest of the ledger.
+        def _fmt(h, v):
+            ps = sorted(set(v))
+            shown = ",".join(str(x) for x in ps[:40])
+            return "%s: %d candidate(s): %s%s" % (
+                h, len(ps), shown, " ... (+%d more)" % (len(ps) - 40) if len(ps) > 40 else "")
+        summary = (("CANDIDATES - not confirmed open until nmap -sV runs\n"
+                    + "\n".join(_fmt(h, v) for h, v in sorted(found.items())))
                    if found else "no open ports found across %d host(s)" % len(hosts))
         _ledger("naabu", cmd + ["-list", "%d host(s)" % len(hosts)], 0,
                 "findings" if found else "no-findings", time.time() - t0, summary)

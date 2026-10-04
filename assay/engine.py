@@ -491,6 +491,8 @@ class Engine:
         shosts = self._resolve_swept_hosts(targets, swept.keys()) or hosts
         results = tools.nmap_scan(shosts, spec, self.tune,
                                   out_dir=self.cfg.out_dir, xml_prefix="nmap-deep")
+        self._reconcile_naabu({h: [p for p in ps if p in set(new_ports)]
+                               for h, ps in swept.items()}, results, "nmap-deep")
         by_host = {t.host: t for t in targets}
         by_ip = {t.ip: t for t in targets if t.ip}
         added = 0
@@ -506,6 +508,52 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in t.ports]})
         self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
+
+    # A host that "has" this many open ports almost always has a firewall,
+    # SYN proxy or tarpit answering for ports nothing is listening on.
+    SUSPECT_PORT_COUNT = 100
+
+    def _reconcile_naabu(self, swept: Dict[str, List[int]], results: Dict,
+                         label: str) -> None:
+        """Ledger which of naabu's candidate ports nmap -sV did NOT confirm.
+
+        naabu is a fast SYN sweep: its output is candidates, and it is prone
+        to false positives against anything that answers for closed ports.
+        Only nmap's result is treated as fact, so say plainly what dropped
+        out instead of leaving naabu's raw list in the report unqualified.
+        """
+        if not swept:
+            return
+        lines: List[str] = []
+        total_dropped = 0
+        for addr, ports in sorted(swept.items()):
+            cand = sorted(set(ports))
+            nh = results.get(addr)
+            if nh is None:
+                lines.append("%s: nmap returned no data for this host "
+                             "(%d naabu candidate(s) unverified)" % (addr, len(cand)))
+                continue
+            confirmed = {p.port for p in nh.ports if p.proto == "tcp"}
+            dropped = [x for x in cand if x not in confirmed]
+            total_dropped += len(dropped)
+            if not dropped:
+                continue
+            note = ""
+            if len(cand) >= self.SUSPECT_PORT_COUNT:
+                note = (" - naabu reported %d ports here; likely a firewall/tarpit "
+                        "answering for closed ports" % len(cand))
+            shown = ",".join(str(x) for x in dropped[:30])
+            more = " (+%d more)" % (len(dropped) - 30) if len(dropped) > 30 else ""
+            lines.append("%s: %d of %d naabu candidate(s) NOT confirmed by nmap: %s%s%s"
+                         % (addr, len(dropped), len(cand), shown, more, note))
+        body = ("naabu candidates dropped by nmap -sV (not open, do not report):\n"
+                + "\n".join(lines)) if lines else \
+            "every naabu candidate was confirmed open by nmap -sV"
+        self.ctx.say("ports", "nmap confirmed naabu's ports except %d candidate(s)"
+                     % total_dropped if total_dropped else
+                     "nmap confirmed every naabu candidate")
+        tools._ledger("naabu-vs-nmap", ["reconcile", label], 0,
+                      "findings" if lines else "no-findings", 0.0, body)
 
     def _naabu(self, hosts: List[str], spec: str, tag: str) -> Dict[str, List[int]]:
         """Batched naabu sweep that records what it could not cover.
@@ -566,6 +614,7 @@ class Engine:
         orig_spec = spec                      # coverage key: profile spec, pre-augmentation
         spec = self._with_ai_ports(spec)
         self._sweep_missed = set()
+        swept: Optional[Dict[str, List[int]]] = None
 
         if self.cfg.resume:
             targets = self._apply_resume(targets, xml_prefix)
@@ -603,6 +652,8 @@ class Engine:
             self._preserve_previous_xml(xml_prefix)
         results = tools.nmap_scan(hosts, spec, self.tune,
                                   out_dir=self.cfg.out_dir, xml_prefix=xml_prefix)
+        if swept:
+            self._reconcile_naabu(swept, results, xml_prefix)
         by_host = {t.host: t for t in targets}
         by_ip = {t.ip: t for t in targets if t.ip}
         found = 0
