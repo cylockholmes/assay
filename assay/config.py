@@ -301,6 +301,7 @@ class Config:
     expand: bool = True                     # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain
+    slack_webhook: str = ""                 # Slack incoming-webhook URL for scan pings
     aggressive: bool = False                # enable checks that mutate state
     safe_mode: bool = False                 # retrieval only: no crafted input
     journal: bool = True                    # record every request for replay

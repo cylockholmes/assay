@@ -11,7 +11,7 @@ import sys
 import textwrap
 from typing import Dict, List, Optional
 
-from assay import env, tools, version_string
+from assay import env, notify, tools, version_string
 from assay.config import Config, Scope, ScopeError, PROFILES
 from assay.store import Store
 import time
@@ -172,6 +172,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "the blind checks are skipped")
     g.add_argument("--no-oob", action="store_true",
                    help="do not fire out-of-band payloads at all")
+
+    g.add_argument("--slack-webhook", default="", metavar="URL",
+                   help="Slack incoming-webhook URL; pings when the scan finishes "
+                        "or stops for input (or set ASSAY_SLACK_WEBHOOK)")
 
 
     s.add_argument("--install-missing", action="store_true",
@@ -520,6 +524,7 @@ def make_config(args) -> Config:
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),
         oob_domain=getattr(args, "oob_domain", "") or "",
+        slack_webhook=getattr(args, "slack_webhook", "") or "",
         aggressive=args.aggressive,
         cookies=args.cookie,
         basic_auth=getattr(args, "basic", None) or "",
@@ -629,6 +634,11 @@ def _finalize_content(engine, args) -> None:
         console.print("  [dim]not a terminal - leaving them unfinished. Re-run "
                       "with --profile deep to carry on.[/dim]")
         return
+    # The scan is otherwise done and now blocks on this prompt; if the operator
+    # walked away during a long run, bring them back to answer it.
+    notify.from_cfg(engine.ctx.cfg).needs_input(
+        "%d content-discovery pass(es) unfinished - resume them? (waiting at the "
+        "terminal)" % n)
     try:
         answer = input("  resume them now from where each stopped (may take "
                        "hours)? [y/N] ").strip().lower()
@@ -791,8 +801,23 @@ def cmd_scan(args) -> int:
         if args.open and not state.get("opened") and not env.open_in_browser(path):
             console.print("  [dim](could not launch a browser; open the path above)[/dim]")
 
+    _notify_scan_done(engine.store, cfg, assets)
     engine.store.close()
     return 0
+
+
+def _notify_scan_done(store: Store, cfg: Config, assets: Dict) -> None:
+    """Ping Slack with a one-line result summary once the run is complete.
+    A no-op unless a webhook is configured."""
+    n = notify.from_cfg(cfg)
+    if not n.enabled:
+        return
+    c = store.counts()
+    summary = ("%d chase, %d look, %d context  |  %d hosts / %d web / %d reqs in %ss"
+               % (c.get("CHASE", 0), c.get("LOOK", 0), c.get("NOTE", 0),
+                  assets.get("hosts", 0), assets.get("web", 0),
+                  assets.get("requests", 0), assets.get("duration", 0)))
+    n.scan_done(summary)
 
 
 def run_ai_followup(store: Store, cfg: Config, args) -> int:
@@ -959,6 +984,9 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict,
                          if ai_cfg.backend == ai_mod.BACKEND_API else
                          "to the Claude Code CLI, billed to the Claude plan it "
                          "is signed in to"))
+        notify.from_cfg(cfg).needs_input(
+            "AI triage is ready to send the redacted payload - approve at the "
+            "terminal?")
         try:
             answer = input("  send? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):

@@ -651,6 +651,28 @@ Correlation is deliberately left to you: you already have Collaborator open,
 and a payload that was fired but needs correlating by hand still beats a check
 that never ran.
 
+## Slack notifications
+
+A deep scan runs for hours; you start it and walk away. Point assay at a Slack
+[incoming webhook](https://api.slack.com/messaging/webhooks) and it pings you at
+the two moments that matter:
+
+- **scan complete** — with a one-line result summary (chase/look/context counts
+  and hosts / endpoints / requests).
+- **waiting for input** — the run has otherwise finished and is now blocked on a
+  terminal prompt (resuming unfinished content-discovery passes, or approving
+  the AI-triage send). If you stepped away, this brings you back to answer it.
+
+```bash
+assay scan <targets> --profile deep --slack-webhook https://hooks.slack.com/services/...
+# or, to keep the URL out of your shell history:
+export ASSAY_SLACK_WEBHOOK=https://hooks.slack.com/services/...
+assay scan <targets> --profile deep
+```
+
+Opt-in and best-effort: nothing is sent unless a webhook is configured, and a
+webhook that is slow or down never delays or breaks the scan.
+
 ## AI triage (opt-in, redacted)
 
 Off by default. `--ai` sends findings to Claude for judgement — which are
