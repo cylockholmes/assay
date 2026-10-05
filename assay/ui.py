@@ -81,6 +81,10 @@ class Dashboard:
         # the handler must not touch any richer state than this one bool.
         self.skip_available = False
         self.skip_requested = False
+        # Flipped by the key handler on its own thread ('p'/'r'), read back
+        # here on the render thread - like skip_requested, a single bool and
+        # nothing richer.
+        self.paused = False
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self) -> "Dashboard":
@@ -151,10 +155,13 @@ class Dashboard:
     def _render(self):
         width = shutil.get_terminal_size((100, 30)).columns
 
-        if self.skip_requested:
+        if self.paused:
+            skip = (("   PAUSED", "yellow bold"), ("  [r]", "bold"), (" resume", "dim"))
+        elif self.skip_requested:
             skip = (("   skip requested", "yellow bold"),)
         elif self.skip_available:
-            skip = (("   [s]", "dim bold"), (" skip", "dim"))
+            skip = (("   [s]", "dim bold"), (" skip", "dim"),
+                    ("  [p]", "dim bold"), (" pause", "dim"))
         else:
             skip = ()
 

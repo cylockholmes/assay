@@ -1318,6 +1318,7 @@ class Engine:
         # Content discovery (ffuf, one call per web target) is exactly the
         # shape of module this matters for: skip stops the SIXTIETH ffuf
         # call from ever starting, not just the one already running.
+        tools.wait_while_paused()
         if tools.SKIP.is_set():
             return []
         if kind == "web":

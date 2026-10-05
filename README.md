@@ -313,6 +313,12 @@ while the scan runs, so the first critical can be worked by hand long before
 the last host is swept. Scroll position and filters survive the refresh, and
 auto-refresh can be paused from the page.
 
+**Live controls** (when running in a terminal): press **`s`** to skip whatever
+the current stage is grinding through, **`p`** to pause, and **`r`** to resume.
+Pause takes effect at the next launch — a tool already running is left to
+finish — so the scan stops cleanly without a half-sent request, and holds there
+(across stage boundaries) until you resume.
+
 ```bash
 assay scan 10.20.0.0/24 -n "ZESTY WOMBAT"
 ```

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import stat
 import sys
 import textwrap
@@ -745,16 +746,37 @@ def cmd_scan(args) -> int:
         skip_listener = KeyListener()
 
         def on_key(ch: str) -> None:
-            # Runs on the listener's own thread, so it only sets the SKIP
-            # mechanism and flips a single flag the owning render thread reads.
+            # Runs on the listener's own thread, so it only sets the shared
+            # Events and flips single flags the owning render thread reads.
             # It must not call into dash.progress(): that mutates shared
             # Dashboard state and draws from the wrong thread.
-            if ch.lower() == "s":
+            c = ch.lower()
+            if c == "s":
                 tools.SKIP.set()
                 dash.skip_requested = True
+            elif c == "p":
+                tools.PAUSE.set()
+                dash.paused = True
+            elif c == "r":
+                tools.PAUSE.clear()
+                dash.paused = False
 
         skip_listener.on_key = on_key
         dash.skip_available = skip_listener.start()
+
+        # A pause holds worker threads in a sleep loop (tools.wait_while_paused).
+        # Ctrl-C reaches only the main thread, so without this a pause plus a
+        # Ctrl-C would hang the pool join waiting on sleeping workers. Setting
+        # SKIP and lifting PAUSE from the signal handler drains them at once.
+        def _on_sigint(signum, frame):
+            tools.SKIP.set()
+            tools.PAUSE.clear()
+            raise KeyboardInterrupt
+        try:
+            old_sigint = signal.signal(signal.SIGINT, _on_sigint)
+        except (ValueError, OSError):
+            old_sigint = None   # not the main thread (e.g. under a test runner)
+
         try:
             engine.run()
         except KeyboardInterrupt:
@@ -765,7 +787,11 @@ def cmd_scan(args) -> int:
         finally:
             # Restores the terminal's own settings (see KeyListener._loop) -
             # must run even on an exception neither except clause above
-            # catches, or the shell is left in cbreak mode afterward.
+            # catches, or the shell is left in cbreak mode afterward. Lift any
+            # pause too, so a later phase (AI, finalize) never blocks on it.
+            if old_sigint is not None:
+                signal.signal(signal.SIGINT, old_sigint)
+            tools.PAUSE.clear()
             skip_listener.stop()
 
     _finalize_content(engine, args)

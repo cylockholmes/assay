@@ -188,6 +188,27 @@ HEARTBEAT = 5.0
 # the operator never asked to cut.
 SKIP = threading.Event()
 
+# Set by the key listener when the operator pauses the scan ('p'), cleared on
+# resume ('r'). Unlike SKIP it is NOT cleared between stages: a pause holds
+# until the operator lifts it. Checkpoints call wait_while_paused() to block
+# before starting new work - a tool already running is left to finish, so the
+# pause takes effect at the next launch, not mid-request.
+PAUSE = threading.Event()
+
+
+def wait_while_paused() -> None:
+    """Block at a checkpoint for as long as the operator has the scan paused.
+
+    Returns at once if a skip is in effect, so 's' and teardown still work
+    while paused and nothing can wedge: the engine sets SKIP to drain paused
+    worker threads when the run is interrupted. Polls rather than Event.wait()
+    so a resume (or a skip) is picked up within a quarter second, and so a
+    pause on the main thread stays interruptible by Ctrl-C.
+    """
+    while PAUSE.is_set() and not SKIP.is_set():
+        time.sleep(0.25)
+
+
 # Binary -> a parser turning one of its stdout lines into a status phrase.
 # Only for tools whose stdout is progress rather than results; everything else
 # gets the generic count below, which is what its lines actually are.
@@ -415,6 +436,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
             proc_env = dict(os.environ)
             proc_env.update(env_extra)
     argv = bridge(argv)
+    wait_while_paused()
     if SKIP.is_set():
         # The operator already asked to move past this stage before this
         # call even started - honour it immediately rather than spawning
@@ -474,6 +496,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     """
     env.augment_path()
     t0 = time.time()
+    wait_while_paused()
     if SKIP.is_set():
         # See run()'s identical check: honour a skip already in effect
         # before spawning anything, rather than starting only to kill it.
