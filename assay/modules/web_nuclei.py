@@ -77,7 +77,7 @@ class NucleiModule(Module):
         if auth:
             headers["Authorization"] = auth
         headers.update(ctx.cfg.headers)
-        for obj in tools.nuclei_scan(urls, sev, ctx.tune, proxy=ctx.cfg.burp.proxy,
+        for obj in tools.nuclei_scan(urls, sev, ctx.tune,
                                      headers=headers or None):
             f = self._convert(obj)
             if f is None:

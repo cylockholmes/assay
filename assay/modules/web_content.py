@@ -51,19 +51,40 @@ class ContentDiscoveryModule(Module):
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
         wordlist = tools.default_wordlist(ctx.cfg.profile)
         origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
-        bl = ctx.baseline_for(origin)
+        extensions = self._extensions(wt)
 
         ctx.say("content", "fuzzing %s with %s"
                 % (origin, os.path.basename(wordlist)))
-        results = tools.ffuf_discover(
+        sweep = tools.ffuf_sweep(
             origin, wordlist, ctx.tune,
-            proxy=ctx.cfg.burp.proxy,
-            extensions=self._extensions(wt),
-            timeout=900.0 if ctx.cfg.profile == "deep" else 420.0,
+            extensions=extensions,
+            # deep is the overnight profile: give each host a real hour so the
+            # frequency-ordered list gets meaningfully past its first percent.
+            # At 900s it covered no more of the wordlist than standard already
+            # does, so "deep" bought nothing here.
+            timeout=3600.0 if ctx.cfg.profile == "deep" else 420.0,
         )
+        # Say how the pass went every time, even with zero hits: a run that
+        # stopped at 3% of the list and one that swept the whole thing and
+        # found nothing otherwise look identical.
+        ctx.say("content", "%s %s" % (origin, sweep.coverage))
+        # Didn't reach the end of the list? Record exactly where it stopped so
+        # the CLI can offer to resume it at the end of the run instead of
+        # redoing the front.
+        if not sweep.done:
+            ctx.defer_content({"origin": origin, "wordlist": wordlist,
+                               "extensions": extensions, "reached": sweep.reached,
+                               "total": sweep.total, "coverage": sweep.coverage})
+        return self._ingest(ctx, origin, wordlist, sweep.results, sweep.coverage)
+
+    def _ingest(self, ctx: Context, origin: str, wordlist: str,
+                results: List[dict], coverage: str) -> List[Finding]:
+        """Turn one sweep's hits into URL-pool entries and, for the noteworthy
+        ones, a finding. Shared by the live run and by a later resume pass so
+        both treat results identically."""
         if not results:
             return []
-
+        bl = ctx.baseline_for(origin)
         cap = ctx.cfg.opts.get("max_urls_per_host", 60) * 3
         discovered: List[str] = []
         interesting: List[Dict] = []
@@ -115,7 +136,7 @@ class ContentDiscoveryModule(Module):
                    "check whether the guard can be bypassed by method, path casing "
                    "or a trailing slash. " % len(auth_walled) if auth_walled else "")
             ),
-            detail="Wordlist: %s" % os.path.basename(wordlist),
+            detail="Coverage: %s" % coverage,
             repro="ffuf -u %s/FUZZ -w %s -ac -mc 200,301,302,401,403"
                   % (origin.rstrip("/"), wordlist),
             tags=["discovery", "verified", "manual-followup"],
@@ -124,6 +145,25 @@ class ContentDiscoveryModule(Module):
                                output=listing)],
             dedupe_key="content|%s" % origin,
         )]
+
+    def finalize(self, ctx: Context, job: Dict) -> List[Finding]:
+        """Resume a cut-short pass from exactly where it stopped. Budgeted in
+        hours, not minutes, because the operator explicitly asked to finish it;
+        it still banks partial progress if even this runs out. The finding's
+        dedupe key folds any re-found paths into the existing finding."""
+        origin = job["origin"]
+        wordlist = job["wordlist"]
+        start = int(job.get("reached", 0))
+        ctx.say("content", "resuming %s with %s from word %d"
+                % (origin, os.path.basename(wordlist), start))
+        sweep = tools.ffuf_sweep(
+            origin, wordlist, ctx.tune,
+            extensions=job.get("extensions", ""),
+            timeout=6 * 3600.0,
+            start=start,
+        )
+        ctx.say("content", "%s %s" % (origin, sweep.coverage))
+        return self._ingest(ctx, origin, wordlist, sweep.results, sweep.coverage)
 
     @staticmethod
     def _extensions(wt: WebTarget) -> str:
@@ -136,3 +176,19 @@ class ContentDiscoveryModule(Module):
         if "java" in tech or "tomcat" in tech or "spring" in tech:
             return ".jsp,.do,.action,.xml,.properties"
         return ".txt,.bak,.old,.json,.xml"
+
+
+def finalize_pending(ctx: Context) -> int:
+    """Finish every content-discovery pass that was cut short earlier in the
+    run, emitting any new findings directly. Returns how many passes ran. A
+    no-op when nothing was deferred; the CLI calls this only after the
+    operator opts in."""
+    jobs = list(ctx.deferred_content)
+    if not jobs:
+        return 0
+    mod = ContentDiscoveryModule()
+    for job in jobs:
+        for f in mod.finalize(ctx, job):
+            ctx.emit(f)
+    ctx.deferred_content.clear()
+    return len(jobs)

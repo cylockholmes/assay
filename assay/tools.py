@@ -613,7 +613,7 @@ def stream_json(cmd: Sequence[str], timeout: float = 900.0,
 
 
 # --------------------------------------------------------------------------
-# Proxy plumbing -- route external tools through Burp too
+# Header plumbing for external tools
 # --------------------------------------------------------------------------
 
 
@@ -628,21 +628,6 @@ def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str
     for k, v in headers.items():
         out += [flag, "%s: %s" % (k, v)]
     return out
-
-
-def proxy_args(tool: str, proxy: Optional[str]) -> List[str]:
-    # Under the Windows->WSL bridge a loopback proxy has to be rewritten to the
-    # Windows host address, or the tool proxies to the WSL VM and misses Burp.
-    proxy = env.proxy_for_tools(proxy)
-    if not proxy:
-        return []
-    if tool in ("httpx", "nuclei", "katana"):
-        return ["-proxy", proxy]
-    if tool == "ffuf":
-        return ["-x", proxy]
-    if tool == "gowitness":
-        return ["--proxy", proxy]
-    return []
 
 
 # --------------------------------------------------------------------------
@@ -1541,7 +1526,7 @@ def httpx_timeout(candidates: Sequence[str], tune: Dict) -> float:
     return min(HTTPX_TIMEOUT_CAP, HTTPX_BASE_TIMEOUT + worst_case)
 
 
-def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
+def httpx_probe(targets: List[str], tune: Dict,
                 timeout: Optional[float] = None,
                 headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
     # "-list -" doesn't mean stdin here either -- see _target_list_file. The
@@ -1558,7 +1543,7 @@ def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
         "-timeout", "10", "-retries", "1",
         "-threads", str(tune.get("concurrency", 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
-    ] + proxy_args("httpx", proxy) + header_args("httpx", headers)
+    ] + header_args("httpx", headers)
     with _target_list_file(targets) as path:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
@@ -1569,7 +1554,7 @@ def httpx_probe(targets: List[str], tune: Dict, proxy: Optional[str] = None,
 
 
 def nuclei_scan(urls: List[str], severity: str, tune: Dict,
-                proxy: Optional[str] = None, extra_tags: str = "",
+                extra_tags: str = "",
                 timeout: float = 3600.0,
                 headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
     # A real file, not stdin -- nuclei has shipped bugs where stdin piped in
@@ -1590,7 +1575,7 @@ def nuclei_scan(urls: List[str], severity: str, tune: Dict,
     ]
     if extra_tags:
         cmd += ["-tags", extra_tags]
-    cmd += proxy_args("nuclei", proxy) + header_args("nuclei", headers)
+    cmd += header_args("nuclei", headers)
     with _target_list_file(urls) as path:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
@@ -1625,7 +1610,7 @@ def katana_timeout(candidates: Sequence[str], depth: int, tune: Dict) -> float:
 
 
 def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
-                 proxy: Optional[str] = None, timeout: Optional[float] = None,
+                 timeout: Optional[float] = None,
                  headers: Optional[Dict[str, str]] = None) -> List[dict]:
     # Flat 600s was the same bug already fixed for nmap, naabu and httpx
     # today: a crawl of 359 endpoints hit it and cut short at 317 URLs.
@@ -1658,7 +1643,7 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
         # "all" is the choice that covers both robots.txt and sitemap.xml.
         "-timeout", "10", "-kf", "all",
         "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
-    ] + proxy_args("katana", proxy) + header_args("katana", headers)
+    ] + header_args("katana", headers)
     out: List[dict] = []
     with _target_list_file(urls) as path:
         for obj in stream_json(cmd + ["-list", path], timeout=timeout):
@@ -1692,8 +1677,64 @@ def subfinder_enum(domain: str, timeout: float = 300.0) -> List[str]:
 # --------------------------------------------------------------------------
 
 
-def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = None,
-                  extensions: str = "", timeout: float = 600.0) -> List[dict]:
+@dataclass
+class FfufRun:
+    """Outcome of one ffuf pass, with enough context to say how far through the
+    wordlist it got. A deep pass almost never finishes the list inside its
+    budget, so "47 hits" means something very different after 3% of the words
+    than after the whole file - and a run that stopped early with nothing looks
+    identical to one that swept everything and found nothing unless we say which
+    it was. The caller reports `coverage` so a partial pass is never mistaken
+    for an exhaustive one.
+    """
+    results: List[dict] = field(default_factory=list)
+    planned: int = 0          # words x (1 + extensions): a full pass's requests
+    attempted: int = 0        # estimate (rate x elapsed), capped at planned
+    elapsed: float = 0.0
+    completed: bool = False    # finished the list, vs stopped on the time budget
+    killed: bool = False       # hard-killed by run() before it could write hits
+    errored: bool = False      # exited nonzero (bad flag, connect refused, ...)
+    wordlist: str = ""
+
+    @property
+    def coverage(self) -> str:
+        """One line a human can read without knowing ffuf's flags."""
+        name = os.path.basename(self.wordlist) or "wordlist"
+        took = human_duration(self.elapsed)
+        if self.killed:
+            return ("%s: hard-killed at the time limit after %s before it "
+                    "could write results - hits lost" % (name, took))
+        if self.errored:
+            return "%s: ffuf exited with an error after %s (see ledger)" % (name, took)
+        if self.completed:
+            return "%s: completed, ~%d requests in %s" % (name, self.planned, took)
+        if self.planned:
+            pct = 100 * self.attempted // self.planned
+            scope = "~%d%% (est.) of ~%d planned requests" % (pct, self.planned)
+        else:
+            scope = "partial"
+        return ("%s: stopped at the %s time budget - %s; wordlist is "
+                "frequency-ordered so these are the likeliest paths"
+                % (name, took, scope))
+
+
+_WORDLIST_LINES: Dict[str, int] = {}
+
+
+def _wordlist_len(path: str) -> int:
+    """Line count of a wordlist, cached: deep reuses the same file for every
+    host in a run and the big lists are ~350k lines, so count each one once."""
+    if path not in _WORDLIST_LINES:
+        try:
+            with open(path, "rb") as fh:
+                _WORDLIST_LINES[path] = sum(1 for _ in fh)
+        except OSError:
+            _WORDLIST_LINES[path] = 0
+    return _WORDLIST_LINES[path]
+
+
+def ffuf_discover(url: str, wordlist: str, tune: Dict,
+                  extensions: str = "", timeout: float = 600.0) -> "FfufRun":
     """Content discovery with ffuf's own auto-calibration to suppress soft-404s.
 
     A wordlist times the extension list is hundreds of thousands of requests,
@@ -1701,35 +1742,160 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict, proxy: Optional[str] = No
     when it exits on its own, so the hard kill from run() threw away every hit
     found so far. -maxtime makes ffuf stop itself shortly before that deadline
     and write what it has; wordlists are frequency-ordered, so the partial
-    result is the most likely paths.
+    result is the most likely paths. The returned FfufRun carries how far
+    through the list that budget actually got, so the caller can say so.
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     tmp.close()
     base = url.rstrip("/")
+    # ffuf writes its -o file only on a clean exit, never on the SIGTERM that
+    # run() sends at `timeout`, so -maxtime MUST fire first with room to spare.
+    # A flat 30s gap was not enough: ffuf overruns -maxtime while its -rate
+    # limiter is sleeping and while in-flight requests drain, so it was
+    # reaching the hard kill and losing every hit. Scale the cushion
+    # with the budget - a long deep/finalize pass has many more in-flight and
+    # far more clock to overrun - with a floor that still doubles the old gap
+    # on the short profiles.
+    grace = max(60.0, timeout * 0.1)
+    maxtime = max(30.0, timeout - grace)
+    rate = int(tune.get("rate", 30))
+    n_ext = len([e for e in extensions.split(",") if e]) if extensions else 0
+    planned = _wordlist_len(wordlist) * (1 + n_ext)
     cmd = [
         "ffuf", "-u", base + "/FUZZ", "-w", wordlist,
         "-ac", "-acc", "-mc", "200,201,204,301,302,307,401,403,405,500",
         "-fs", "0", "-t", str(tune.get("ffuf_threads", 10)),
-        "-rate", str(int(tune.get("rate", 30))),
-        "-maxtime", str(int(max(30.0, timeout - 30.0))),
+        "-rate", str(rate),
+        "-maxtime", str(int(maxtime)),
         "-timeout", "8", "-s", "-of", "json",
         "-o", env.to_wsl_path(tmp.name), "-noninteractive",
     ]
     if extensions:
         cmd += ["-e", extensions]
-    cmd += proxy_args("ffuf", proxy)
-    run(cmd, timeout=timeout)
+    t0 = time.time()
+    proc = run(cmd, timeout=timeout)
+    elapsed = time.time() - t0
+    out = FfufRun(
+        planned=planned, elapsed=elapsed, wordlist=wordlist,
+        attempted=min(planned, int(elapsed * rate)) if planned else 0,
+        killed=proc.timed_out,
+        errored=not proc.ok and not proc.timed_out,
+        # ffuf exits rc 0 both when it finishes the list and when it hits
+        # -maxtime, so rc alone can't tell them apart; the clock does. Leaving
+        # a few seconds' slack below maxtime keeps a run that stopped on the
+        # budget from being reported as a completed sweep.
+        completed=proc.ok and elapsed < maxtime - 5,
+    )
     try:
         with open(tmp.name, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return data.get("results", [])
+        out.results = data.get("results", [])
     except (OSError, ValueError):
-        return []
+        out.results = []
     finally:
         try:
             os.unlink(tmp.name)
         except OSError:
             pass
+    return out
+
+
+@dataclass
+class FfufSweep:
+    """Outcome of fuzzing a wordlist in ordered shards. `reached` is the exact
+    word index to resume from - banked across every shard that finished, so a
+    later pass continues from there instead of redoing the front of the list."""
+    results: List[dict] = field(default_factory=list)
+    reached: int = 0           # word index to resume from next time
+    total: int = 0             # words in the wordlist
+    elapsed: float = 0.0
+    done: bool = False         # the whole wordlist was swept
+    killed: bool = False       # a shard was hard-killed before it could flush
+    wordlist: str = ""
+
+    @property
+    def coverage(self) -> str:
+        name = os.path.basename(self.wordlist) or "wordlist"
+        took = human_duration(self.elapsed)
+        if self.done:
+            return "%s: swept all %d words in %s" % (name, self.total, took)
+        pct = (" (%d%%)" % (100 * self.reached // self.total)) if self.total else ""
+        tail = " - a shard was hard-killed, some of its hits lost" if self.killed else ""
+        return ("%s: %d/%d words%s in %s - stopped on the time budget; resume "
+                "picks up from word %d%s"
+                % (name, self.reached, self.total, pct, took, self.reached, tail))
+
+
+# Each shard aims at roughly this many seconds of requests at the rate cap, so
+# a shard is about the same wall-clock slice whatever the extension multiplier
+# does to the request count - small enough that a cut loses at most one shard's
+# worth of progress, large enough that per-shard ffuf startup and -ac
+# calibration stay negligible.
+_SHARD_SECONDS = 300.0
+
+
+def ffuf_sweep(url: str, wordlist: str, tune: Dict,
+               extensions: str = "", timeout: float = 600.0,
+               start: int = 0) -> "FfufSweep":
+    """Fuzz `wordlist` in ordered shards, from word index `start`, until the
+    list is exhausted or `timeout` is spent.
+
+    ffuf has no resume of its own and only writes hits when it exits cleanly, so
+    one long pass that gets cut loses everything after its last flush, and a
+    retry would redo the whole front of the (frequency-ordered) list. Fuzzing
+    fixed-size shards instead banks every finished shard's hits and records the
+    exact word index reached, so a later pass - a `finalize` - continues from
+    there rather than from the top.
+    """
+    try:
+        with open(wordlist, "r", encoding="utf-8", errors="replace") as fh:
+            words = [w.rstrip("\n") for w in fh if w.strip()]
+    except OSError:
+        return FfufSweep(wordlist=wordlist)
+    total = len(words)
+    rate = max(1, int(tune.get("rate", 30)))
+    n_ext = len([e for e in extensions.split(",") if e]) if extensions else 0
+    shard_words = max(200, int(rate * _SHARD_SECONDS / (1 + n_ext)))
+
+    sweep = FfufSweep(total=total, wordlist=wordlist,
+                      reached=min(max(0, start), total))
+    t0 = time.time()
+    deadline = t0 + timeout
+    i = sweep.reached
+    while i < total:
+        remaining = deadline - time.time()
+        # Too little left to spawn another shard and have it make real
+        # progress; stop here and leave the rest for a resume.
+        if remaining < 45:
+            break
+        chunk = words[i:i + shard_words]
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                          encoding="utf-8")
+        try:
+            tmp.write("\n".join(chunk) + "\n")
+            tmp.close()
+            fr = ffuf_discover(url, env.to_wsl_path(tmp.name), tune,
+                               extensions=extensions, timeout=remaining)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        sweep.results.extend(fr.results)
+        if fr.completed:
+            i += len(chunk)
+            sweep.reached = min(i, total)
+            continue
+        # The shard did not finish inside the budget (stopped on its own
+        # -maxtime, was hard-killed, or errored): leave `reached` at this
+        # shard's start so a resume redoes only this shard, not the ones
+        # already banked before it.
+        sweep.reached = i
+        sweep.killed = fr.killed
+        break
+    sweep.elapsed = time.time() - t0
+    sweep.done = sweep.reached >= total
+    return sweep
 
 
 # Bigger costs time, not just hit rate - ffuf still has to send one request

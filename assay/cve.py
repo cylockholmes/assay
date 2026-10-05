@@ -114,7 +114,7 @@ def lookup(name: str, version: str, http, limit: int = 5) -> List[CveMatch]:
     headers = {"apiKey": api_key} if api_key else None
     query = "%s %s" % (name, version)
     url = "%s?keywordSearch=%s&resultsPerPage=%d" % (NVD_URL, quote(query, safe=""), limit)
-    r = http.get(url, through_burp=False, infra=True, timeout=20.0, headers=headers)
+    r = http.get(url, infra=True, timeout=20.0, headers=headers)
     if not r.ok or r.status != 200:
         return []
     return parse(r.body, limit)

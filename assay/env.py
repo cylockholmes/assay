@@ -1,7 +1,7 @@
-"""Environment detection: WSL quirks, resource budget, Burp discovery, tool paths.
+"""Environment detection: WSL quirks, resource budget, tool paths.
 
-Built for a common engagement setup: Kali under WSL2 on Windows 11, with Burp
-running on the Windows side and a CPU/RAM-constrained VM underneath.
+Built for a common engagement setup: Kali under WSL2 on Windows 11, with a
+CPU/RAM-constrained VM underneath.
 """
 
 from __future__ import annotations
@@ -286,62 +286,6 @@ def autotune(res: Optional[Resources] = None) -> Dict[str, object]:
 
 
 # --------------------------------------------------------------------------
-# Burp discovery
-# --------------------------------------------------------------------------
-
-
-def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def burp_candidates() -> List[str]:
-    hosts = ["127.0.0.1"]
-    hip = windows_host_ip()
-    if hip and hip not in hosts:
-        hosts.append(hip)
-    return hosts
-
-
-def find_burp_proxy(port: int = 8080) -> Optional[str]:
-    """Locate a reachable Burp proxy listener.
-
-    Under WSL2 NAT, Burp on Windows listening on 127.0.0.1 is NOT reachable;
-    it must bind all interfaces (or WSL must run in mirrored networking mode).
-    """
-    for host in burp_candidates():
-        if _port_open(host, port):
-            return "http://%s:%d" % (host, port)
-    return None
-
-
-def find_burp_api(port: int = 1337) -> Optional[str]:
-    for host in burp_candidates():
-        if _port_open(host, port):
-            return "http://%s:%d" % (host, port)
-    return None
-
-
-def burp_hint() -> str:
-    """Actionable guidance when Burp cannot be reached from WSL."""
-    if not is_wsl():
-        return "Start Burp and enable the Proxy listener on 127.0.0.1:8080."
-    hip = windows_host_ip() or "<windows-ip>"
-    return (
-        "Burp appears to be on the Windows side. Either:\n"
-        "  a) set WSL to mirrored networking - add to C:\\Users\\<you>\\.wslconfig:\n"
-        "       [wsl2]\n       networkingMode=mirrored\n"
-        "     then 'wsl --shutdown' and reopen; Burp on 127.0.0.1:8080 then just works; or\n"
-        "  b) in Burp -> Proxy -> Proxy settings, bind the listener to 'All interfaces',\n"
-        "     allow it through Windows Defender Firewall, and run:\n"
-        "       assay scan --burp http://%s:8080 ..." % hip
-    )
-
-
-# --------------------------------------------------------------------------
 # External tool discovery
 # --------------------------------------------------------------------------
 
@@ -364,26 +308,6 @@ def wsl_gateway_ip() -> Optional[str]:
         _WSL_STATE["gateway"] = ip
         return ip
     return None
-
-
-def proxy_for_tools(proxy: Optional[str]) -> Optional[str]:
-    """Rewrite a loopback proxy so a tool running inside WSL can reach it.
-
-    assay's own requests run on the Windows host, where Burp on 127.0.0.1 is
-    directly reachable. The scanners run inside WSL, where 127.0.0.1 is the
-    WSL VM itself - a different machine. Under mirrored networking the two
-    coincide; under the default NAT they do not, and the tools would silently
-    bypass the proxy. Point them at the Windows host explicitly.
-    """
-    if not proxy or not use_wsl_bridge():
-        return proxy
-    m = re.match(r"^(\w+://)(127\.0\.0\.1|localhost)(:\d+)?(.*)$", proxy, re.I)
-    if not m:
-        return proxy
-    gateway = wsl_gateway_ip()
-    if not gateway:
-        return proxy
-    return "%s%s%s%s" % (m.group(1), gateway, m.group(3) or "", m.group(4) or "")
 
 
 _WSL_WHICH: Dict[str, Optional[str]] = {}

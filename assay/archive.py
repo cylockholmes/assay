@@ -57,7 +57,7 @@ class Snapshot:
 def cdx_index(host: str, http, limit: int = 400) -> List[Snapshot]:
     """Ask the Wayback CDX index what it holds for this host."""
     url = CDX % (quote(host, safe=""), limit)
-    r = http.get(url, through_burp=False, timeout=45.0, infra=True)
+    r = http.get(url, timeout=45.0, infra=True)
     if not r.ok or r.status != 200:
         return []
     try:
@@ -86,7 +86,7 @@ def cdx_index(host: str, http, limit: int = 400) -> List[Snapshot]:
 
 
 def fetch(snap: Snapshot, http, limit: int = 400000) -> str:
-    r = http.get(snap.fetch_url, through_burp=False, timeout=30.0, infra=True)
+    r = http.get(snap.fetch_url, timeout=30.0, infra=True)
     if not r.ok or r.status != 200:
         return ""
     return r.body[:limit]

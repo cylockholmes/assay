@@ -5,8 +5,8 @@ targets, and answers one question fast: **what here is worth an hour of my
 time?**
 
 Built for a specific setup — Kali under WSL2 on Windows 11, on a
-CPU/RAM-limited VM, with Burp running on the Windows side — but it runs on any
-Debian-family Linux, and degrades gracefully wherever a tool is missing.
+CPU/RAM-limited VM — but it runs on any Debian-family Linux, and degrades
+gracefully wherever a tool is missing.
 
 > **For authorized testing only.** Point this at systems you have written
 > permission to test. Several checks send crafted input and read files from the
@@ -114,9 +114,8 @@ run everything there. Simplest, and what the defaults assume.
 **On Windows, tools in WSL.** assay itself is pure Python and runs natively on
 Windows, but every scanner it orchestrates is a Linux binary. When it detects a
 Windows host with WSL available it bridges automatically — each external command
-is executed as `wsl.exe -d <distro> -- <tool> ...`, output paths are translated
-to `/mnt/...` so both sides see the same files, and a loopback Burp proxy is
-rewritten to the Windows host address so WSL-side tools still reach it.
+is executed as `wsl.exe -d <distro> -- <tool> ...`, and output paths are
+translated to `/mnt/...` so both sides see the same files.
 
 ```powershell
 py -3 -m venv .venv
@@ -130,24 +129,9 @@ distribution found*, install one — `wsl --install -d kali-linux` — then run
 
 There is one asymmetry worth understanding in bridged mode: assay's own HTTP
 requests originate from Windows, while the scanners run inside WSL. They are
-different network positions. assay compensates for the Burp proxy
-automatically; if you use a VPN or gateway, make sure **both** sides route
-through it, or your own requests and your tools' requests will see different
-networks.
-
-### WSL2 notes
-
-Two things trip people up:
-
-1. **Burp is on the Windows side.** WSL cannot reach a listener bound to
-   Windows' own `127.0.0.1`. Either set `networkingMode=mirrored` in
-   `C:\Users\<you>\.wslconfig` and `wsl --shutdown`, or bind Burp's proxy to
-   all interfaces and use `--burp http://<windows-ip>:8080`. `assay doctor`
-   detects which case you are in and prints the exact fix.
-2. **Gateway certificates.** If you connect through a managed VPN or gateway
-   that terminates TLS with its own CA, Burp will not trust it until that CA is
-   added to Burp's Java trust store (`cacerts`). Import the CA with `keytool`,
-   or point Burp at a `cacerts` bundle that already contains it.
+different network positions. If you use a VPN or gateway, make sure **both**
+sides route through it, or your own requests and your tools' requests will see
+different networks.
 
 ---
 
@@ -617,26 +601,6 @@ Running without `--scope` warns loudly. On a real engagement, don't.
 
 ---
 
-## Burp integration
-
-Three levels, independently usable:
-
-| Flag | Needs | Effect |
-|---|---|---|
-| `--burp auto` | Community | Proxies every assay **and** external-tool request through Burp; the whole scan lands in Proxy history and the site map |
-| `--burp-mirror` | Community | Replays the exact request behind each finding through Burp, so the interesting requests are sitting there ready for Repeater |
-| `--burp-scan` | Professional | Queues Burp's active scanner against the URLs assay flagged, via the REST API |
-
-`assay burp --scope-file burp-scope.json` exports assay's scope in Burp's own
-format so both tools agree on the boundary.
-
-**WSL note:** `--burp auto` knows Burp is probably on the Windows host. It
-tries `127.0.0.1:8080` (works under mirrored networking) and then the WSL2
-default gateway. If neither responds, `assay doctor` prints the exact
-`.wslconfig` change or listener/firewall setting needed.
-
----
-
 ## Running small
 
 `assay` reads `/proc/meminfo` and CPU count at startup and derives worker count,
@@ -858,11 +822,10 @@ assay's scale so a nuclei `high` can't outrank a locally verified critical.
 
 ```
 assay scan <targets>     run a scan (hosts, CIDRs, URLs, or -f file)
-assay doctor             tools, Burp reachability, WSL networking, resources
+assay doctor             tools, WSL networking, resources
 assay report             rebuild the HTML report from a previous run
 assay show <n>           print finding #n in full, with evidence
 assay ai                 AI triage over an existing run (--ai-backend api|claude-cli)
-assay burp               mirror findings / queue a Burp scan / export scope
 assay install           install the external tools (--dry-run to preview)
 assay replay <capture>  replay an authenticated Burp/HAR capture with the
                         credentials stripped, to find unauthenticated access

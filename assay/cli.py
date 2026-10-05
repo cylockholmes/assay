@@ -12,8 +12,7 @@ import textwrap
 from typing import Dict, List, Optional
 
 from assay import env, tools, version_string
-from assay.burp import BurpBridge
-from assay.config import BurpConfig, Config, Scope, ScopeError, PROFILES
+from assay.config import Config, Scope, ScopeError, PROFILES
 from assay.store import Store
 import time
 
@@ -26,7 +25,7 @@ from assay.ui import (Dashboard, KeyListener, SEV_STYLE, console,
 EPILOG = """\
 examples:
   assay scan 10.10.0.0/24 --scope scope.txt
-  assay scan https://app.target.tld --profile deep --burp auto
+  assay scan https://app.target.tld --profile deep
   assay scan -f targets.txt --profile quick --no-open
   assay ai --out ./assay-out --ai-dry-run       # see exactly what would be sent
   assay ai --out ./assay-out --ai-backend claude-cli   # via the Claude desktop app
@@ -36,7 +35,7 @@ examples:
   assay triage 3 --status reported            # stop a submitted finding resurfacing
   assay followup --scope scope.txt             # preview the AI's verify commands
   assay followup --scope scope.txt --run       # un-redact and execute them
-  assay doctor                                  # tools, Burp, WSL, resources
+  assay doctor                                  # tools, WSL, resources
   assay install --dry-run                       # preview external tool install
   assay install -y                              # install everything missing
   assay scan 10.0.0.0/24 --basic admin:admin    # behind HTTP Basic auth
@@ -174,15 +173,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-oob", action="store_true",
                    help="do not fire out-of-band payloads at all")
 
-    s.add_argument("--burp", nargs="?", const="auto", metavar="URL",
-                   help="proxy through Burp; 'auto' discovers the listener (WSL aware)")
-    s.add_argument("--burp-api", nargs="?", const="auto", metavar="URL",
-                   help="Burp Professional REST API base URL")
-    s.add_argument("--burp-key", help="Burp REST API key")
-    s.add_argument("--burp-mirror", action="store_true",
-                   help="replay each finding's request through Burp when done")
-    s.add_argument("--burp-scan", action="store_true",
-                   help="queue a Burp Professional active scan on interesting URLs")
 
     s.add_argument("--install-missing", action="store_true",
                    help="install any missing external tools before scanning")
@@ -199,8 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-q", "--quiet", action="store_true")
 
     # -- other commands ----------------------------------------------------
-    d = sub.add_parser("doctor", help="check tools, Burp reachability and resources")
-    d.add_argument("--burp", nargs="?", const="auto", metavar="URL")
+    d = sub.add_parser("doctor", help="check tools, WSL and resources")
 
     r = sub.add_parser("report", help="rebuild the HTML report from a previous run")
     r.add_argument("-o", "--out", default="./assay-out")
@@ -216,15 +205,6 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("show", help="print one finding in full")
     sh.add_argument("rank", help="rank number from the summary table, or a finding id")
     sh.add_argument("-o", "--out", default="./assay-out")
-
-    b = sub.add_parser("burp", help="push a finished run into Burp")
-    b.add_argument("-o", "--out", default="./assay-out")
-    b.add_argument("--burp", nargs="?", const="auto", metavar="URL")
-    b.add_argument("--burp-api", nargs="?", const="auto", metavar="URL")
-    b.add_argument("--burp-key")
-    b.add_argument("--mirror", action="store_true", help="replay finding requests")
-    b.add_argument("--scan", action="store_true", help="queue an active scan (Pro)")
-    b.add_argument("--scope-file", help="write a Burp-importable scope JSON here")
 
     sb = sub.add_parser("submit", help="generate submission drafts for findings")
     sb.add_argument("rank", nargs="?", help="rank number or finding id (default: all)")
@@ -245,8 +225,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also replay non-GET requests (these may change state)")
     rp.add_argument("--limit", type=int, default=200)
     rp.add_argument("-r", "--rate", type=float, default=10.0)
-    rp.add_argument("--burp", nargs="?", const="auto", metavar="URL",
-                    help="send the replayed requests through Burp as well")
 
     fu = sub.add_parser("followup",
                         help="run the AI's verification commands (un-redacted)")
@@ -564,7 +542,6 @@ def make_config(args) -> Config:
         cfg.skip_modules = [x.strip() for x in args.skip.split(",") if x.strip()]
 
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
-    cfg.burp = _burp_config(args)
 
     if scope.permissive:
         console.print(
@@ -573,22 +550,6 @@ def make_config(args) -> Config:
             "a typo or a redirect from touching an out-of-scope host."
         )
     return cfg
-
-
-def _burp_config(args) -> BurpConfig:
-    bc = BurpConfig()
-    proxy = getattr(args, "burp", None)
-    api = getattr(args, "burp_api", None)
-    if proxy:
-        bc.proxy = env.find_burp_proxy() if proxy == "auto" else proxy
-        if not bc.proxy:
-            console.print("[yellow]Burp proxy not found.[/yellow]\n%s" % env.burp_hint())
-    if api:
-        bc.api_url = env.find_burp_api() if api == "auto" else api
-    bc.api_key = getattr(args, "burp_key", None)
-    bc.mirror = bool(getattr(args, "burp_mirror", False))
-    bc.scan = bool(getattr(args, "burp_scan", False))
-    return bc
 
 
 # --------------------------------------------------------------------------
@@ -638,6 +599,58 @@ def _decide_rescan(cfg) -> None:
     cfg.rescan = answer in ("y", "yes")
     console.print("  [dim]%s[/dim]" % ("re-scanning everything"
                   if cfg.rescan else "skipping already-covered hosts"))
+
+
+def _finalize_content(engine, args) -> None:
+    """Offer, once the scan is otherwise done, to finish any content-discovery
+    passes that stopped on their time budget before reaching the end of the
+    wordlist. Deep in particular only ever covers the first few percent of the
+    list inside one host's budget, so the rest is there for the asking.
+
+    Prompts only when attached to a terminal - finishing a pass can take hours,
+    so a non-interactive or -y run is told what was left rather than silently
+    launching it.
+    """
+    jobs = engine.ctx.deferred_content
+    if not jobs:
+        return
+    from assay.modules import web_content
+
+    n = len(jobs)
+    console.print("\n[bold]%d content-discovery pass(es) did not finish the "
+                  "wordlist[/bold]" % n)
+    for j in jobs[:10]:
+        console.print("  [dim]%s - %s[/dim]"
+                      % (j.get("origin", "?"), j.get("coverage", "partial")))
+    if n > 10:
+        console.print("  [dim]... and %d more[/dim]" % (n - 10))
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        console.print("  [dim]not a terminal - leaving them unfinished. Re-run "
+                      "with --profile deep to carry on.[/dim]")
+        return
+    try:
+        answer = input("  resume them now from where each stopped (may take "
+                       "hours)? [y/N] ").strip().lower()
+    except EOFError:
+        return
+    if answer not in ("y", "yes"):
+        return
+
+    # The live dashboard has torn down by now, so ctx.say would be silent;
+    # route its progress to the plain console for the duration of the pass.
+    saved = engine.ctx.progress
+    engine.ctx.progress = lambda stage, msg, advance=0: console.print(
+        "  [dim]%s[/dim] %s" % (stage, msg))
+    try:
+        ran = web_content.finalize_pending(engine.ctx)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]interrupted - whatever finished is saved[/yellow]")
+        ran = 0
+    finally:
+        engine.ctx.progress = saved
+    if ran:
+        console.print("  [green]finalized %d pass(es)[/green]" % ran)
 
 
 def cmd_scan(args) -> int:
@@ -745,6 +758,8 @@ def cmd_scan(args) -> int:
             # catches, or the shell is left in cbreak mode afterward.
             skip_listener.stop()
 
+    _finalize_content(engine, args)
+
     assets = engine.assets()
     inventory(engine.store)
     summary(engine.store, assets)
@@ -764,9 +779,6 @@ def cmd_scan(args) -> int:
     elif getattr(args, "ai_followup", False):
         console.print("[yellow]--ai-followup needs --ai[/yellow] - there are no "
                       "suggested commands without a triage pass")
-
-    if cfg.burp.mirror or cfg.burp.scan:
-        _burp_push(engine.store, cfg, mirror=cfg.burp.mirror, scan=cfg.burp.scan)
 
     if not args.no_report:
         path = os.path.join(cfg.out_dir, "report.html")
@@ -1229,19 +1241,6 @@ def cmd_doctor(args) -> int:
                       "[bold]assay install[/bold]  [dim](--dry-run to preview)[/dim]"
                       % len(missing))
 
-    console.print("\n[bold]burp[/bold]")
-    bc = BurpConfig()
-    if getattr(args, "burp", None) and args.burp != "auto":
-        bc.proxy = args.burp
-    cfg = Config(burp=bc)
-    st = BurpBridge(cfg).detect()
-    console.print("  proxy   %s  %s" % ("[green]OK[/green]" if st.proxy_ok else "[yellow]--[/yellow]",
-                                        st.proxy or "not found"))
-    console.print("  rest    %s  %s" % ("[green]OK[/green]" if st.api_ok else "[yellow]--[/yellow]",
-                                        st.api or "not found (Professional only)"))
-    if not st.any:
-        console.print("[dim]%s[/dim]" % st.detail)
-
     console.print("\n[bold]ai triage[/bold]")
     from assay import ai as ai_mod
 
@@ -1327,52 +1326,6 @@ def cmd_show(args) -> int:
     return 0
 
 
-def cmd_burp(args) -> int:
-    store, args.out = open_run(args.out, "findings")
-    if store is None:
-        return 1
-    cfg = Config(out_dir=args.out, burp=_burp_config(args))
-    bridge = BurpBridge(cfg)
-    st = bridge.detect()
-    console.print("  proxy %s   rest %s" % (st.proxy_ok, st.api_ok))
-    if not st.any:
-        console.print("[yellow]%s[/yellow]" % st.detail)
-        return 1
-
-    findings = store.findings()
-    if args.scope_file:
-        hosts = sorted({r["host"] for r in store.web_rows()})
-        bridge.write_scope_file(hosts, args.scope_file)
-        console.print("  scope written to [cyan]%s[/cyan] "
-                      "(Burp: Target > Scope > paste from file)" % args.scope_file)
-    if args.mirror:
-        n = bridge.mirror(findings)
-        console.print("  mirrored %d request(s) into Burp history" % n)
-    if args.scan and st.api_ok:
-        urls = [f.target for f in findings if f.triage in ("CHASE", "LOOK")
-                and f.target.startswith("http")][:50]
-        task = bridge.launch_scan(urls)
-        console.print("  queued Burp scan task %s over %d URL(s)" % (task or "?", len(urls)))
-    store.close()
-    return 0
-
-
-def _burp_push(store: Store, cfg: Config, mirror: bool, scan: bool) -> None:
-    bridge = BurpBridge(cfg)
-    st = bridge.detect()
-    if not st.any:
-        console.print("[yellow]Burp not reachable; skipping mirror/scan.[/yellow]")
-        return
-    findings = store.findings()
-    if mirror:
-        console.print("  mirrored %d request(s) into Burp" % bridge.mirror(findings))
-    if scan and st.api_ok:
-        urls = [f.target for f in findings if f.triage in ("CHASE", "LOOK")
-                and f.target.startswith("http")][:50]
-        task = bridge.launch_scan(urls)
-        console.print("  queued Burp scan task %s" % (task or "?"))
-
-
 def cmd_submit(args) -> int:
     from assay import submission
     store, args.out = open_run(args.out, "findings")
@@ -1429,7 +1382,6 @@ def cmd_replay(args) -> int:
             return 2
     cfg.aggressive = args.aggressive
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
-    cfg.burp = _burp_config(args)
     cfg.ensure_dirs()
 
     candidates = []
@@ -1896,7 +1848,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     handlers = {
         "scan": cmd_scan, "doctor": cmd_doctor, "report": cmd_report,
-        "ai": cmd_ai, "show": cmd_show, "burp": cmd_burp, "modules": cmd_modules,
+        "ai": cmd_ai, "show": cmd_show, "modules": cmd_modules,
         "install": cmd_install, "followup": cmd_followup, "diff": cmd_diff,
         "triage": cmd_triage, "scope": cmd_scope,
         "replay": cmd_replay, "submit": cmd_submit,

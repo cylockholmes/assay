@@ -263,24 +263,6 @@ PROFILES: Dict[str, Dict] = {
 
 
 @dataclass
-class BurpConfig:
-    proxy: Optional[str] = None             # http://127.0.0.1:8080
-    api_url: Optional[str] = None           # http://127.0.0.1:1337
-    api_key: Optional[str] = None
-    mirror: bool = False                    # replay findings' requests via proxy
-    scan: bool = False                      # launch Burp active scans via REST API
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.proxy or self.api_url)
-
-    def proxies(self) -> Optional[Dict[str, str]]:
-        if not self.proxy:
-            return None
-        return {"http": self.proxy, "https": self.proxy}
-
-
-@dataclass
 class Config:
     targets: List[str] = field(default_factory=list)
     profile: str = "standard"
@@ -355,8 +337,6 @@ class Config:
     # (or reached through an existing issue) to enumerate further. That is a
     # judgement about what you do with a finding, not about --basic, so it
     # lives in the submission guidance rather than in a flag.
-
-    burp: BurpConfig = field(default_factory=BurpConfig)
 
     only_modules: List[str] = field(default_factory=list)
     skip_modules: List[str] = field(default_factory=list)

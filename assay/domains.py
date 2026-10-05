@@ -118,7 +118,7 @@ def ns_records(domain: str, timeout: float = 8.0) -> Tuple[List[str], str]:
 def rdap_lookup(domain: str, http) -> Tuple[int, str]:
     """Query the registry via rdap.org's bootstrap. Returns (status, detail)."""
     r = http.get("https://rdap.org/domain/%s" % domain,
-                 through_burp=False, timeout=15.0, infra=True)
+                 timeout=15.0, infra=True)
     if not r.ok:
         return 0, r.error or "no response"
     if r.status == 404:
@@ -152,7 +152,7 @@ def iana_tlds(http) -> Set[str]:
     global _TLDS
     if _TLDS is None:
         r = http.get("https://data.iana.org/rdap/dns.json",
-                     through_burp=False, timeout=15.0, infra=True)
+                     timeout=15.0, infra=True)
         found: Set[str] = set()
         if r.ok and r.status == 200:
             try:

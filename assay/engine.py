@@ -24,7 +24,6 @@ from assay import correlate, domains, env, recon, tools, urls as urlsrc
 from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
-from assay.burp import BurpBridge
 from assay.config import Config, Scope
 from assay.context import Context
 from assay.models import Finding, Port, Target, WebTarget, host_port_from_url, normalize_url
@@ -110,7 +109,6 @@ class Engine:
         self.http = HttpClient(cfg)
         self.ctx = Context(cfg=cfg, store=self.store, http=self.http, tune=self.tune,
                            tools=tools.available(), progress=progress)
-        self.burp = BurpBridge(cfg)
         self.journal = Journal(cfg.out_dir, enabled=cfg.journal)
         self.http.journal = self.journal
         tools.JOURNAL = self.journal
@@ -129,10 +127,6 @@ class Engine:
         self.store.start_run(self.cfg.profile, self.cfg.targets)
         self.journal.open(self.cfg.targets, self.cfg.profile)
         say = self.ctx.say
-
-        if self.cfg.burp.enabled:
-            st = self.burp.detect()
-            say("burp", "proxy=%s api=%s %s" % (st.proxy_ok, st.api_ok, st.detail[:80]))
 
         # Blind checks mint correlatable payloads; set that up before anything fires.
         self.oob = OOBSession(self.cfg.out_dir, domain=self.cfg.oob_domain,
@@ -984,7 +978,6 @@ class Engine:
         added = 0
         try:
             stream = tools.httpx_probe(targets, self.tune,
-                                       proxy=self.cfg.burp.proxy,
                                        headers=self._tool_headers() or None)
             for obj in stream:
                 url = obj.get("url") or ""
@@ -1161,7 +1154,6 @@ class Engine:
             self.ctx.say("urls", "katana over %d endpoint(s)" % len(targets))
             results = tools.katana_crawl(targets, depth=2, tune=self.tune,
                                          max_urls=cap * max(1, len(targets)),
-                                         proxy=self.cfg.burp.proxy,
                                          headers=self._tool_headers())
             n = 0
             for obj in results:

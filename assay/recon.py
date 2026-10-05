@@ -61,7 +61,7 @@ def crtsh_subdomains(domain: str, http: HttpClient,
                      limit: int = 500) -> List[str]:
     """Certificate transparency logs. Third-party lookup - passive mode only."""
     url = "https://crt.sh/?q=%%25.%s&output=json" % domain
-    r = http.get(url, through_burp=False, timeout=30.0, infra=True)
+    r = http.get(url, timeout=30.0, infra=True)
     if not r.ok or r.status != 200:
         return []
     try:

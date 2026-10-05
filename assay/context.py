@@ -28,6 +28,12 @@ class Context:
     # Out-of-band callback session, used by the blind checks. None when the
     # run has no OOB domain configured.
     oob: Optional[object] = None
+    # Content-discovery (ffuf) passes that were cut short - stopped on their
+    # time budget or hard-killed before they could finish the wordlist. Each
+    # is a dict carrying enough to re-run it (origin, wordlist, extensions).
+    # Recorded here so the CLI can offer, once the run is otherwise done, to
+    # finish them off rather than leaving most of the wordlist untried.
+    deferred_content: List[dict] = field(default_factory=list)
     # UI hook: fn(stage, message, advance)
     progress: Optional[Callable[[str, str, int], None]] = None
     # The stage whose messages are currently flowing. Remembered so that a
@@ -66,6 +72,12 @@ class Context:
         if new and finding.triage in ("CHASE", "LOOK"):
             self.say("finding", "%s  %s  [%s]" % (finding.triage, finding.title, finding.target))
         return new
+
+    def defer_content(self, job: dict) -> None:
+        """Record a content-discovery pass that did not finish. Locked: the
+        content modules run concurrently across web targets."""
+        with self._lock:
+            self.deferred_content.append(job)
 
     def baseline_for(self, origin: str) -> Baseline:
         with self._lock:

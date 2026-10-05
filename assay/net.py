@@ -242,7 +242,6 @@ class HttpClient:
         data=None,
         allow_redirects: bool = False,
         timeout: Optional[float] = None,
-        through_burp: bool = True,
         stream_limit: int = MAX_BODY,
         infra: bool = False,
     ) -> Resp:
@@ -264,7 +263,6 @@ class HttpClient:
         if headers:
             hdrs.update(headers)
 
-        proxies = self.cfg.burp.proxies() if (through_burp and self.cfg.burp.proxy) else None
         tmo = timeout or self.cfg.timeout
         attempts = self.cfg.retries + 1
         last_err = ""
@@ -291,7 +289,6 @@ class HttpClient:
                     allow_redirects=allow_redirects,
                     timeout=tmo,
                     verify=not self.cfg.insecure,
-                    proxies=proxies,
                     stream=True,
                 )
                 # Reading the raw stream ourselves (rather than r.content /
