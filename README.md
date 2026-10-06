@@ -289,6 +289,34 @@ target list looks. With the inventory, "there was nothing wrong" and "there was
 nothing there" are different outcomes, and the empty-result message says which
 one happened.
 
+## Confirmed services — what actually answered
+
+An *open* port is not the same as a service running on it, and it is not a
+version. assay follows the port scan with one read-only connection to every
+open port and records what the service itself returns:
+
+- **TCP** — the protocol banner a service volunteers on connect (SSH, FTP,
+  SMTP, POP3, IMAP, Telnet, MySQL, …), an HTTP response line and `Server`
+  header, or a TLS certificate and its negotiated version.
+- **UDP** — its own standard query and the reply that comes back: DNS
+  `version.bind`, SNMP `sysDescr` with community `public`, NTP, SSDP, mDNS,
+  memcached. Where there is no crafted probe for a port, one nmap reports
+  plainly `open` — not `open|filtered` — counts, because that verdict already
+  means it answered nmap's protocol payload.
+
+A port that completes a handshake but returns nothing is **not** listed as a
+confirmed service — that distinction is the point. The result is a separate
+**Confirmed services** table in the report, **sortable by
+host and by service**, each row carrying the live version the service reported
+and expandable to the raw response plus two copy-paste commands: the one that
+confirmed it, and a per-service enumeration next step (`nmap --script
+ssh2-enum-algos`, `smtp-open-relay`, `snmpwalk -c public`, `ike-scan`, …).
+
+Confirmation is read-only: banners are read, not provoked; HTTP is a GET; TLS
+is a handshake with no application data. The one place bytes are sent to a
+silent service is a short, standard, protocol-correct query (a Redis `PING`, a
+DNS `version.bind`), and that is skipped under `--safe`.
+
 ## Software inventory and known CVEs
 
 Every product and version assay could pin down — nmap's own service
@@ -683,7 +711,10 @@ webhook that is slow or down never delays or breaks the scan.
 
 Off by default. `--ai` sends findings to Claude for judgement — which are
 worth reporting, which look like false positives, what the next manual step is,
-and which findings chain together.
+and which findings chain together. Each confirmed service is carried in as a
+low-noise finding too, so the model proposes enumeration commands for it; every
+command it suggests, for any finding, is rendered on that finding's card in the
+report whether or not it was run.
 
 **Nothing identifying the client ever leaves the box.**
 
@@ -879,17 +910,18 @@ Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
 | A07 Auth Failures | WordPress user enumeration, XML-RPC amplification, default-login templates |
 | A08 Integrity Failures | Java RMI, JDWP, deserialization templates |
 | A10 SSRF | Out-of-band SSRF with callback correlation, in-band fetch-error oracle, internal host discovery, Host/proxy-header injection |
-| Host | Redis / memcached / Elasticsearch / Docker API / kubelet / Jupyter proven unauthenticated with one read-only request; 18 NSE rules for anonymous FTP, NFS, rsync, SMB null sessions and signing, LDAP, SNMP, RDP/NLA, VNC, IPMI, SMTP relay, empty DB passwords; 15 more service rules with the exact manual step |
+| Host | Active service confirmation (TCP banner, HTTP/`Server`, TLS certificate, UDP protocol query) with a sortable confirmed-services table and per-service enumeration commands; Redis / memcached / Elasticsearch / Docker API / kubelet / Jupyter proven unauthenticated with one read-only request; 18 NSE rules for anonymous FTP, NFS, rsync, SMB null sessions and signing, LDAP, SNMP, RDP/NLA, VNC, IPMI, SMTP relay, empty DB passwords; 15 more service rules with the exact manual step |
 
 ---
 
 ## Testing
 
 ```bash
-.venv/bin/python -m tests.test_detection
+.venv/bin/python -m pytest tests/        # whole suite
+.venv/bin/python -m tests.test_detection # just the detection checks
 ```
 
-**284 tests**, all offline. Every detection test asserts **both** directions — the check
+**550+ tests**, all offline. Every detection test asserts **both** directions — the check
 fires on the real condition and stays silent on the benign lookalike (a static
 CORS header, a themed 404 containing a keyword, a reflected traversal payload,
 a redirect to a fixed internal path).
@@ -903,6 +935,7 @@ guard things that broke at least once:
 
 | Class | What it exists to prevent |
 |---|---|
+| `ConfirmTests` | a service claimed as confirmed on a bare connection, a silent `open`/`open`‑`filtered` port listed as responding, or a UDP reply misread |
 | `WiringTests` | a tool, module stage or profile option that exists but is never reached. Caught content discovery being installable but never invoked |
 | `ReportRenderTests` | the report generator crashing. It shipped broken once because nothing rendered a report — only checked pre-generated HTML |
 | `SchemaMigrationTests` | an upgrade destroying existing run history |
