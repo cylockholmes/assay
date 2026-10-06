@@ -209,6 +209,7 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     parts.append(_followup_proof_section(store))
     parts.append(_tool_runs_section(store))
     parts.append(_inventory(store))
+    parts.append(_confirmed_services(out_dir))
     parts.append(_software_section(out_dir))
     parts.append(_nmap_section(out_dir))
 
@@ -359,6 +360,132 @@ def _inventory(store: Store) -> str:
                    '<tbody>%s</tbody></table></div>' % "".join(wrows))
     out.append("</section>")
     return "".join(out)
+
+
+def _confirmed_services(out_dir: str) -> str:
+    """Services that actually answered, from raw/confirmed-services.json.
+
+    The inventory table above lists every port the scan found open; this one
+    lists only the ports that returned something when connected to - a banner,
+    an HTTP response, or a TLS certificate - with the live version string the
+    service itself reported. The table is sortable by host and by service
+    (click a column header), which is the whole point: the same confirmed set,
+    read either per-host or per-service.
+    """
+    path = os.path.join(out_dir, "raw", "confirmed-services.json")
+    return _by_file_version(path, lambda: _render_confirmed(path)) or ""
+
+
+_CONFIRM_VIA = {
+    "banner": ("banner", "tr-ok"),
+    "http": ("http", "tr-ok"),
+    "tls": ("tls", "tr-none"),
+    "tls+http": ("tls+http", "tr-ok"),
+    "udp": ("udp reply", "tr-ok"),
+    "udp-scan": ("udp (nmap)", "tr-none"),
+}
+
+
+def _render_confirmed(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    items = doc.get("items") or []
+    if not items:
+        return ""
+    scanned = doc.get("scanned", len(items))
+
+    rows = []
+    for i, r in enumerate(items):
+        host = r.get("host") or r.get("ip") or ""
+        ip = r.get("ip") or ""
+        port = r.get("port") or 0
+        service = r.get("service") or "?"
+        nmap_ver = " ".join(x for x in (r.get("product"), r.get("version")) if x)
+        via = r.get("method") or ""
+        via_label, via_cls = _CONFIRM_VIA.get(via, (via or "-", "tr-ok"))
+        summary = r.get("summary") or ""
+
+        # The full proof - raw banner, HTTP response head, or TLS cert detail -
+        # behind an expander so the row stays one line but the evidence is one
+        # click away and screenshot-ready.
+        proof = r.get("banner") or r.get("detail") or ""
+        san = r.get("tls", {}).get("san") or []
+        if san:
+            proof = (proof + "\n\n" if proof else "") + "SAN: " + ", ".join(san)
+        repro = r.get("repro") or ""
+        enum = r.get("enum") or ""
+        detail_cell = _e(summary)
+        if proof or repro or enum:
+            inner = ""
+            for lbl, cmd in (("confirm", repro), ("enumerate next", enum)):
+                if cmd:
+                    inner += ('<div class="dim" style="margin-top:6px">%s</div>'
+                              '<div class="cmdwrap"><code>%s</code>'
+                              '<button class="copy" data-copy="%s">copy</button></div>'
+                              % (_e(lbl), _e(cmd), _e(cmd)))
+            if proof:
+                inner += '<pre class="tr-out">%s</pre>' % _e(proof)
+            detail_cell = ('<details><summary>%s</summary>%s</details>'
+                           % (_e(summary or "(response)"), inner))
+
+        rows.append(
+            '<tr data-h="%s" data-ip="%s" data-port="%d" data-svc="%s" data-via="%s">'
+            '<td>%s</td><td class="num">%s</td><td class="num">%d</td>'
+            '<td>%s</td><td>%s</td>'
+            '<td><span class="tr-state %s">%s</span></td><td>%s</td></tr>'
+            % (_e(host.lower()), _e(ip), port, _e(service.lower()), _e(via),
+               _e(host), _e(ip or "-"), port, _e(service),
+               _e(nmap_ver or "-"), via_cls, _e(via_label), detail_cell)
+        )
+
+    return (
+        '<section class="bucket" id="confirmed-services">'
+        '<h2>Confirmed services <span class="count">%d of %d open</span></h2>'
+        '<p class="blurb">Open ports that actually answered - a protocol banner, '
+        'an HTTP response, or a TLS certificate - with the version the service '
+        'itself reported. Unlike the inventory above, a port that was open but '
+        'returned nothing is not listed here. Click <b>host</b> or <b>service</b> '
+        '(or any header) to sort; expand a row for the raw response.</p>'
+        '<div class="tw"><table class="sortable" id="confirmed-tbl">'
+        '<thead><tr>'
+        '<th data-k="h">host</th><th data-k="ip">ip</th>'
+        '<th data-k="port" data-num="1">port</th><th data-k="svc">service</th>'
+        '<th>version (nmap)</th><th data-k="via">via</th><th>live response</th>'
+        '</tr></thead><tbody>%s</tbody></table></div>%s</section>'
+    ) % (len(items), scanned, "".join(rows), _SORT_SCRIPT)
+
+
+# Click-to-sort for the confirmed-services table. Self-contained and scoped to
+# tables marked .sortable, so it is inert if the section is absent.
+_SORT_SCRIPT = """
+<script>
+(function () {
+  document.querySelectorAll('table.sortable').forEach(function (tbl) {
+    var tb = tbl.tBodies[0];
+    tbl.querySelectorAll('th[data-k]').forEach(function (th) {
+      th.style.cursor = 'pointer';
+      th.addEventListener('click', function () {
+        var k = th.getAttribute('data-k');
+        var num = th.getAttribute('data-num') === '1';
+        var asc = th.getAttribute('data-asc') !== '1';
+        tbl.querySelectorAll('th').forEach(function (o) { o.removeAttribute('data-asc'); });
+        th.setAttribute('data-asc', asc ? '1' : '0');
+        var rows = Array.prototype.slice.call(tb.rows);
+        rows.sort(function (a, b) {
+          var x = a.getAttribute('data-' + k) || '', y = b.getAttribute('data-' + k) || '';
+          if (num) { x = parseFloat(x) || 0; y = parseFloat(y) || 0; return asc ? x - y : y - x; }
+          return asc ? (x < y ? -1 : x > y ? 1 : 0) : (x < y ? 1 : x > y ? -1 : 0);
+        });
+        rows.forEach(function (r) { tb.appendChild(r); });
+      });
+    });
+  });
+})();
+</script>
+"""
 
 
 # --------------------------------------------------------------------------
@@ -700,15 +827,25 @@ def _finding_card(f: Finding, ai_by_fid: Dict[str, Dict], current_run: int) -> s
     ai_html = ""
     if ai:
         steps = "".join("<li>%s</li>" % _e(s) for s in ai.get("next_steps", []))
+        # The model's proposed commands belong in the report whether or not the
+        # followup loop ran them: an un-run command is still the next thing to
+        # paste. Each gets a copy button; ones the loop executed show their real
+        # output in the Proof-of-testing section.
+        cmds = "".join(
+            '<div class="cmdwrap"><code>%s</code>'
+            '<button class="copy" data-copy="%s">copy</button></div>'
+            % (_e(c), _e(c)) for c in ai.get("commands", []) if c)
+        cmd_block = ('<div class="ai-cmds"><div class="dim">suggested commands</div>%s</div>'
+                     % cmds) if cmds else ""
         ai_html = (
             '<div class="ai"><div class="ai-head">AI triage: '
             '<span class="verdict v-%s">%s</span> '
             '<span class="dim">FP risk %s &middot; priority %s</span></div>'
-            '<p>%s</p>%s</div>'
+            '<p>%s</p>%s%s</div>'
             % (_e(ai.get("verdict", "")), _e(ai.get("verdict", "")),
                _e(ai.get("fp_risk", "")), _e(ai.get("priority", "")),
                _e(ai.get("rationale", "")),
-               ("<ol>%s</ol>" % steps) if steps else "")
+               ("<ol>%s</ol>" % steps) if steps else "", cmd_block)
         )
 
     refs = "".join('<a href="%s" rel="noreferrer noopener" target="_blank">ref</a>' % _e(r)
@@ -842,6 +979,8 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 .v-report{background:#ff4d6d}.v-investigate{background:#ffd166}.v-discard{background:#5f6368;color:#e6e8eb}
 .ai p{margin:4px 0}
 .ai ol,.chain ol{margin:6px 0 0 18px;padding:0;font-size:13px}
+.ai-cmds{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+.ai-cmds .cmdwrap{margin:0}
 .chain{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:12px}
 .chain-head{display:flex;align-items:center;gap:10px}
 .dim{color:var(--dim);font-size:12px}
