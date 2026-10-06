@@ -1,12 +1,17 @@
 <img src="assets/logo.svg" alt="assay" width="268">
 
+![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-0A7E07?logo=linux&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-black)
+![Tests](https://img.shields.io/badge/tests-550%2B%20offline-2f7a4d)
+![Use](https://img.shields.io/badge/use-authorized%20testing%20only-ff4d6d)
+
 Recon and triage for authorized offensive testing. Points at hosts and web
-targets, and answers one question fast: **what here is worth an hour of my
+targets and answers one question fast: **what here is worth an hour of my
 time?**
 
-Built for a specific setup — Kali under WSL2 on Windows 11, on a
-CPU/RAM-limited VM — but it runs on any Debian-family Linux, and degrades
-gracefully wherever a tool is missing.
+Built for Kali under WSL2 on a CPU/RAM-limited Windows VM, but it runs on any
+Debian-family Linux and degrades gracefully wherever a tool is missing.
 
 > **For authorized testing only.** Point this at systems you have written
 > permission to test. Several checks send crafted input and read files from the
@@ -14,457 +19,266 @@ gracefully wherever a tool is missing.
 
 ## Quick start
 
-Copy-paste, in order. Kali/Debian (including WSL):
+Kali/Debian (including WSL):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git python3 python3-venv
 git clone https://github.com/cylockholmes/assay.git
-cd assay
-./install.sh
+cd assay && ./install.sh
 ```
 
-Then open a new shell (or `source ~/.bashrc`) so `~/.local/bin` and
-`$GOPATH/bin` are on PATH, and check what you got:
+`install.sh` creates a virtualenv, links `assay` into `~/.local/bin`, and
+installs the external scanners it orchestrates (apt packages, the Go toolchain,
+the ProjectDiscovery suite) — printing every command before it runs.
+`--minimal` installs assay + nmap only; `--no-go` skips the Go tools.
+
+Open a new shell (or `source ~/.bashrc`) so `~/.local/bin` and `$GOPATH/bin`
+are on PATH, then:
 
 ```bash
-assay doctor
+assay doctor                 # what's installed, WSL networking, resources
+assay scan 10.20.0.0/24      # the target is also the scope
 ```
 
-Run the first scan. The target is also the scope:
+assay asks for an engagement codename if you did not pass `-n`; press Enter to
+name the run after the target. The report opens as it starts filling and keeps
+refreshing while the scan runs — `--no-open` just prints the path.
+
+**assay only, bring your own tools:**
 
 ```bash
-assay scan 10.20.0.0/24
-```
-
-assay asks for the engagement codename if you did not pass one with `-n`;
-press Enter to name the run after the target instead. The report opens as soon
-as it starts filling in and keeps refreshing while the scan runs — pass
-`--no-open` to leave it closed and just print the path.
-
-### One-liner
-
-If you would rather not read `install.sh` first — but do read it, it asks for
-sudo:
-
-```bash
-git clone https://github.com/cylockholmes/assay.git && cd assay && ./install.sh
-```
-
-### Without the installer
-
-If you only want assay itself and will bring your own tools:
-
-```bash
-git clone https://github.com/cylockholmes/assay.git
-cd assay
-python3 -m venv .venv
-.venv/bin/pip install --upgrade pip setuptools wheel
-.venv/bin/pip install -e .
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/assay doctor
+assay install --dry-run      # print the exact tool-install commands, run nothing
+assay install                # install everything missing, after confirming
 ```
 
-Add the scanners later, at any time:
-
-```bash
-assay install --dry-run    # print the exact commands, run nothing
-assay install              # install everything missing, after confirming
-```
-
-### Everyday commands
-
-```bash
-assay scan <target>                                    # scan (asks for a codename)
-assay diff -o ./assay-out                              # what changed since last run
-assay show 3                                           # finding #3 in full
-assay submit 3                                         # submission draft
-assay replay -o ./assay-out                            # everything it ran
-assay ai -o ./assay-out --ai-dry-run                   # redacted AI payload preview
-assay ai -o ./assay-out --ai-backend claude-cli        # triage via the Claude desktop app
-assay report                                           # rebuild the report
-```
-
-### Updating
-
-```bash
-cd assay && git pull && ./install.sh
-```
-
-Your existing databases are migrated in place, so run history and `assay diff`
-survive the upgrade.
-
-## Install detail
-
-`install.sh` creates a virtualenv, installs assay into it, links `assay` into
-`~/.local/bin`, and then installs the external scanners it orchestrates — apt
-packages plus the Go toolchain and the ProjectDiscovery suite. It prints every
-command before running it.
-
-```bash
-./install.sh --minimal    # assay + nmap only, for a small VM
-./install.sh --no-go      # skip the Go toolchain and its tools
-```
+**Updating:** `git pull && ./install.sh`. Databases migrate in place, so run
+history and `assay diff` survive the upgrade.
 
 ### Running on Windows
 
-Two supported layouts:
+- **Inside WSL (recommended).** Clone, install and run everything in your Kali
+  distribution. What the defaults assume.
+- **On Windows, tools in WSL.** assay is pure Python and runs natively; the
+  scanners are Linux binaries. When it detects a Windows host with WSL it
+  bridges automatically — each external command runs as `wsl.exe -d <distro> --
+  <tool> …` with output paths translated to `/mnt/…`. `assay doctor` reports
+  which layout it detected.
 
-**Inside WSL (recommended).** Clone and install in your Kali distribution and
-run everything there. Simplest, and what the defaults assume.
-
-**On Windows, tools in WSL.** assay itself is pure Python and runs natively on
-Windows, but every scanner it orchestrates is a Linux binary. When it detects a
-Windows host with WSL available it bridges automatically — each external command
-is executed as `wsl.exe -d <distro> -- <tool> ...`, and output paths are
-translated to `/mnt/...` so both sides see the same files.
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\pip install -e .
-.\.venv\Scripts\assay doctor      # confirms "bridge active" and names the distro
-```
-
-`assay doctor` reports which layout it detected. If it says *no WSL
-distribution found*, install one — `wsl --install -d kali-linux` — then run
-`assay install` to populate the toolchain inside it.
-
-There is one asymmetry worth understanding in bridged mode: assay's own HTTP
-requests originate from Windows, while the scanners run inside WSL. They are
-different network positions. If you use a VPN or gateway, make sure **both**
-sides route through it, or your own requests and your tools' requests will see
-different networks.
+  One asymmetry: in bridged mode assay's own HTTP requests originate from
+  Windows while the scanners run in WSL — different network positions. If you
+  use a VPN or gateway, route **both** sides through it.
 
 ---
 
 ## What makes it quiet
 
 Most scanners fail by volume: 400 rows, and the two that matter are buried.
-assay's design is built around suppression.
+assay is built around suppression.
 
-**Baselines before content checks.** Every origin is first probed with random
-paths to learn what "this does not exist" looks like. Any later response that
-resembles that shell is discarded. This alone removes the entire class of false
-positives caused by SPAs that answer `200 text/html` for every path.
-
-**Content signatures, never status codes.** `/.env` returning 200 proves
-nothing. `/.env` returning 200 with `DB_PASSWORD=` in a non-HTML body is a
-finding. Every one of the 36 exposure signatures requires a body match, and
-most also require the Content-Type to be plausible.
-
-**Second-request confirmation.** Anything reported as `confirmed` was re-tested
-with a second, different sentinel value. A CORS header echoing one origin might
-be static; echoing two distinct random origins cannot be.
-
-**Evidence is mandatory.** A finding with no evidence is scored down by 60% and
-sinks. Every row carries the request, the response, and the exact matched text.
-
-**Impact, not category.** Each finding states what an attacker actually gets.
-Findings that are only chain material — missing headers, cookie flags, TLS
-hygiene — are collapsed into single rows tagged `noise-prone` and can never
-reach the top bucket, no matter their nominal severity.
+- **Baselines before content checks.** Every origin is first probed with random
+  paths to learn what "does not exist" looks like; later responses resembling
+  that shell are discarded. Kills the SPA-answers-200-for-everything class
+  outright.
+- **Content signatures, never status codes.** `/.env` returning 200 proves
+  nothing; `/.env` with `DB_PASSWORD=` in a non-HTML body is a finding. Every
+  exposure signature requires a body match.
+- **Second-request confirmation.** Anything marked `confirmed` was re-tested
+  with a second, different sentinel. A CORS header echoing two distinct random
+  origins cannot be static.
+- **Evidence is mandatory.** A finding with no evidence is scored down 60% and
+  sinks. Every row carries request, response and the exact matched text.
+- **Impact, not category.** Each finding states what an attacker gets. Pure
+  chain material (missing headers, cookie flags, TLS hygiene) collapses into
+  single `noise-prone` rows that can never reach the top bucket.
 
 Findings land in three buckets: **CHASE** (verified, real impact), **LOOK**
 (probably real, needs a manual step), **NOTE** (context and chain material).
 
----
-
 ## Heuristics
 
-Three things happen that a per-check scanner cannot do, because they need the
-whole picture.
+Things a per-check scanner cannot do because they need the whole picture:
 
-**Parameters are classified before anything is injected.** The name and the
-observed value together decide what a parameter carries, and only relevant
-checks spend requests on it — SQL syntax never goes to `redirect=https://…`,
-traversal payloads never go to `page=2`. Where the signals disagree the
-parameter is treated as unknown and every check still runs, so inference
-narrows work when it is confident and gets out of the way when it is not.
-
-One subtlety worth knowing: `next=/dashboard` is classified as a **URL**, not a
-path, even though the value looks like a path. A redirect parameter holding a
-relative path is the most common shape of an open redirect, and reading it as a
-path means the redirect check never runs on it.
-
-**Findings on almost every host are ranked down as environmental.** Two hundred
-hosts each missing a security header is one configuration decision reported two
-hundred times, and it buries the host that differs. Above 60% prevalence (and
-at least five hosts) the finding is collapsed and downranked, with the reason
-written onto the finding. It is not deleted — the fact is still true, and
-occasionally the estate-wide default *is* the finding.
-
-**Chains are correlated locally.** Eight deterministic rules combine findings
-that are unremarkable alone:
+- **Parameters are classified before injection.** Name and observed value decide
+  what a parameter carries, so SQL syntax never goes to `redirect=`, traversal
+  never goes to `page=2`; ambiguous ones still get every check. `next=/dashboard`
+  is read as a **URL**, not a path — the common open-redirect shape.
+- **Estate-wide findings are downranked as environmental.** Above 60% prevalence
+  (and ≥5 hosts) a finding is collapsed and downranked with the reason recorded —
+  not deleted, since occasionally the estate-wide default *is* the finding.
+- **Chains are correlated locally** by eight deterministic rules, labelled
+  `correlated` to distinguish them from the model's:
 
 | Chain | Why it is worth more than its parts |
 |---|---|
-| Sibling-subdomain CORS + subdomain takeover on that apex | a medium and a high become full authenticated cross-origin read |
-| Disclosed credentials + an administrative surface | the disclosure is not the finding; what the credentials open is |
-| SSRF + internal hosts named in JavaScript | removes the guesswork — there is a list of internal services to aim it at |
-| Reflected input + no CSP on the same origin | the mitigation that would block a payload is absent |
-| Script-readable session cookie + reflection | decides whether an XSS is account takeover or a scoped action |
-| Open redirect on an auth path | the difference between phishing and token theft |
-| Directory listing + retrievable source on the same origin | the listing is the route to the source |
-| Two or more unauthenticated AI services | inference plus its data layer is corpus extraction and poisoning |
+| Sibling-subdomain CORS + takeover on that apex | medium + high → authenticated cross-origin read |
+| Disclosed credentials + an admin surface | what the credentials open is the finding |
+| SSRF + internal hosts named in JavaScript | a list of internal services to aim it at |
+| Reflected input + no CSP same-origin | the mitigation that would block a payload is absent |
+| Script-readable session cookie + reflection | decides whether an XSS is account takeover |
+| Open redirect on an auth path | phishing vs token theft |
+| Directory listing + retrievable source same-origin | the listing is the route to the source |
+| Two+ unauthenticated AI services | inference plus its data layer = corpus extraction/poisoning |
 
-These run whether or not AI triage is enabled, and are labelled `correlated` in
-the report to distinguish them from the model's.
-
-**IDOR gets a work queue, not a guess.** Deciding whether object 1004 belongs
-to you needs a second account, so assay does not try. It inventories the
-endpoints, parameter names and observed values that address objects, marks the
-paths that look like access-control boundaries, and hands you the list.
+- **IDOR gets a work queue, not a guess.** Deciding whether object 1004 is yours
+  needs a second account, so assay inventories the object-addressing endpoints,
+  marks the access-control boundaries, and hands you the list.
 
 ## Injection points
 
-The active checks are only as good as the parameters they are given, so assay
-draws from four sources rather than a crawl alone:
+Active checks are only as good as their parameters, so assay draws from four
+sources, then collapses to one URL per `(path, parameter-set)` — a 300-URL
+paginated list costs one test, not 300.
 
-| Source | Tool | Touches |
-|---|---|---|
-| Linked now | katana, or a native link pass | target |
-| Ever linked | `gau` / `waybackurls` | third-party archives — on by default, `--no-passive` disables |
-| Known to the client | native JS endpoint extraction | target |
-| Accepted but never emitted | `arjun` | target |
-
-Results are collapsed to one representative URL per `(path, parameter-set)`, so
-a paginated list of 300 URLs that differ only by id costs one test, not 300.
+| Source | Tool |
+|---|---|
+| Linked now | katana, or a native link pass |
+| Ever linked | `gau` / `waybackurls` (on by default, `--no-passive` disables) |
+| In the JS | native JS endpoint extraction |
+| Accepted but never emitted | `arjun` |
 
 ## Unauthenticated host analysis
 
-Beyond port and service detection, assay runs targeted nmap NSE scripts against
-what it finds and converts the output into findings — 18 rules covering
-anonymous FTP, NFS exports, rsync modules, SMB null sessions and signing, LDAP
-anonymous bind, SNMP default communities, RDP/NLA, VNC auth, IPMI, open SMTP
-relay, and empty database passwords.
+Beyond port/service detection, assay runs targeted nmap NSE scripts and turns
+their output into findings — 18 rules covering anonymous FTP, NFS exports,
+rsync modules, SMB null sessions and signing, LDAP anonymous bind, SNMP default
+communities, RDP/NLA, VNC, IPMI, open SMTP relay and empty DB passwords. Every
+rule requires the script output to actually contain the condition — presence of
+output proves nothing. UDP NSE checks (SNMP, IPMI, NetBIOS) run only in `deep`.
 
-Every rule requires the script output to actually contain the condition. nmap
-runs a script against every candidate port whether or not the condition holds,
-so the presence of output proves nothing on its own — this is the same
-discipline the web signatures use.
+### Confirmed services — what actually answered
 
-UDP checks (SNMP, IPMI, NetBIOS) run only in `deep`, because a UDP scan is slow
-and noisy enough to deserve being a deliberate choice.
+An *open* port is not the same as a service running on it, and it is not a
+version. assay follows the scan with one read-only connection to every open
+port and records what the service returns:
+
+- **TCP** — the banner a service volunteers (SSH, FTP, SMTP, POP3, IMAP,
+  Telnet, MySQL, …), an HTTP response line and `Server` header, or a TLS
+  certificate and negotiated version.
+- **UDP** — its own standard query and the reply: DNS `version.bind`, SNMP
+  `sysDescr`/`public`, NTP, SSDP, mDNS, memcached. Absent a crafted probe, a
+  port nmap reports plainly `open` (not open-filtered) counts — it answered
+  nmap's payload.
+
+A port that handshakes but returns nothing is **not** listed. The result is a
+separate **Confirmed services** table in the report, **sortable by host and by
+service**, each row carrying the live version and expandable to the raw
+response plus two copy-paste commands: the one that confirmed it, and a
+per-service enumeration next step (`ssh2-enum-algos`, `smtp-open-relay`,
+`snmpwalk -c public`, `ike-scan`, …). Confirmation is read-only — the one place
+bytes are sent to a silent service is a short protocol-correct query (Redis
+`PING`, DNS `version.bind`), skipped under `--safe`.
 
 ## Surface expansion
 
-On by default (`--no-expand` to turn it off), assay grows the target list
-before scanning it: environment permutations (`dev-`, `staging-`, `api-`, …)
-resolved against DNS, plus CT logs and subdomain sources unless `--no-passive`
-is set. Wildcard DNS is fingerprinted and its hits discarded.
-
-When `dnsx` is installed, permutations are joined by a real subdomain
-wordlist — the same technique as gobuster's `dns` mode or Sublist3r's
-brute-force pass, just handed to `dnsx` for bulk resolution instead of a
-resolver written here. `quick` skips it (the permutation list stays fast on
-its own); `standard` uses SecLists' 5,000-word list, `deep` its 110,000-word
-one.
+On by default (`--no-expand` off), assay grows the target list first:
+environment permutations (`dev-`, `staging-`, `api-`…) resolved against DNS,
+plus CT logs and subdomain sources unless `--no-passive`. Wildcard DNS is
+fingerprinted and its hits discarded. With `dnsx`, permutations are joined by a
+real wordlist (SecLists 5k on `standard`, 110k on `deep`; `quick` skips it).
 
 Two checks find surface DNS never advertises:
 
-- **Virtual hosts** — Host-header probing against an in-scope IP. A name only
-  counts when it differs from *both* the default response and a random-hostname
-  baseline; comparing against one alone reports every host on a catch-all.
+- **Virtual hosts** — Host-header probing against an in-scope IP; a name counts
+  only when it differs from *both* the default and a random-hostname baseline.
 - **Exposed origin** — where a CDN/WAF is detected, assay tries the origin IP
-  directly with the right Host header. If the same application answers without
-  the edge headers, every control implemented at the edge is bypassable.
+  directly with the right Host header; if the app answers without the edge
+  headers, every edge-implemented control is bypassable.
 
-## What was found, before what was wrong
+## Inventory and CVEs
 
-Every run lists the asset inventory first — hosts, their open ports with
-service and version, and the live web endpoints with status, title, server and
-detected stack. It appears in the terminal and in the report.
+Every run lists the asset inventory first — hosts with their open ports,
+service and version, and the live web endpoints with status/title/server/stack
+— in the terminal and report.
 
 ```
-                        Hosts and services
  host             ip               open  services
  174.78.188.100   174.78.188.100      3  22/ssh (OpenSSH 8.9p1), 443/https
                                          (nginx 1.24.0), 8443/https-alt
- 174.78.188.101   174.78.188.101      1  3389/ms-wbt-server (Microsoft
-                                         Terminal Services)
   1 host(s) had no open ports
 ```
 
-This exists because a scan that says only *"no findings"* is indistinguishable
-from a scan that never reached the targets — which is exactly how a broken
-target list looks. With the inventory, "there was nothing wrong" and "there was
-nothing there" are different outcomes, and the empty-result message says which
-one happened.
+This is why *"no findings"* and *"never reached the targets"* are different
+outcomes — a scan with an empty inventory tells you which happened.
 
-## Confirmed services — what actually answered
-
-An *open* port is not the same as a service running on it, and it is not a
-version. assay follows the port scan with one read-only connection to every
-open port and records what the service itself returns:
-
-- **TCP** — the protocol banner a service volunteers on connect (SSH, FTP,
-  SMTP, POP3, IMAP, Telnet, MySQL, …), an HTTP response line and `Server`
-  header, or a TLS certificate and its negotiated version.
-- **UDP** — its own standard query and the reply that comes back: DNS
-  `version.bind`, SNMP `sysDescr` with community `public`, NTP, SSDP, mDNS,
-  memcached. Where there is no crafted probe for a port, one nmap reports
-  plainly `open` — not `open|filtered` — counts, because that verdict already
-  means it answered nmap's protocol payload.
-
-A port that completes a handshake but returns nothing is **not** listed as a
-confirmed service — that distinction is the point. The result is a separate
-**Confirmed services** table in the report, **sortable by
-host and by service**, each row carrying the live version the service reported
-and expandable to the raw response plus two copy-paste commands: the one that
-confirmed it, and a per-service enumeration next step (`nmap --script
-ssh2-enum-algos`, `smtp-open-relay`, `snmpwalk -c public`, `ike-scan`, …).
-
-Confirmation is read-only: banners are read, not provoked; HTTP is a GET; TLS
-is a handshake with no application data. The one place bytes are sent to a
-silent service is a short, standard, protocol-correct query (a Redis `PING`, a
-DNS `version.bind`), and that is skipped under `--safe`.
-
-## Software inventory and known CVEs
-
-Every product and version assay could pin down — nmap's own service
-detection on the host side, plus `Server`/`X-Powered-By` headers, CMS
-generator meta tags, and bundled JS libraries (jQuery, Bootstrap, React,
-and friends) on the web side — collapses into one table in the report, open
-source and commercial alike. It is written regardless of whether anything
-looks vulnerable, because "what is actually running, by name and version" is
-the asset inventory a client's security team usually does not have.
-
-By default, each distinct product/version also gets checked against NVD's
-public CVE database (`services.nvd.nist.gov`, no API key required, though
-`NVD_API_KEY` speeds it up) — `--no-passive` turns this off along with every
-other third-party lookup. A hit becomes a `tentative`-confidence finding —
-NVD's keyword search is a text match, not a confirmed CPE match, so it means
-"go verify this," not "this is exploitable."
+Every product/version assay could pin down — nmap service detection host-side,
+plus `Server`/`X-Powered-By` headers, CMS generator tags and bundled JS
+libraries web-side — collapses into one software table, written regardless of
+whether anything looks vulnerable. By default each is checked against NVD's
+public CVE database (no API key needed; `NVD_API_KEY` speeds it up;
+`--no-passive` disables it with every other third-party lookup). A hit is a
+`tentative` finding — NVD keyword search is a text match, not a CPE match, so it
+means "go verify," not "exploitable."
 
 ## Working while it scans
 
-The report is written from the first finding and refreshed every few seconds
-while the scan runs, so the first critical can be worked by hand long before
-the last host is swept. Scroll position and filters survive the refresh, and
-auto-refresh can be paused from the page.
+The report is written from the first finding and refreshed every few seconds,
+so the first critical can be worked by hand long before the last host is swept;
+scroll and filters survive the refresh. It is a triage surface — search,
+severity/triage/module filters, confirmed-only toggle, copy buttons on every
+repro and submission draft, `/` `j` `k` `o` navigation, and a **Start here**
+panel naming the three things to do first.
 
-**Live controls** (when running in a terminal): press **`s`** to skip whatever
-the current stage is grinding through, **`p`** to pause, and **`r`** to resume.
-Pause takes effect at the next launch — a tool already running is left to
-finish — so the scan stops cleanly without a half-sent request, and holds there
-(across stage boundaries) until you resume.
-
-```bash
-assay scan 10.20.0.0/24 -n "ZESTY WOMBAT"
-```
-
-The report itself is a triage surface, not a document: search, severity and
-triage filters, module filter, confirmed-only toggle, copy buttons on every
-repro command and submission draft, and `/` `j` `k` `o` keyboard navigation.
-A **Start here** panel names the three things to do first.
+**Live controls** (in a terminal): **`s`** skip the current stage, **`p`**
+pause, **`r`** resume. Pause takes effect at the next launch (a running tool is
+left to finish) and holds across stages until you resume.
 
 ## What assay writes, and where
 
-Everything from a run lives under one folder. Nothing is written outside it
-during a scan.
+Everything from a run lives under one folder, keyed on the codename; nothing is
+written outside it during a scan.
 
 ```
 <--out>/<CODENAME>/
-├── assay.db            SQLite. PERSISTENT — accumulates across runs
+├── assay.db            SQLite — PERSISTENT, accumulates across runs
 ├── report.html         rebuilt every run (and every few seconds while scanning)
-├── activity.log        every request and command, timestamped   (mode 0600)
-├── replay.sh           the same actions as runnable commands    (mode 0700)
-├── raw/                nmap XML, NSE output, software-inventory.json
+├── activity.log        every request and command, timestamped   (0600)
+├── replay.sh           the same actions as runnable commands     (0700)
+├── raw/                nmap XML, NSE output, software-inventory.json, confirmed-services.json
 ├── evidence/           captured request/response bodies
-├── ai-payload.json     exactly what was sent to the model       --ai only
-├── ai-triage.json      verdicts and chains, re-hydrated locally --ai only
-├── redaction-map.json  pseudonym → real value  (mode 0600)      --ai only
+├── ai-payload.json     exactly what was sent to the model        --ai only
+├── ai-triage.json      verdicts and chains, re-hydrated locally  --ai only
+├── redaction-map.json  pseudonym → real value  (0600)           --ai only
 └── oob-payloads.txt    fired OOB payloads, for collaborator correlation
 ```
 
-### What persists, and what is replaced
+`assay.db` is **persistent** — findings, hosts, endpoints, run history and your
+triage verdicts accumulate, which is what `assay diff` compares and what makes
+a re-run report only the delta (new findings badged **new**). The folder name
+derives from the sorted target set, so reordering arguments does not start a
+fresh history. Deleting `assay.db` resets the engagement. `report.html`,
+`activity.log` and `replay.sh` are replaced each run; `raw/` and `evidence/`
+are appended to.
 
-| File | Lifetime |
-|---|---|
-| `assay.db` | **Persistent.** Findings, hosts, endpoints, run history and your triage verdicts accumulate. This is what `assay diff` compares and what makes a re-run report only the delta. Schema changes are migrated in place on upgrade. |
-| `report.html`, `activity.log`, `replay.sh` | **Replaced** on every run |
-| `raw/`, `evidence/` | **Appended** to |
-| `ai-*.json`, `redaction-map.json` | Written only when you use `--ai`; replaced each time |
+Treat the whole folder as engagement data. `redaction-map.json` and
+`ai-triage.json` hold real hostnames/IPs and are written `0600` and never
+transmitted. `replay.sh`/`activity.log` record every URL but **not**
+credentials — where a request carried `Authorization`/`Cookie`/an API key, the
+replay references a shell variable (`export ASSAY_AUTH=… ; ./replay.sh`).
 
-Deleting `assay.db` resets the engagement: the next scan becomes a first run,
-everything reports as new, and your `reported`/`duplicate` marks are gone.
-
-### Sensitive contents
-
-Treat the whole folder as engagement data. Specifically:
-
-- **`assay.db` and `report.html`** contain target hostnames, response bodies,
-  and any credential a finding disclosed.
-- **`redaction-map.json`** maps every pseudonym back to the real value. It is
-  the one file that can reverse the redaction, is written `0600`, and never
-  leaves the machine.
-- **`ai-triage.json`** is the AI's verdicts re-hydrated with real hostnames and
-  IPs for local reading — `ai-payload.json` (what was actually sent) stays
-  pseudonymised, but this file does not. Written `0600` for the same reason as
-  `redaction-map.json`.
-- **`replay.sh` and `activity.log`** record every URL touched. Credentials are
-  **not** written to them — where a request carried `Authorization`, `Cookie`
-  or an API key, the replay references a shell variable instead:
-
-  ```bash
-  export ASSAY_AUTH='Basic ...'   # then ./replay.sh
-  ```
-
-### Outside the output folder
-
-Only the installer touches anything else:
-
-| Path | Written by | What |
-|---|---|---|
-| `<repo>/.venv/` | `install.sh` | the virtualenv |
-| `~/.local/bin/assay` | `install.sh` | symlink to the entry point |
-| `~/.bashrc`, `~/.zshrc` | `assay install` | appends `$GOPATH/bin` to PATH, once |
-| `$GOPATH/bin/*` | `assay install` | the Go-built scanners |
-| `~/.local/nuclei-templates` | `assay install` | nuclei's template library |
-| system packages | `assay install` | apt packages, after showing you the commands |
-
-A scan writes none of these. `assay install --dry-run` prints every command
-without running any of them.
-
-## One folder per engagement
-
-`--out` is the root; each engagement gets its own subfolder, keyed on the
-codename — asked for at the start of a scan, or passed with `-n`:
-
-```
-assay-out/
-└── ZESTY-WOMBAT/
-    ├── report.html          live during the scan, final after
-    ├── assay.db             findings, assets, run history
-    ├── activity.log         every request and command, timestamped
-    ├── replay.sh            the same actions as runnable commands
-    ├── raw/                 tool output
-    └── evidence/
-```
-
-Runs accumulate in the same database, so `assay diff` reports only what
-changed since last time — new findings, findings that disappeared, new hosts
-and new endpoints. Findings first seen in the current run are badged **new**
-in the report. The folder name is derived from the sorted target set, so
-reordering the arguments does not start a fresh history.
+Outside the output folder, only the installer writes: the venv, the
+`~/.local/bin/assay` symlink, a one-time `$GOPATH/bin` PATH line in your shell
+rc, the Go-built scanners, and nuclei's templates. `assay install --dry-run`
+prints every command without running any.
 
 ## Everything is replayable
 
-`activity.log` records every request and every external command in order, with
-timestamps. `replay.sh` is the same set as runnable commands, deduplicated —
-so a finding can be reproduced by re-running the exact request rather than
-reconstructing it from the report. Disable with `--no-journal`.
+`activity.log` records every request and command in order with timestamps;
+`replay.sh` is the same set as runnable, deduplicated commands — so a finding is
+reproduced by re-running the exact request, not reconstructed from the report.
+`--no-journal` disables it.
 
 ## Pacing, and not breaking the client
 
-- `--rate` global requests/second, and `--rate-per-host` (default 8/s) because
-  a global ceiling alone still lets every worker pile onto one host.
-- **Adaptive backoff.** A 429 or 503 halves the rate immediately and honours
-  `Retry-After`; the rate creeps back only after a quiet period. A target
-  asking us to slow down is not something to retry through.
-- `--delay` adds a jittered pause per request.
-- `--safe` restricts the run to modules that only retrieve.
+- `--rate` global req/s and `--rate-per-host` (default 8/s), because a global
+  ceiling alone still lets every worker pile onto one host.
+- **Adaptive backoff** — a 429/503 halves the rate immediately and honours
+  `Retry-After`; it creeps back only after a quiet period.
+- `--delay` adds a jittered per-request pause. `--safe` restricts the run to
+  modules that only retrieve.
 
-Modules declare what they do to the client, and it is reported by
-`assay modules`:
+Modules declare what they do to the client (shown by `assay modules`):
 
 | Class | Meaning |
 |---|---|
@@ -475,246 +289,163 @@ Modules declare what they do to the client, and it is reported by
 
 ## AI and ML infrastructure
 
-A class that barely existed two years ago and is now one of the most reliably
-exposed things on an internal network. Ollama, vLLM, Gradio, Ray, MLflow and
-the common vector databases all ship with **no authentication**, and the usual
-deployment advice tells people to bind them to `0.0.0.0`.
-
-assay probes eleven of them plus MCP servers, on ports that sit outside nmap's
-top-1000 and are therefore added to every scan explicitly — a default port scan
-never finds `11434` or `8265` on its own.
+A class that barely existed two years ago and is now reliably exposed on
+internal networks. Ollama, vLLM, Gradio, Ray, MLflow and the common vector
+databases ship with **no authentication** and are routinely bound to
+`0.0.0.0`. assay probes eleven plus MCP servers, on ports outside nmap's
+top-1000 and therefore added to every scan explicitly (a default scan never
+finds `11434` or `8265`).
 
 | Service | Port | What it costs |
 |---|---|---|
-| Ollama | 11434 | model theft, prompt/corpus extraction, free compute. Version below 0.17.1 also flags CVE-2026-7482, an unauthenticated heap read returning system prompts, chat history and environment credentials |
-| vLLM / OpenAI-compatible | 8000 | RAG corpus extraction through ordinary completions; stolen inference |
-| Ray dashboard | 8265 | job submission is arbitrary Python on the cluster — unauthenticated RCE |
-| TorchServe management | 8081 | registers a model archive from a URL; the handler executes on the server |
-| Qdrant / ChromaDB / Weaviate / Milvus | 6333, 8000, 8080, 9091 | the indexed corpus is readable, and writable — RAG answers can be poisoned |
-| MLflow | 5000 | experiments and artifacts, which routinely hold training data and credentials |
+| Ollama | 11434 | model theft, prompt/corpus extraction, free compute; <0.17.1 also flags CVE-2026-7482 (unauth heap read of system prompts, history, env creds) |
+| vLLM / OpenAI-compatible | 8000 | RAG corpus extraction via completions; stolen inference |
+| Ray dashboard | 8265 | job submission = arbitrary Python on the cluster — unauth RCE |
+| TorchServe management | 8081 | registers a model archive from a URL; handler runs server-side |
+| Qdrant / ChromaDB / Weaviate / Milvus | 6333, 8000, 8080, 9091 | corpus readable and writable — RAG answers poisonable |
+| MLflow | 5000 | experiments/artifacts, routinely holding training data and creds |
 | Gradio | 7860 | full component graph and event API |
-| MCP servers | various | whatever the server wraps — filesystem, shell, database, cloud API — callable with its own credentials |
+| MCP servers | various | whatever the server wraps — fs, shell, DB, cloud API |
 
-Every probe is a read-only GET or a protocol handshake. Nothing uploads a
-model, submits a job, or runs an inference: reachability and the service's own
-identification are the finding, and exercising it would cost the client compute
-or change their state. Each finding names which part of the CIA triad it
-affects and why.
+Every probe is a read-only GET or a handshake: reachability and the service's
+own identification are the finding. Nothing uploads a model, submits a job or
+runs inference.
 
 ## Networks that proxy everything
 
-Some testing gateways proxy all port 80 and 443 traffic for security, so every
-address in scope answers a connect and returns something whether or not a
-service exists. Untreated, a /24 reports as two hundred web endpoints and every
-content check runs against the proxy's own error page.
-
-An open port is therefore not evidence of anything. assay decides from the
-**response**, not the connection:
+Some testing gateways proxy all 80/443 traffic, so every address answers
+whether or not a service exists. assay decides from the **response**, not the
+connection:
 
 | Response | Verdict |
 |---|---|
-| 502 / 503 / 504 | proxy with nothing behind it — not a service |
-| empty body | not a service |
-| 200 with almost no content | the proxy, not a site |
-| 401 / 403 with a real page | **a service**, and a good lead — something is guarding it |
+| 502/503/504, empty body, or 200 with almost no content | the proxy — not a service |
+| 401/403 with a real page | **a service**, and a lead — something guards it |
 | anything with real content | a service |
 
-It also probes **every open TCP port** for HTTP, not a fixed list — only ports
-whose service is definitively something else (ssh, mysql, smtp…) are skipped.
-On a network where 80 and 443 are proxied noise, the interesting application is
-usually on an odd port, and a site on 7777 with no service banner would
-otherwise be invisible.
+It probes **every open TCP port** for HTTP (not a fixed list) — only ports
+definitively something else (ssh, mysql, smtp…) are skipped, because on a
+proxied network the interesting app is usually on an odd port. It also
+identifies the gateway's default page two ways:
 
-On top of that, assay identifies the gateway's default page two ways:
-
-- **Inferred, by default.** If most probed hosts return effectively the same
-  response, that response is the gateway's, not two hundred identical
-  applications. Those hosts are dropped and it says so. A genuine
-  load-balanced pool stays, because it never reaches a majority share.
-- **Asserted, when you know.** `--proxied-ports 80,443` tells assay the ports
-  are always open, so it stops reporting them as exposed services and lowers
-  the bar for identifying the default page — to three matching hosts and a
-  majority, rather than five. It does not drop the bar to two: two identical
-  responses are just as likely to be a two-node load-balanced pool, and
-  filtering a real pool away is worse than the noise it saves.
-
-```bash
-assay scan 10.20.0.0/24 -n CODENAME --proxied-ports 80,443
-```
-
-`--no-gateway-filter` disables both if you would rather see everything.
+- **Inferred** (default) — if most probed hosts return effectively the same
+  response, that is the gateway's; those hosts are dropped and it says so. A
+  genuine load-balanced pool never reaches a majority and stays.
+- **Asserted** — `--proxied-ports 80,443` stops reporting them as services and
+  lowers the default-page bar (to three matching hosts and a majority, not
+  five). `--no-gateway-filter` disables both.
 
 ## Targets and scope are one argument
 
-You give assay one thing. It is both what gets scanned and, by default, what
-may be reached.
+You give assay one thing: what gets scanned and, by default, what may be
+reached. A value naming an existing file is read as one; anything else is an
+inline list. Format is detected, not declared.
 
 ```bash
-assay scan 10.20.0.0/24,app.example.com      # inline, comma separated
-assay scan a.example.com b.example.com       # or space separated
-assay scan targets.txt                       # a host list
-assay scan burp-scope.json                   # a Burp scope export
-assay scan burp-scope.json extra.example.com # mix them
+assay scan 10.20.0.0/24,app.example.com      # inline, comma or space separated
+assay scan targets.txt                        # host list, CSV/TSV, pasted table
+assay scan burp-scope.json extra.example.com  # Burp scope export + extras
+assay scope 10.20.0.0/24,*.corp.example.com   # check what it understood, run nothing
 ```
 
-A value that names an existing file is read as one; anything else is an inline
-list. The format is detected, not declared:
+Handled: Burp project scope JSON (advanced + simple mode, disabled entries
+ignored), host lists (IPs, CIDRs, domains, wildcards, URLs, `host:port`), IP
+ranges (`10.0.0.1-9`), CSV/TSV, markdown/multi-space tables, bulleted lists, an
+*Out of Scope* heading, and a `!` line prefix to exclude.
 
-| Input | Handled |
-|---|---|
-| **Burp project scope JSON** | advanced mode (host regexes recovered to hostnames and wildcards) and simple mode (URL prefixes). Disabled entries ignored |
-| **Host list** | IPs, CIDRs, domains, wildcards, URLs, `host:port` |
-| **IP ranges** | `10.0.0.1-10.0.0.9` and `10.0.0.1-9` expand |
-| **CSV / TSV** | the host column is picked out |
-| **Pasted tables** | markdown pipes, multi-space columns |
-| **Lists** | `- host`, `* host`, `1. host` |
-| **Headings** | anything under *Out of Scope* / *Excluded* / *Do not test* becomes an exclusion |
-| **Per line** | a `!` prefix excludes |
+Three behaviours that each prevent a silent mistake:
 
-Check what it understood before you run anything:
+- **Scope is enforced by default** — no unscoped mode; a redirect off-target is
+  not followed.
+- **A wildcard is scope, not a target** — `*.corp.example.com` widens scope
+  without being scanned; `--expand` enumerates it into real hosts.
+- **A Burp path exclusion is reported, not applied** — assay's scope is
+  host-level, so it says the rule could not be applied rather than dropping the
+  whole target.
 
-```bash
-assay scope 10.20.0.0/24,app.example.com,*.corp.example.com
-```
+`--scope` takes the same formats, for when what may be reached differs from
+what is scanned. Every outbound request — assay's own and every tool's — is
+checked against scope before a packet leaves the box; blocked hosts are reported
+at the end. Running without `--scope` warns loudly; on a real engagement, don't.
 
-```
-  read as: list
-      target           kind
-   1  10.20.0.0/24     cidr
-   2  app.example.com  host
+## External tools
 
-  scope only (not directly scannable; use --expand to enumerate)
-    *.corp.example.com
+assay orchestrates these when present and degrades gracefully when not; `assay
+doctor` shows what's missing and what each buys you. All optional.
 
-  resulting scope  3 allowed, 0 denied
-    allow 10.20.0.0
-    allow app.example.com
-    block example.invalid
-```
+`nmap` · `naabu` · `httpx` · `nuclei` · `katana` · `subfinder` · `dnsx` ·
+`ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` · `xsltproc`
 
-`--scope` still exists, for the case it is actually for: when what may be
-reached differs from what is being scanned. It takes the same formats.
+| Tool | Why it matters | Without it |
+|---|---|---|
+| `nmap` | service/version detection; runs the 18 NSE host rules | native sweep of a fixed port list; no service triage or host rules |
+| `naabu` | fast sweep first, so nmap only version-scans open ports | nmap does the whole range — much slower on a /24 |
+| `httpx` | bulk HTTP probing at 25+ candidates | native probe, slower |
+| `katana` | JS-aware crawl — the main parameter source | single link pass; **active checks lose most of their reach** |
+| `gau`/`waybackurls` | every URL the host ever served | you see only what is linked today |
+| `arjun` | parameters accepted but never emitted | hidden parameters stay untested |
+| `ffuf` + `seclists` | unlinked endpoints — admin panels, backups, old APIs | that surface stays invisible |
+| `nuclei` | CVE/misconfig volume (filtered and re-scored onto assay's scale) | stage skipped |
+| `dnsx` (+ `seclists`) | bulk resolution, CNAME chains, subdomain brute-forcing | threaded `getaddrinfo` + `dig`; brute-forcing skipped |
+| `subfinder` | passive subdomain enumeration | falls back to crt.sh |
+| `xsltproc` | renders the [NmapView](https://nmapview.github.io) dashboard | report links only to raw XML |
 
-```bash
-assay scan app.example.com --scope programme-scope.json
-```
-
-Three behaviours worth knowing, because each prevents a silent mistake:
-
-- **Scope is enforced by default.** There is no unscoped mode. Scanning
-  `app.example.com` will not follow a redirect to somewhere else, without you
-  having to remember a second file.
-- **A wildcard is scope, not a target.** `*.corp.example.com` cannot be
-  connected to, so it widens what is in scope without being scanned. `--expand`
-  enumerates it into real hosts.
-- **A Burp path exclusion is reported, not applied.** Burp can exclude
-  `https://shop.example.com/logout`; assay's scope is host-level and cannot
-  express "everything but that path". Recording it as a host exclusion would
-  drop the whole target, so assay says the rule could not be applied rather
-  than quietly shrinking your scope.
-
-## Scope enforcement
-
-Every outbound request — assay's own and every external tool's — is checked
-against the scope file first. Out-of-scope hosts are refused before a packet
-leaves the box, and blocked hosts are reported at the end of the run.
-
-```
-*.target.tld
-10.20.0.0/16
-!vpn.target.tld        # exclusions win
-```
-
-Four formats are accepted and detected automatically: a plain list as above,
-YAML with `allow:`/`deny:` keys, and **Burp's own scope JSON** — export from
-Target > Scope, or lift `target.scope` out of a project settings export.
-Burp's advanced-mode host regexes are converted back to plain patterns where
-possible, disabled entries are skipped, and exclusions are preserved.
-
-Running without `--scope` warns loudly. On a real engagement, don't.
-
----
+`assay install` handles setup any time — it always prints the full command list
+and asks first (refuses non-interactively without `-y`), pins `GOFLAGS=-p=1` on
+a constrained VM, and reports what it can't handle on non-Debian systems rather
+than guessing.
 
 ## Running small
 
-`assay` reads `/proc/meminfo` and CPU count at startup and derives worker count,
-request rate, and every external tool's concurrency from what's actually
-available. On a 2 GB VM it paces itself down rather than swapping. Findings
-stream to SQLite instead of accumulating in memory, and external tool output is
-parsed line by line.
-
-Override any of it: `--concurrency 4 --rate 10`.
+assay reads `/proc/meminfo` and CPU count at startup and derives worker count,
+request rate and each tool's concurrency from what's available; on a 2 GB VM it
+paces down rather than swapping. Findings stream to SQLite; tool output is
+parsed line by line. Override with `--concurrency 4 --rate 10`.
 
 | Profile | Ports | Roughly | Use for |
 |---|---|---|---|
-| `quick` | top 100 | ~2 min/target | Triaging a fresh target list |
-| `standard` | top 1000 | ~10-20 min/target | Default |
-| `deep` | all | hours per target, more with a large web surface | An overnight pass on a shortlist |
+| `quick` | top 100 | ~2 min/target | triaging a fresh target list |
+| `standard` | top 1000 | ~10–20 min/target | default |
+| `deep` | all | hours per target | an overnight pass on a shortlist |
 
-"Roughly" is doing real work in that table: `--passive` and `--expand` run by
-default now, and both content discovery and subdomain brute-forcing scale
-their wordlist with the profile, so `standard`/`deep` cost more than they did
-before third-party lookups and bigger wordlists were the default. `--no-passive
---no-expand` gets back closer to the old numbers.
+`--passive` and `--expand` run by default and both scale their wordlist with
+the profile, so `standard`/`deep` cost more than bare scans; `--no-passive
+--no-expand` gets closer to the old numbers.
 
----
+## Authentication and blind checks
 
-## Authentication
+`--basic user:pass`, `--cookie` and `-H` apply to assay's own requests and pass
+through to httpx, nuclei and katana. Authenticated web-app logic (IDOR,
+privilege escalation) is deliberately out of scope — it needs a human with two
+accounts.
 
-`--basic user:pass` applies HTTP Basic credentials to assay's own requests and
-passes the header through to httpx, nuclei and katana. `--cookie` and `-H` work
-the same way.
-
-Testing of authenticated web application logic — IDOR, privilege escalation,
-multi-role access control — is deliberately out of scope for now; those need a
-human with two accounts, not a scanner.
-
-## Blind vulnerabilities
-
-Blind SSRF produces no change in the response, so the only evidence is a
-callback — which arrives somewhere assay is not. assay runs no listener of its
-own and correlates nothing automatically:
-
-- **`--oob-domain`** with a Burp Collaborator payload domain → assay fires
-  uniquely-labelled payloads and writes `oob-payloads.txt` mapping each payload
-  to the exact request that carried it. Anything from that ledger appearing in
-  your collaborator is a confirmed callback for the request named beside it.
-- **Without it** → the blind checks are skipped and say so.
-
-Correlation is deliberately left to you: you already have Collaborator open,
-and a payload that was fired but needs correlating by hand still beats a check
-that never ran.
+Blind SSRF produces no response change, so the only evidence is an out-of-band
+callback. assay runs no listener: with `--oob-domain` (a Burp Collaborator
+payload domain) it fires uniquely-labelled payloads and writes
+`oob-payloads.txt` mapping each to the request that carried it — anything
+appearing in your collaborator is a confirmed callback. Without it the blind
+checks are skipped and say so.
 
 ## Slack notifications
 
-A deep scan runs for hours; you start it and walk away. Point assay at a Slack
-[incoming webhook](https://api.slack.com/messaging/webhooks) and it pings you at
-the two moments that matter:
-
-- **scan complete** — with a one-line result summary (chase/look/context counts
-  and hosts / endpoints / requests).
-- **waiting for input** — the run has otherwise finished and is now blocked on a
-  terminal prompt (resuming unfinished content-discovery passes, or approving
-  the AI-triage send). If you stepped away, this brings you back to answer it.
+Point assay at a Slack [incoming webhook](https://api.slack.com/messaging/webhooks)
+and it pings you at **scan complete** (one-line result summary) and **waiting
+for input** (otherwise finished, now blocked on a terminal prompt). Opt-in and
+best-effort — nothing is sent without a webhook, and a slow/down webhook never
+delays the scan.
 
 ```bash
-assay scan <targets> --profile deep --slack-webhook https://hooks.slack.com/services/...
-# or, to keep the URL out of your shell history:
 export ASSAY_SLACK_WEBHOOK=https://hooks.slack.com/services/...
 assay scan <targets> --profile deep
 ```
 
-Opt-in and best-effort: nothing is sent unless a webhook is configured, and a
-webhook that is slow or down never delays or breaks the scan.
-
 ## AI triage (opt-in, redacted)
 
-Off by default. `--ai` sends findings to Claude for judgement — which are
-worth reporting, which look like false positives, what the next manual step is,
-and which findings chain together. Each confirmed service is carried in as a
-low-noise finding too, so the model proposes enumeration commands for it; every
-command it suggests, for any finding, is rendered on that finding's card in the
-report whether or not it was run.
+Off by default. `--ai` sends findings to Claude for judgement — which are worth
+reporting, which look like false positives, the next manual step, and which
+chain together. Each confirmed service is carried in too, so the model proposes
+enumeration commands for it; every command it suggests, for any finding, renders
+on that finding's card whether or not it was run.
 
 **Nothing identifying the client ever leaves the box.**
 
@@ -723,287 +454,119 @@ findings → redact → VERIFY (hard gate) → Claude → merge back locally
 ```
 
 Redaction replaces hostnames, IPs, emails, credentials, tokens, usernames,
-passwd rows, MACs and UUIDs with stable pseudonyms (`[CLIENT-01]`, `[IP-03]`).
-Stable means the model can still reason about relationships and find chains —
-it just never learns who the client is. The reverse mapping is written to
-`redaction-map.json` with `0600` permissions and never transmitted.
+passwd rows, MACs and UUIDs with stable pseudonyms (`[CLIENT-01]`, `[IP-03]`) —
+stable so the model can still find chains without learning who the client is.
+The reverse map is written `0600` and never transmitted. The gate is not
+advisory: after redaction the payload is re-scanned with the same detectors
+**plus** every known client term from your scope and target list, and if
+anything survives the run aborts and prints the residue.
 
-The gate is not advisory. After redaction the payload is re-scanned with the
-same detectors **plus** every known client term from your scope file and target
-list. If anything survives, the run aborts and prints the residue — it does not
-send.
-
-### Two ways to reach Claude
-
-There is no default. The two backends spend different money, so `--ai-backend`
-is required and assay will not guess:
+There is no default backend; `--ai-backend` is required:
 
 | `--ai-backend` | Route | Who pays |
 |---|---|---|
-| `api` | the Anthropic SDK with your own key | billed per token |
-| `claude-cli` | the Claude Code CLI in headless mode — the same binary the Claude desktop app installs, sharing its sign-in | spends that Claude plan's quota |
+| `api` | Anthropic SDK with your own key (`pip install anthropic`, `ANTHROPIC_API_KEY`) | billed per token |
+| `claude-cli` | the Claude Code CLI headless — same binary the desktop app installs, sharing its sign-in | that plan's quota (labelled `equiv`) |
 
-Both send byte-identical redacted payloads and ask for the same JSON schema, so
-the triage you get back does not depend on which one you picked. `assay doctor`
-shows which are usable.
+Both send byte-identical redacted payloads and ask for the same schema.
+`claude-cli` runs with `--restricted`, `--strict-mcp-config`,
+`--disable-slash-commands` and `--no-session-persistence` in an empty temp dir:
+no command execution, web fetch, MCP, skills or project settings.
 
 ```bash
 assay scan target.tld --ai --ai-dry-run              # write the payload, send nothing
-cat assay-out/ai-payload.json                        # read exactly what would go
 assay ai --out ./assay-out --ai-backend claude-cli   # via the desktop app sign-in
 assay ai --out ./assay-out --ai-backend api          # via your API key
 ```
 
-`--ai-dry-run` is the exception — it never reaches a backend, so it does not
-need one chosen.
+Defaults to metadata only; `--ai-evidence` adds redacted snippets; interactive
+runs confirm before sending. `--ai-dry-run` never reaches a backend.
 
-Both print a dollar figure when the run finishes, but they do not mean the same
-thing. On `api` it is what your key was billed. On `claude-cli` it is Claude
-Code costing the run at the equivalent API rate while actually spending plan
-quota, so assay labels it `equiv` — read it as a size yardstick, not a charge.
-
-**`api`** requires `pip install anthropic` and `ANTHROPIC_API_KEY` (or
-`ant auth login`). assay prompts for a key if neither is set; the key is used
-for that run only and never written to disk.
-
-**`claude-cli`** requires `claude` on `PATH` and signed in — `--ai-claude-bin`
-points at it otherwise. assay runs it with `--restricted`, `--strict-mcp-config`,
-`--disable-slash-commands` and `--no-session-persistence`, in an empty temporary
-directory, with the payload on stdin: no command execution, no web fetch, no MCP
-servers, no skills, no project settings, no `CLAUDE.md`, nothing left in the
-session store. It answers the question and exits.
-
-> On WSL, assay runs the `claude` it can see from inside the distribution. A
-> Windows-side install is not on that `PATH` — install Claude Code in the
-> distribution too, or use `--ai-backend api`.
-
-Defaults to metadata only — no response bodies at all. `--ai-evidence` adds
-redacted evidence snippets. Interactive runs confirm before sending.
-
-### Running the verification commands during the scan
-
-Triage returns commands that would verify or escalate each finding. `assay
-followup --run` walks them one at a time; `--ai-followup` runs them as a stage
-of the scan instead:
-
-```bash
-assay scan app.target.tld -n "CODENAME" --ai --ai-backend claude-cli --ai-followup
-```
-
-`assay followup` gates execution four ways. Three are mechanical and apply
-unchanged here, per command:
-
-1. **Allow-list** — read-oriented security tools only. Shells, package
-   managers and anything that can become a shell are refused.
-2. **No shell** — parsed with `shlex` and executed without one. Metacharacters
-   cause a refusal rather than being escaped.
-3. **Scope** — every host, IP and URL in the command is checked against the
-   engagement scope. One out-of-scope argument refuses the whole command.
-
-The fourth is a human approving each command as it appears, and a scan has
-nobody to ask. **`--ai-followup` is that approval**, given up front and
-covering every command the pass produces. Two conditions stop the stage
-regardless:
-
-- **`--safe`** — these commands send crafted traffic, which is the thing
-  `--safe` exists to prevent.
-- **A permissive scope** — with no allow rules there is nothing for gate three
-  to check against, so nothing runs.
-
-A dry run, a refused send or a redaction failure all leave the scan with no
-triage, and none of them lead to commands running. Output is attached to each
-finding, same as the interactive path — `assay show <n>` to read it.
-`--ai-followup-limit` (default 25) and `--ai-followup-timeout` (default 120s)
-bound the stage.
-
----
-
-## External tools
-
-assay orchestrates these when present and degrades gracefully when not —
-`assay doctor` shows what's missing and what each one buys you.
-
-`nmap` · `naabu` · `httpx` · `nuclei` · `katana` · `subfinder` · `dnsx` ·
-`ffuf` · `seclists` · `arjun` · `gau` · `waybackurls` · `xsltproc`
-
-### What each tool is for
-
-All optional. `assay doctor` shows which are present and what each buys you.
-
-| Tool | Called during | Why | Without it |
-|---|---|---|---|
-| `nmap` | port scan | service and version detection; also runs the 18 NSE host rules | native sweep of a fixed port list; no service triage, no host rules |
-| `naabu` | port scan | fast sweep first, so nmap only version-scans ports known to be open | nmap does the whole range — much slower on a /24 |
-| `httpx` | probe | bulk HTTP probing once there are 25+ candidates | native probe: same fields, slower |
-| `katana` | URL sourcing | JS-aware crawl — the main source of parameters | single-page link pass; **active checks lose most of their reach** |
-| `gau` / `waybackurls` | URL sourcing | every URL the host ever served (on by default, `--no-passive` disables) | you only see what is linked today |
-| `arjun` | URL sourcing | parameters the server accepts but no page emits | hidden parameters stay untested |
-| `ffuf` + `seclists` | content discovery | unlinked endpoints — admin panels, backups, old API versions; wordlist size scales with `--profile` | that surface stays invisible |
-| `nuclei` | external | CVE and misconfiguration volume | stage skipped entirely |
-| `dnsx` (+ `seclists` for the wordlist) | recon | bulk resolution and CNAME chains for takeover; also drives subdomain brute-forcing (gobuster `dns` mode / Sublist3r-equivalent — 5,000 words on `standard`, 110,000 on `deep`) | threaded `getaddrinfo`, plus `dig`; brute-forcing needs `dnsx` specifically, so it is skipped without it |
-| `subfinder` | recon | passive subdomain enumeration (on by default, `--no-passive` disables) | falls back to certificate transparency via crt.sh |
-| `xsltproc` | after port scan | renders the beautified [NmapView](https://nmapview.github.io) dashboard from the run's nmap XML | the report links only to the raw XML, not the rendered view |
-
-Nothing is installed that assay does not call: a test fails if a registered
-tool is never invoked, because an unused tool still costs build time on a small
-VM and still gets advertised by `doctor`.
-
-### Installing them
-
-`./install.sh` does this on first run, but `assay install` handles it any time:
-
-```bash
-assay install --dry-run       # print the exact commands, run nothing
-assay install                 # install everything missing, after confirming
-assay install -y              # no prompt
-assay install --only ffuf,seclists
-assay install --required-only # just what assay can't work well without
-assay scan <target> --install-missing
-```
-
-It resolves apt packages and Go modules from the same registry the rest of the
-tool reads, installs the Go toolchain first if it's absent, appends `$GOPATH/bin`
-to your shell rc, pulls nuclei's templates, and re-verifies at the end.
-
-Two safeguards worth knowing: it **always prints the full command list and asks
-before running anything** (and refuses to run non-interactively without `-y`),
-and on a constrained VM it pins `GOFLAGS=-p=1` so parallel Go builds can't OOM
-the box. On a non-Debian system it reports what it can't handle rather than
-guessing at a package manager.
-
-nuclei is filtered hard on the way in: fingerprinting templates are dropped,
-results duplicating a native check are dropped, and survivors are re-scored on
-assay's scale so a nuclei `high` can't outrank a locally verified critical.
-
----
+**Running the verification commands during the scan.** Triage returns commands
+that would verify or escalate each finding. `assay followup --run` walks them
+one at a time; `--ai-followup` runs them as a scan stage. Execution is gated
+four ways, per command: an allow-list (read-oriented security tools only),
+no-shell (`shlex`-parsed, metacharacters refuse), scope (one out-of-scope
+argument refuses the command), and a human approving each one — for which
+`--ai-followup` is the up-front approval. `--safe` or a permissive scope stops
+the stage regardless. `--ai-followup-limit` (25) and `--ai-followup-timeout`
+(120s) bound it; output attaches to each finding (`assay show <n>`).
 
 ## Commands
 
 ```
-assay scan <targets>     run a scan (hosts, CIDRs, URLs, or -f file)
-assay doctor             tools, WSL networking, resources
-assay report             rebuild the HTML report from a previous run
-assay show <n>           print finding #n in full, with evidence
-assay ai                 AI triage over an existing run (--ai-backend api|claude-cli)
-assay install           install the external tools (--dry-run to preview)
-assay replay <capture>  replay an authenticated Burp/HAR capture with the
-                        credentials stripped, to find unauthenticated access
-assay submit [n]        generate a submission draft (category, CVSS, repro steps)
+assay scan <targets>    run a scan (hosts, CIDRs, URLs, or a file)
+assay doctor            tools, WSL networking, resources
+assay report            rebuild the HTML report from a previous run
+assay show <n>          print finding #n in full, with evidence
+assay diff              what changed since the last run
+assay ai                AI triage over an existing run (--ai-backend api|claude-cli)
 assay followup          un-redact and run the AI's verification commands
-assay modules            list detection modules
+assay install           install the external tools (--dry-run to preview)
+assay replay <capture>  replay a Burp/HAR capture with credentials stripped
+assay submit [n]        generate a submission draft (category, CVSS, repro)
+assay modules           list detection modules
 ```
-
-Output lands in `assay-out/`: `report.html` (self-contained, opens in the
-Windows browser from WSL), `assay.db` (queryable SQLite), `raw/` (tool output).
-
----
 
 ## Coverage
 
 | OWASP | Checks |
 |---|---|
 | A01 Broken Access Control | CORS trust boundaries (reflected origin, `null`, sibling-subdomain), path traversal, open redirect, ELMAH/trace.axd |
-| A02 Cryptographic Failures | Certificate validity, self-signed, legacy TLS, exposed `.htpasswd` |
+| A02 Cryptographic Failures | certificate validity, self-signed, legacy TLS, exposed `.htpasswd` |
 | A03 Injection | SQL injection (error differential + boolean inference), reflected-input context analysis, traversal oracles |
 | A05 Misconfiguration | 36 exposure signatures (VCS, `.env`, actuator, heapdump, `web.config`, source maps, backups), directory listing, GraphQL introspection, HTTP methods |
-| A06 Vulnerable Components | nuclei CVE templates, version fingerprinting, software/version inventory cross-referenced against NVD |
+| A06 Vulnerable Components | nuclei CVE templates, version fingerprinting, software inventory cross-referenced against NVD |
 | A07 Auth Failures | WordPress user enumeration, XML-RPC amplification, default-login templates |
 | A08 Integrity Failures | Java RMI, JDWP, deserialization templates |
-| A10 SSRF | Out-of-band SSRF with callback correlation, in-band fetch-error oracle, internal host discovery, Host/proxy-header injection |
-| Host | Active service confirmation (TCP banner, HTTP/`Server`, TLS certificate, UDP protocol query) with a sortable confirmed-services table and per-service enumeration commands; Redis / memcached / Elasticsearch / Docker API / kubelet / Jupyter proven unauthenticated with one read-only request; 18 NSE rules for anonymous FTP, NFS, rsync, SMB null sessions and signing, LDAP, SNMP, RDP/NLA, VNC, IPMI, SMTP relay, empty DB passwords; 15 more service rules with the exact manual step |
-
----
+| A10 SSRF | out-of-band with callback correlation, in-band fetch-error oracle, internal host discovery, Host/proxy-header injection |
+| Host | active service confirmation (TCP banner, HTTP/`Server`, TLS cert, UDP query) with a sortable table and per-service enum commands; Redis / memcached / Elasticsearch / Docker API / kubelet / Jupyter proven unauthenticated with one read-only request; 18 NSE rules; 15 more service rules with the exact manual step |
 
 ## Testing
 
 ```bash
 .venv/bin/python -m pytest tests/        # whole suite
-.venv/bin/python -m tests.test_detection # just the detection checks
 ```
 
-**550+ tests**, all offline. Every detection test asserts **both** directions — the check
-fires on the real condition and stays silent on the benign lookalike (a static
-CORS header, a themed 404 containing a keyword, a reflected traversal payload,
-a redirect to a fixed internal path).
+**550+ tests**, all offline — the suite never opens a listening socket or
+stands up a vulnerable service. Every detection test asserts **both**
+directions: the check fires on the real condition and stays silent on the
+benign lookalike. Roughly half are detection tests (one class per module); the
+rest guard things that broke at least once — report rendering, schema
+migrations, regex backtracking budgets, gateway thresholds, proxy liveness,
+`replay.sh` shell-metacharacter safety, URL-pool concurrency, the Windows→WSL
+bridge, request accounting, and service confirmation (a bare connection claimed
+as confirmed, or a silent/`open` port misread).
 
-Tests run entirely against canned responses. The suite never opens a listening
-socket and never stands up a vulnerable service.
-
-Roughly half are detection tests — one class per module, each asserting the
-check fires on the real condition and stays silent on the lookalike. The rest
-guard things that broke at least once:
-
-| Class | What it exists to prevent |
-|---|---|
-| `ConfirmTests` | a service claimed as confirmed on a bare connection, a silent `open`/`open`‑`filtered` port listed as responding, or a UDP reply misread |
-| `WiringTests` | a tool, module stage or profile option that exists but is never reached. Caught content discovery being installable but never invoked |
-| `ReportRenderTests` | the report generator crashing. It shipped broken once because nothing rendered a report — only checked pre-generated HTML |
-| `SchemaMigrationTests` | an upgrade destroying existing run history |
-| `RegexBudgetTests` | catastrophic backtracking. Sweeps all 87 patterns against adversarial input; found a 1.8s stall reachable through a CSP header |
-| `GatewayThresholdTests` | filtering a real load-balanced pool as though it were the proxy |
-| `LivenessTests` | marking a proxy's error page as a live service, or a short 403 as dead |
-| `ReplaySafetyTests` | shell metacharacters in a target URL becoming commands in `replay.sh` |
-| `ConcurrencyTests` | the URL pool exceeding its cap or admitting duplicates under threads |
-| `WindowsWslBridgeTests` | the Windows→WSL bridge, verified from any dev machine by stubbing `wsl.exe` |
-| `AccountingTests` | a summary that counts only successful requests and reports "0" for a run that attempted hundreds |
-
----
-
-## How to read the signatures
-
-Signature data — ports, paths, error strings, provider fingerprints — is easy
-to assert confidently and get wrong. Two things make that manageable:
-
-**A wrong value costs a missed detection, never a false claim.** Every
-signature in `paths.yaml`, `nse.yaml` and `ai_surface.yaml` requires a content
-match; none fires on a port or a status code alone. If a path is wrong the
-check silently finds nothing, which is a gap — not a fabricated finding.
-
-**Provenance is recorded where it matters.** The AI service signatures each
-carry a `verified:` field naming the source the port and path came from, and
-say plainly where a value is asserted rather than documented:
-
-```yaml
-- name: Milvus vector database exposed
-  verified: milvus.yaml proxy port 19530; 9091 asserted
-```
-
-Where a fact is load-bearing it was checked against an authoritative source
-rather than recalled — CVE-2026-7482's affected range against NVD and MITRE,
-every NSE script name against its nmap documentation page, every Go module path
-against the module proxy, every apt package against the Kali and Debian
-indexes.
+Signature data (ports, paths, error strings) is easy to get wrong, so a wrong
+value costs a missed detection, never a false claim: everything in `paths.yaml`,
+`nse.yaml` and `ai_surface.yaml` requires a content match, none fires on a port
+or status code alone. Load-bearing facts were checked against authoritative
+sources (CVE ranges against NVD/MITRE, NSE names against nmap docs, Go modules
+against the proxy, apt packages against the Kali/Debian indexes), and each AI
+signature records its provenance in a `verified:` field.
 
 ## Rules of engagement
 
-assay is a testing tool, not an exploitation framework, and the defaults reflect
-that:
+assay is a testing tool, not an exploitation framework:
 
-- **Scope is enforced, not advisory.** Every request — assay's own and every
-  external tool's — is checked against the scope file before a packet leaves the
-  machine. Out-of-scope hosts are refused and reported at the end of the run.
-- **Nothing that changes state runs by default.** Non-GET replay, and checks
-  that could mutate data, require `--aggressive`.
-- **Checks stop at proof.** The Docker module reads `/version` and never creates
-  a container; the Elasticsearch check reads cluster health and stops. Findings
-  demonstrate the primitive; they do not exercise it.
-- **Third-party lookups are on by default, and one flag turns them off.**
-  Archive, certificate-transparency and NVD CVE queries tell someone other
-  than your target what you are looking at; `--no-passive` disables all of
-  them at once.
-- **AI triage is off unless you ask for it**, sends pseudonymised data only, and
-  aborts rather than transmitting anything that fails the redaction check.
+- **Scope is enforced, not advisory** — every request is checked before a packet
+  leaves the machine.
+- **Nothing that changes state runs by default** — non-GET replay and mutating
+  checks require `--aggressive`.
+- **Checks stop at proof** — the Docker module reads `/version` and never creates
+  a container; findings demonstrate the primitive, they do not exercise it.
+- **Third-party lookups are on by default; `--no-passive` turns them all off** —
+  archive, CT and NVD queries tell someone other than your target what you are
+  looking at.
+- **AI triage is off unless you ask**, sends pseudonymised data only, and aborts
+  rather than transmit anything that fails the redaction check.
 
-You are responsible for staying inside your authorization. A scope file is the
-safety net, not the permission.
+A scope file is the safety net, not the permission. You are responsible for
+staying inside your authorization.
 
-## Caveats
-
-- Unlinked endpoints need content discovery. The active checks inject into
-  parameters found by crawling; a `/download?file=` that nothing links to won't
-  be found unless `ffuf` and a wordlist are installed — `assay install --only
-  ffuf,seclists` fixes that, then use `--profile deep`.
-- `--aggressive` enables checks that may change state. Off by default; confirm
-  it's within the program's rules first.
-- Findings are leads with evidence attached, not submissions. Reproduce by hand
-  before reporting — every finding ships with a `curl` command for exactly that.
+**Caveats.** Unlinked endpoints need content discovery (`assay install --only
+ffuf,seclists`, then `--profile deep`). `--aggressive` enables state-changing
+checks — confirm it's within the program's rules first. Findings are leads with
+evidence attached, not submissions — reproduce by hand (every finding ships a
+`curl`) before reporting.
