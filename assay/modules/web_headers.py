@@ -8,7 +8,7 @@ because a reflected-origin + credentials combination is directly reportable.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import List
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -39,7 +39,7 @@ class CorsModule(Module):
     desc = "Cross-origin resource sharing trust boundaries"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        url = wt.final_url or wt.url
+        url = wt.base_url
         out: List[Finding] = []
 
         base = ctx.http.get(url)
@@ -321,7 +321,7 @@ class MethodsModule(Module):
     desc = "Dangerous HTTP methods"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        url = wt.final_url or wt.url
+        url = wt.base_url
         r = ctx.http.request("OPTIONS", url)
         out: List[Finding] = []
         allow = (r.header("Allow") or r.header("Access-Control-Allow-Methods")).upper()

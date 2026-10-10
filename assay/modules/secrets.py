@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Dict, List, Optional, Pattern, Tuple
+from typing import List, Optional, Pattern, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from assay import owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay.urls import origin_of
 
 # (label, severity, regex, why it matters)
 SECRET_PATTERNS: List[Tuple[str, str, Pattern, str]] = [
@@ -87,8 +88,8 @@ class SecretsModule(Module):
     desc = "Credentials, internal hosts and source maps in client-side assets"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        base = wt.final_url or wt.url
-        scripts = self._script_urls(ctx, wt, base)
+        base = wt.base_url
+        scripts = self._script_urls(ctx, base)
         out: List[Finding] = []
         seen_secret: set = set()
 
@@ -158,7 +159,7 @@ class SecretsModule(Module):
                     out.append(f)
         return out
 
-    def _script_urls(self, ctx: Context, wt: WebTarget, base: str) -> List[str]:
+    def _script_urls(self, ctx: Context, base: str) -> List[str]:
         urls: List[str] = []
         r = ctx.http.get(base)
         if r.ok:
@@ -168,13 +169,13 @@ class SecretsModule(Module):
                 full = urljoin(r.url, src)
                 if full not in urls:
                     urls.append(full)
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", base)
+        origin = origin_of(base)
         for u in ctx.urls.get(origin, []):
             if u.split("?")[0].endswith(".js") and u not in urls:
                 urls.append(u)
         return urls
 
-    def _scan_map_sources(self, ctx: Context, url: str, body: str,
+    def _scan_map_sources(self, url: str, body: str,
                           out: List[Finding]) -> None:
         """Run the secret patterns over sourcesContent inside a source map."""
         try:
@@ -231,7 +232,7 @@ class SecretsModule(Module):
         # they carry comments and literals the bundle no longer shows. Secrets
         # that were stripped from the shipped file often survive here.
         if has_content:
-            self._scan_map_sources(ctx, url, r.body, out_findings)
+            self._scan_map_sources(url, r.body, out_findings)
         return Finding(
             title="JavaScript source map published in production",
             target=url,

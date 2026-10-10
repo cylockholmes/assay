@@ -8,7 +8,7 @@ at a known third-party service, and the service answers with its own
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 from assay import owasp
 from assay.context import Context

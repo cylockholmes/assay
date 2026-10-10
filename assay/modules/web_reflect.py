@@ -16,16 +16,15 @@ characters, never by reflection alone.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay.modules.web_active import candidate_urls, existing_params, with_param
-from assay import params as P
-from assay.net import Resp, rand_token
+from assay.net import rand_token
 
 # Characters that decide whether a reflection is exploitable, and what each
 # one unlocks if it survives.
@@ -143,7 +142,7 @@ class ReflectionModule(Module):
 
         for url in candidate_urls(ctx, wt):
             params = existing_params(url)
-            if not params and url == (wt.final_url or wt.url):
+            if not params and url == wt.base_url:
                 params = COMMON_PARAMS[:6]
             for p in params:
                 if p.startswith("assay_"):

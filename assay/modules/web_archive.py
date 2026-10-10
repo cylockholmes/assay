@@ -9,8 +9,7 @@ Third-party traffic, so --passive only.
 
 from __future__ import annotations
 
-import re
-from typing import Dict, List, Optional, Set
+from typing import List, Set
 
 from assay import archive, owasp
 from assay.context import Context

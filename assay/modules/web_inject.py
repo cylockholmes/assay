@@ -12,15 +12,14 @@ into the status line - there is no benign reading of that.
 
 from __future__ import annotations
 
-import re
 from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
-from assay.modules.web_active import candidate_urls, existing_params, with_param
+from assay.modules.web_active import candidate_urls, with_param
 from assay import params as P
 from assay.net import rand_token
 
@@ -56,7 +55,7 @@ class SstiModule(Module):
             params = P.targets_for(
                 "ssti", url,
                 fallback=(COMMON_PARAMS[:5]
-                          if url == (wt.final_url or wt.url)
+                          if url == wt.base_url
                           and ctx.cfg.profile != "quick" else []))
             for p in params:
                 key = (urlsplit(url).path, p)
@@ -141,7 +140,7 @@ class CrlfModule(Module):
             params = P.targets_for(
                 "crlf", url,
                 fallback=(["redirect", "url", "next", "lang"]
-                          if url == (wt.final_url or wt.url) else []))
+                          if url == wt.base_url else []))
             for p in params:
                 key = (urlsplit(url).path, p)
                 if key in tested or len(tested) >= budget:

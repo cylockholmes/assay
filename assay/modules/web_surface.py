@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import socket
-from typing import List, Optional
+from typing import List
 
 from assay import owasp, recon
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay import domains
 

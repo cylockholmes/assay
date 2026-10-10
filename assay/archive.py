@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import quote, urlsplit
+from dataclasses import dataclass
+from typing import List, Optional, Set
+from urllib.parse import quote
 
 CDX = ("https://web.archive.org/cdx/search/cdx?url=%s%%2F*&output=json"
        "&fl=original,timestamp,mimetype,statuscode&collapse=urlkey"

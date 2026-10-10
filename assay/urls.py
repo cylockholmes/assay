@@ -18,7 +18,7 @@ Historical sources query third-party archives, so they are gated behind
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Set, Tuple
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from assay import tools
@@ -48,6 +48,14 @@ JS_NOISE_RE = re.compile(
     r"^/(?:$|\*|@|node_modules/|__webpack|\d+$|[A-Za-z]$)|"
     r"^/(?:application|text|image|video|audio)/|"      # mime types
     r"^/(?:UTC|GMT|Etc)/", re.I)
+
+
+_ORIGIN_RE = re.compile(r"(https?://[^/]+).*")
+
+
+def origin_of(url: str) -> str:
+    """scheme://host[:port] prefix of a URL string, as written."""
+    return _ORIGIN_RE.sub(r"\1", url)
 
 
 def normalise(url: str) -> str:
@@ -80,7 +88,9 @@ def dedupe_by_shape(urls: Iterable[str], cap: int) -> List[str]:
     for u in urls:
         if not is_useful(u):
             continue
-        seen.setdefault(param_signature(u), normalise(u))
+        sig = param_signature(u)
+        if sig not in seen:
+            seen[sig] = normalise(u)
         if len(seen) >= cap:
             break
     return list(seen.values())

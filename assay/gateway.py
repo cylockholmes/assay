@@ -31,7 +31,7 @@ NO_BACKEND_STATUSES = (502, 503, 504)
 MIN_BODY_BYTES = 24
 
 
-def looks_live(status: int, body: str, proxied_port: bool) -> Tuple[bool, str]:
+def looks_live(status: int, body: str) -> Tuple[bool, str]:
     """Is there actually a service here, or just a proxy answering?
 
     On a network that proxies every address, a completed TCP connect and even

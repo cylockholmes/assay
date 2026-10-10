@@ -27,8 +27,9 @@ from assay.oob import OOBSession
 from assay.config import Config, Scope
 from assay.context import Context
 from assay.models import Finding, Port, Target, WebTarget, host_port_from_url, normalize_url
-from assay.net import HttpClient, build_baseline
+from assay.net import HttpClient
 from assay.store import Store
+from assay.urls import origin_of
 
 # Ports we will try HTTP against when no service detection says otherwise.
 WEB_PORTS = [80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7001, 8081, 9000,
@@ -1045,7 +1046,7 @@ class Engine:
             % (verdict.signature, verdict.count, ", ".join(verdict.members[:30])))
 
     def _calibrate(self) -> None:
-        origins = sorted({re.sub(r"(https?://[^/]+).*", r"\1", w.final_url or w.url)
+        origins = sorted({origin_of(w.base_url)
                           for w in self.ctx.web})
         self.ctx.say("probe", "calibrating %d baseline(s)" % len(origins))
         with ThreadPoolExecutor(max_workers=min(6, self.tune["concurrency"])) as pool:
@@ -1067,8 +1068,7 @@ class Engine:
                 body_sample=r.body[:4000], final_url=r.url or url,
                 redirect_chain=r.history,
             )
-            live, why = gateway.looks_live(
-                r.status, r.body, self.cfg.is_proxied_port(p.port))
+            live, why = gateway.looks_live(r.status, r.body)
             if not live:
                 # self.journal, not ctx.journal: Context has no journal field,
                 # so this raised AttributeError out of the worker and through
@@ -1117,7 +1117,7 @@ class Engine:
                 n += 1
             return n
 
-        origins = [re.sub(r"(https?://[^/]+).*", r"\1", (w.final_url or w.url))
+        origins = [origin_of(w.base_url)
                    for w in self.ctx.web]
 
         # 1. crawl -----------------------------------------------------------
@@ -1132,7 +1132,7 @@ class Engine:
                                  "(third-party lookup; enable with --passive)")
 
         # 3. javascript ------------------------------------------------------
-        self._source_javascript(add, cap)
+        self._source_javascript(add)
 
         # Collapse to distinct (path, parameter-set) shapes before spending
         # any further budget on them.
@@ -1149,7 +1149,7 @@ class Engine:
                      % (total, withp))
 
     def _source_crawl(self, add, cap: int) -> None:
-        targets = [w.final_url or w.url for w in self.ctx.web]
+        targets = [w.base_url for w in self.ctx.web]
         if self.ctx.has("katana"):
             self.ctx.say("urls", "katana over %d endpoint(s)" % len(targets))
             results = tools.katana_crawl(targets, depth=2, tune=self.tune,
@@ -1159,7 +1159,7 @@ class Engine:
             for obj in results:
                 u = (obj.get("request") or {}).get("endpoint") or obj.get("endpoint")
                 if u:
-                    n += add(re.sub(r"(https?://[^/]+).*", r"\1", u), [u])
+                    n += add(origin_of(u), [u])
             self.ctx.say("urls", "crawl: %d URL(s)" % n)
         else:
             self.ctx.say("urls", "katana not installed - native link pass")
@@ -1175,17 +1175,17 @@ class Engine:
                 return
             for u in got:
                 if urlsplit(u).hostname == host:
-                    found += add(re.sub(r"(https?://[^/]+).*", r"\1", u), [u])
+                    found += add(origin_of(u), [u])
         self.ctx.say("urls", "historical: %d URL(s)" % found)
 
-    def _source_javascript(self, add, cap: int) -> None:
+    def _source_javascript(self, add) -> None:
         script_re = re.compile(r"""<script[^>]+src=["']?([^"'\s>]+)""", re.I)
         found = leads = 0
         budget = 8 if self.cfg.profile == "quick" else (
             20 if self.cfg.profile == "standard" else 50)
         for w in self.ctx.web:
-            base = w.final_url or w.url
-            origin = re.sub(r"(https?://[^/]+).*", r"\1", base)
+            base = w.base_url
+            origin = origin_of(base)
             scripts = [urljoin(base, src) for src in
                        script_re.findall(w.body_sample or "")]
             r = self.http.get(base)
@@ -1257,8 +1257,8 @@ class Engine:
     def _native_crawl(self, add, cap: int) -> None:
         link_re = re.compile(r"""(?:href|src|action)=["']([^"'#>]+)""", re.I)
         for w in self.ctx.web:
-            base = w.final_url or w.url
-            origin = re.sub(r"(https?://[^/]+).*", r"\1", base)
+            base = w.base_url
+            origin = origin_of(base)
             r = self.http.get(base)
             if not r.ok:
                 continue

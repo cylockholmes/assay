@@ -9,10 +9,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import socket
 import subprocess
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 
 def git_build_meta() -> str:

@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, Optional
 
 try:  # POSIX-only; without them the live skip key is simply unavailable
     import termios
@@ -21,7 +21,6 @@ try:  # POSIX-only; without them the live skip key is simply unavailable
 except ImportError:
     termios = tty = None
 
-from rich.align import Align
 from rich.box import ROUNDED, SIMPLE
 from rich.console import Console, Group
 from rich.live import Live

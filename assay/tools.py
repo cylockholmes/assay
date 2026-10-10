@@ -1603,12 +1603,6 @@ def nuclei_scan(urls: List[str], severity: str, tune: Dict,
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
-def nuclei_templates_present() -> bool:
-    return os.path.isdir(os.path.expanduser("~/.local/nuclei-templates")) or os.path.isdir(
-        os.path.expanduser("~/nuclei-templates")
-    )
-
-
 # --------------------------------------------------------------------------
 # katana
 # --------------------------------------------------------------------------

@@ -81,10 +81,10 @@ class TlsModule(Module):
         for port in target.ports:
             if not (port.is_tls or port.port in (443, 8443, 9443, 4443, 993, 995, 465)):
                 continue
-            out.extend(self._check(ctx, host, port.port))
+            out.extend(self._check(host, port.port))
         return out
 
-    def _check(self, ctx: Context, host: str, port: int) -> List[Finding]:
+    def _check(self, host: str, port: int) -> List[Finding]:
         cert, version = fetch_cert(host, port)
         out: List[Finding] = []
         where = "%s:%d" % (host, port)

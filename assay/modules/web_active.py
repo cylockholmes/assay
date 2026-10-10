@@ -9,15 +9,16 @@ can never poison a shared cache the program's real users sit behind.
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay import params as P
 from assay.net import Resp, rand_token
+from assay.urls import origin_of
 
 SENTINEL_DOMAIN = "example.net"
 
@@ -45,14 +46,14 @@ def with_param(url: str, param: str, value: str, cache_bust: bool = True) -> str
 
 
 def existing_params(url: str) -> List[str]:
-    return [k for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
+    return [k for k, _ in P.parameters(url)]
 
 
 def candidate_urls(ctx: Context, wt: WebTarget, limit: int = 25) -> List[str]:
     """URLs worth injecting into: crawled URLs with parameters first."""
-    origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+    origin = origin_of(wt.base_url)
     urls = [u for u in ctx.urls.get(origin, []) if "?" in u]
-    base = wt.final_url or wt.url
+    base = wt.base_url
     if base not in urls:
         urls.append(base)
     # Prefer distinct paths so we do not burn the budget on one endpoint.
@@ -80,7 +81,7 @@ class OpenRedirectModule(Module):
         for url in candidate_urls(ctx, wt):
             probe_params = P.targets_for(
                 "openredirect", url,
-                fallback=REDIRECT_PARAMS[:8] if url == (wt.final_url or wt.url) else [])
+                fallback=REDIRECT_PARAMS[:8] if url == wt.base_url else [])
             for p in probe_params:
                 key = (urlsplit(url).path, p)
                 if key in tested:
@@ -161,7 +162,7 @@ class HostHeaderModule(Module):
     desc = "Host / X-Forwarded-Host injection and unkeyed-input reflection"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        url = wt.final_url or wt.url
+        url = wt.base_url
         out: List[Finding] = []
 
         for header in ("X-Forwarded-Host", "X-Host", "X-Forwarded-Server"):
@@ -288,7 +289,7 @@ class TraversalModule(Module):
             params = P.targets_for(
                 "traversal", url,
                 fallback=(FILE_PARAMS[:6]
-                          if url == (wt.final_url or wt.url)
+                          if url == wt.base_url
                           and ctx.cfg.profile != "quick" else []))
             for p in params:
                 key = (urlsplit(url).path, p)
@@ -349,7 +350,7 @@ class GraphQLModule(Module):
     INTROSPECTION = '{"query":"query{__schema{queryType{name} mutationType{name} types{name}}}"}'
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+        origin = origin_of(wt.base_url)
         out: List[Finding] = []
         eps = self.ENDPOINTS if ctx.cfg.profile != "quick" else self.ENDPOINTS[:3]
         for ep in eps:

@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay.net import Resp, similarity
+from assay.urls import origin_of
 
 # Path mutations. Each is (label, transform) applied to the guarded path.
 PATH_TRICKS: List[Tuple[str, str]] = [
@@ -98,8 +99,8 @@ class ForbiddenBypassModule(Module):
     desc = "401/403 access-control bypass via path, header and method tricks"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
-        guarded = self._guarded_paths(ctx, wt, origin)
+        origin = origin_of(wt.base_url)
+        guarded = self._guarded_paths(ctx, origin)
         if not guarded:
             return []
 
@@ -115,7 +116,7 @@ class ForbiddenBypassModule(Module):
         return out
 
     # ------------------------------------------------------------------
-    def _guarded_paths(self, ctx: Context, wt: WebTarget,
+    def _guarded_paths(self, ctx: Context,
                        origin: str) -> List[Tuple[str, Resp]]:
         """Paths that actually answer 401/403 - the only ones worth bypassing."""
         candidates: List[str] = []

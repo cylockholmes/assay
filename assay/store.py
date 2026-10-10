@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import asdict, fields
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlsplit
 
 from assay.models import Evidence, Finding, WebTarget

@@ -108,7 +108,7 @@ def collect_from_web(wt: WebTarget) -> List[Software]:
     libraries - the components a web application actually ships.
     """
     found: List[Software] = []
-    where = wt.final_url or wt.url
+    where = wt.base_url
 
     if wt.server:
         for name, version in _from_header(wt.server):

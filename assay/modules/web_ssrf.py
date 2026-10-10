@@ -25,7 +25,7 @@ from assay.context import Context
 from assay.models import Finding, WebTarget
 from assay.modules import Module, register
 from assay import params as P
-from assay.modules.web_active import candidate_urls, existing_params, with_param
+from assay.modules.web_active import candidate_urls, with_param
 
 # Parameters that commonly take a URL or hostname the server will fetch.
 SSRF_PARAMS = [
@@ -35,10 +35,6 @@ SSRF_PARAMS = [
     "proxy", "image", "image_url", "img", "file", "document", "data", "remote",
     "upload_url", "import", "preview", "render", "check", "validate", "ping",
 ]
-
-# Headers some stacks resolve or forward on the server side.
-SSRF_HEADERS = ["X-Forwarded-For", "X-Forwarded-Host", "Referer",
-                "X-Original-URL", "True-Client-IP", "Forwarded"]
 
 
 @register
@@ -60,7 +56,7 @@ class SsrfModule(Module):
             params = P.targets_for(
                 "ssrf", url,
                 fallback=(SSRF_PARAMS[:6]
-                          if url == (wt.final_url or wt.url)
+                          if url == wt.base_url
                           and ctx.cfg.profile != "quick" else []))
             for p in params:
                 key = (urlsplit(url).path, p)

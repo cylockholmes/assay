@@ -64,7 +64,7 @@ class NucleiModule(Module):
         return bool(ctx.cfg.opts.get("nuclei")) and ctx.has("nuclei")
 
     def run_global(self, ctx: Context) -> List[Finding]:
-        urls = [w.final_url or w.url for w in ctx.web]
+        urls = [w.base_url for w in ctx.web]
         if not urls:
             return []
         sev = ctx.cfg.opts.get("nuclei_severity", "critical,high,medium")

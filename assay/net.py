@@ -7,14 +7,14 @@ exact bytes are available as evidence for any finding built from the response.
 
 from __future__ import annotations
 
-import hashlib
 import random
 import re
 import string
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from functools import lru_cache
+from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -399,9 +399,15 @@ def shingles(text: str, k: int = 5) -> set:
     return {" ".join(toks[i:i + k]) for i in range(0, len(toks) - k + 1, 2)}
 
 
+@lru_cache(maxsize=128)
+def _shingled(body: str) -> frozenset:
+    # Baselines are compared against every probed path; normalise each body once.
+    return frozenset(shingles(normalize_body(body)))
+
+
 def similarity(a: str, b: str) -> float:
     """Jaccard similarity over word shingles. 1.0 == effectively identical."""
-    sa, sb = shingles(normalize_body(a)), shingles(normalize_body(b))
+    sa, sb = _shingled(a), _shingled(b)
     if not sa and not sb:
         return 1.0
     if not sa or not sb:
@@ -460,10 +466,6 @@ def build_baseline(http: HttpClient, origin: str, probes: int = 3) -> Baseline:
         if len(bl.bodies) >= 2:
             bl.dynamic = similarity(bl.bodies[0], bl.bodies[1]) < 0.9
     return bl
-
-
-def body_hash(body: str) -> str:
-    return hashlib.sha1(normalize_body(body).encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def rand_token(n: int = 10) -> str:

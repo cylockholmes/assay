@@ -17,13 +17,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import yaml
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, Port, Target
+from assay.models import Finding, Target
 from assay.modules import Module, register
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")

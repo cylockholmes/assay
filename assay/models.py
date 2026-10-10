@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import re
 import time
 from dataclasses import dataclass, field, asdict
@@ -14,8 +13,6 @@ from urllib.parse import urlsplit, urlunsplit
 # --------------------------------------------------------------------------
 # Severity / confidence
 # --------------------------------------------------------------------------
-
-SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 
 # Base weight of a finding class, before confidence and context modifiers.
 SEVERITY_WEIGHT = {
@@ -118,6 +115,10 @@ class WebTarget:
     @property
     def origin(self) -> str:
         return "%s://%s:%d" % (self.scheme, self.host, self.port)
+
+    @property
+    def base_url(self) -> str:
+        return self.final_url or self.url
 
     def key(self) -> str:
         return self.origin
@@ -237,9 +238,6 @@ class Finding:
         d = asdict(self)
         d["id"] = self.fingerprint()
         return d
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), default=str)
 
 
 # --------------------------------------------------------------------------

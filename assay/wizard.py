@@ -13,7 +13,7 @@ itself, which keeps it testable with a scripted `ask`.
 from __future__ import annotations
 
 import sys
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Sequence
 
 Ask = Callable[[str], str]
 

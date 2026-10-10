@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set
 from urllib.parse import urlsplit
 
 from assay.models import Finding
@@ -142,9 +142,6 @@ class _Index:
     def titled(self, pattern: str) -> List[Finding]:
         rx = re.compile(pattern, re.I)
         return [f for f in self.findings if rx.search(f.title)]
-
-    def tagged(self, tag: str) -> List[Finding]:
-        return [f for f in self.findings if tag in f.tags]
 
 
 def _rule_cors_sibling_takeover(ix: _Index) -> Optional[Chain]:

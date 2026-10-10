@@ -13,14 +13,14 @@ it is exactly what gets skipped when a scan produces four hundred rows.
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp, params
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay.urls import origin_of
 
 # Paths where an object reference is more likely to be an access-control
 # boundary than a lookup key.
@@ -39,7 +39,7 @@ class IdorInventoryModule(Module):
     desc = "Inventory of object references worth testing with a second account"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+        origin = origin_of(wt.base_url)
         urls = ctx.urls.get(origin, [])
         if not urls:
             return []

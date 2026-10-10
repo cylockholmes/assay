@@ -23,6 +23,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
 # The redaction allowlist (public domains never pseudonymised) lives in its own
@@ -161,6 +162,11 @@ class RedactionMap:
         return text
 
 
+@lru_cache(maxsize=None)
+def _term_rx(term: str) -> "re.Pattern":
+    return re.compile(re.escape(term), re.I)
+
+
 class Redactor:
     def __init__(self, extra_terms: Optional[Iterable[str]] = None) -> None:
         self.map = RedactionMap()
@@ -186,8 +192,7 @@ class Redactor:
         low = out.lower()
         for term in self.extra_terms:
             if term in low:
-                out = re.sub(re.escape(term), self.map.token_for("CLIENT", term),
-                             out, flags=re.I)
+                out = _term_rx(term).sub(self.map.token_for("CLIENT", term), out)
                 low = out.lower()          # only a real substitution moves it
 
         # Phase 3 - remaining network and opaque identifiers.

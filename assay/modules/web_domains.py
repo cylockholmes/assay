@@ -12,14 +12,14 @@ stored XSS waiting for someone to pay ten dollars.
 
 from __future__ import annotations
 
-import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 from urllib.parse import urlsplit
 
 from assay import domains, owasp
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay.urls import origin_of
 
 # What each reference kind hands to whoever registers the domain.
 CONSEQUENCE = {
@@ -82,7 +82,7 @@ class UnregisteredDomainModule(Module):
     desc = "References to unregistered domains (script, CSP, CORS, cert SANs)"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        base = wt.final_url or wt.url
+        base = wt.base_url
         refs: Dict[str, Set[str]] = {}
 
         r = ctx.http.get(base)
@@ -103,7 +103,7 @@ class UnregisteredDomainModule(Module):
         # Certificate SANs, and foreign hosts already extracted from JS bundles.
         for san in (wt.cert.get("sans") or []):
             self._merge(refs, domains.refs_from_hosts([san], wt.host, "cert"))
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", base)
+        origin = origin_of(base)
         js_hosts = [urlsplit(u).hostname for u in ctx.urls.get(origin, [])
                     if u.startswith("http")]
         self._merge(refs, domains.refs_from_hosts(

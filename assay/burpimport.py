@@ -20,7 +20,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 # Headers that carry identity. All are removed before replay.

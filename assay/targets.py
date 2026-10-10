@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 # A line that is a section heading rather than a target. Anything under an

@@ -14,14 +14,15 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import yaml
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
+from assay.urls import origin_of
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
@@ -57,9 +58,9 @@ class ExposureModule(Module):
     desc = "Exposed VCS dirs, secrets files, debug endpoints and admin consoles"
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = (wt.final_url or wt.url).rstrip("/")
+        origin = wt.base_url.rstrip("/")
         # Strip any path so signatures are tested against the web root.
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", origin)
+        origin = origin_of(origin)
         max_tier = TIER_RANK.get(ctx.cfg.profile, 1)
         bl = ctx.baseline_for(origin)
         out: List[Finding] = []
@@ -150,7 +151,7 @@ class DirListingModule(Module):
             "/download/", "/media/", "/data/", "/includes/", "/config/"]
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+        origin = origin_of(wt.base_url)
         bl = ctx.baseline_for(origin)
         limit = 3 if ctx.cfg.profile == "quick" else len(self.DIRS)
         hits: List[str] = []
@@ -208,7 +209,7 @@ class BackupFileModule(Module):
         return ctx.cfg.profile == "deep" and Module.applicable(self, ctx)
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+        origin = origin_of(wt.base_url)
         bl = ctx.baseline_for(origin)
         candidates = self._candidates(ctx, origin)
         out: List[Finding] = []

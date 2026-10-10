@@ -36,11 +36,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from assay.models import Finding
-from assay.redact import Redactor, terms_from_context
+from assay.redact import Redactor
 
 MODEL = "claude-opus-4-8"
 INPUT_PRICE_PER_MTOK = 5.00

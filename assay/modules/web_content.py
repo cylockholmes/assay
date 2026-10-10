@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from assay import owasp, tools
 from assay.context import Context
 from assay.models import Evidence, Finding, WebTarget
 from assay.modules import Module, register
+from assay.urls import origin_of
 
 # Hits worth surfacing on their own rather than only feeding the URL pool.
 NOTEWORTHY = re.compile(
@@ -50,7 +51,7 @@ class ContentDiscoveryModule(Module):
 
     def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
         wordlist = tools.default_wordlist(ctx.cfg.profile)
-        origin = re.sub(r"(https?://[^/]+).*", r"\1", (wt.final_url or wt.url))
+        origin = origin_of(wt.base_url)
         extensions = self._extensions(wt)
 
         ctx.say("content", "fuzzing %s with %s"

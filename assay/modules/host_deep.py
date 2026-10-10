@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import yaml
 
@@ -63,16 +63,16 @@ class HostDeepModule(Module):
         udp_rules = [r for r in rules if r.get("udp")]
 
         out: List[Finding] = []
-        out += self._sweep(ctx, target, host, tcp_rules, open_ports, udp=False)
+        out += self._sweep(ctx, host, tcp_rules, open_ports, udp=False)
 
         # UDP is slow; only worth it when the profile has already opted into depth.
         if ctx.cfg.profile == "deep":
             udp_ports = {p for r in udp_rules for p in r["ports"]}
-            out += self._sweep(ctx, target, host, udp_rules, udp_ports, udp=True)
+            out += self._sweep(ctx, host, udp_rules, udp_ports, udp=True)
         return out
 
     # ------------------------------------------------------------------
-    def _sweep(self, ctx: Context, target: Target, host: str, rules: List[dict],
+    def _sweep(self, ctx: Context, host: str, rules: List[dict],
                candidate_ports: set, udp: bool) -> List[Finding]:
         # Only run scripts whose port is actually open (or, for UDP, plausible).
         applicable: List[dict] = []

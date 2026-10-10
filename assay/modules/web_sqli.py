@@ -17,16 +17,15 @@ or a manual payload.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
 from assay.context import Context
-from assay.models import Evidence, Finding, WebTarget
+from assay.models import Finding, WebTarget
 from assay.modules import Module, register
-from assay import params as P
 from assay.modules.web_active import candidate_urls, existing_params, with_param
-from assay.net import Resp, similarity
+from assay.net import similarity
 
 # Errors that only a database driver emits. Deliberately narrow.
 DB_ERRORS: List[Tuple[str, re.Pattern]] = [
