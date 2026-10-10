@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
-from assay import correlate, domains, env, recon, tools, urls as urlsrc
+from assay import correlate, domains, env, netlas, recon, tools, urls as urlsrc
 from assay import gateway
 from assay.journal import Journal
 from assay.oob import OOBSession
@@ -473,8 +473,21 @@ class Engine:
         hosts = [t.host for t in targets]
         if not hosts:
             return
-        self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(hosts))
-        swept = self._naabu(hosts, "all", "deep")
+        # Netlas already knows many hosts' ports: use them instead of probing
+        # 65535 ports per host, and sweep only the hosts it has nothing on.
+        indexed = self._netlas_ports(hosts)
+        need = [h for h in hosts if h not in indexed]
+        if indexed:
+            self.ctx.say("ports", "deep sweep: Netlas covers %d of %d host(s); "
+                                  "sweeping the other %d" % (len(indexed), len(hosts), len(need)))
+        need = self._fit_deep_budget(need, targets)
+        swept: Dict[str, List[int]] = {}
+        if need:
+            self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(need))
+            swept = self._naabu(need, "all", "deep")
+        for h, ps in indexed.items():
+            swept.setdefault(h, [])
+            swept[h] = sorted(set(swept[h]) | set(ps))
         known = {p.port for t in targets for p in t.ports if p.proto == "tcp"}
         new_ports = sorted({p for ports in swept.values() for p in ports} - known)
         if not new_ports:
@@ -503,6 +516,73 @@ class Engine:
             self.store.save_host(t.host, t.ip or "", {
                 "ports": [p.__dict__ for p in t.ports]})
         self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
+
+    def _netlas_ports(self, hosts: List[str]) -> Dict[str, List[int]]:
+        """Ports Netlas has indexed for these hosts (candidates, not facts).
+
+        Empty unless NETLAS_API_KEY is set and passive sources are allowed. The
+        answers are cached under raw/, so a resumed scan or the deep wave does
+        not ask twice.
+        """
+        if not (self.cfg.netlas and self.cfg.passive and netlas.available()):
+            return {}
+        memo = getattr(self, "_netlas_memo", None)
+        if memo is None:
+            memo = self._netlas_memo = {}
+        raw_dir = os.path.join(self.cfg.out_dir, "raw")
+        try:
+            os.makedirs(raw_dir, exist_ok=True)
+        except OSError:
+            pass
+        todo = [h for h in hosts if h not in memo]
+        if todo:
+            got = netlas.lookup(todo, say=lambda m: self.ctx.say("ports", m),
+                                cache_path=os.path.join(raw_dir, "netlas-cache.json"),
+                                stop=tools.SKIP)
+            for h in todo:
+                memo[h] = got.get(h, [])
+        out = {h: memo[h] for h in hosts if memo.get(h)}
+        if out:
+            self.ctx.say("ports", "netlas knows ports for %d of %d host(s)"
+                         % (len(out), len(hosts)))
+        return out
+
+    def _fit_deep_budget(self, hosts: List[str], targets: List[Target]) -> List[str]:
+        """Trim the deep wave to the time budget, instead of letting it run for
+        days and time out batch after batch.
+
+        A full-range sweep is 65535 probes per host; at the constrained 300/s
+        that is ~3.6 minutes per host, so thousands of hosts is weeks. Hosts
+        that already answered somewhere are kept first (a host with nothing
+        open in the main sweep is the likeliest to be filtered). Whatever is
+        dropped is written to raw/unscanned-deep-budget.txt and said plainly.
+        """
+        budget = self.cfg.deep_budget_hours * 3600.0
+        if not hosts or budget <= 0:
+            return hosts
+        total = tools.sweep_seconds(len(hosts), "all", self.tune)
+        if total <= budget:
+            return hosts
+        live = {t.host for t in targets if t.ports}
+        ordered = [h for h in hosts if h in live] + [h for h in hosts if h not in live]
+        per_host = tools.sweep_seconds(1, "all", self.tune)
+        keep = max(0, int(budget // per_host))
+        kept, dropped = ordered[:keep], ordered[keep:]
+        self.ctx.say("ports", "deep sweep of %d host(s) would take ~%.0fh (budget %.0fh): "
+                              "sweeping %d, skipping %d - raise --deep-budget or use "
+                              "--no-deep-ports"
+                     % (len(hosts), total / 3600.0, budget / 3600.0, len(kept), len(dropped)))
+        try:
+            with open(os.path.join(self.cfg.out_dir, "raw", "unscanned-deep-budget.txt"),
+                      "w", encoding="utf-8") as fh:
+                fh.write("\n".join(dropped) + "\n")
+        except OSError:
+            pass
+        tools._ledger("naabu-coverage", ["naabu", "all", "%d host(s)" % len(hosts)],
+                      1, "timeout", 0.0,
+                      "deep sweep trimmed to budget; NOT swept (%d): %s"
+                      % (len(dropped), ", ".join(dropped[:200])))
+        return kept
 
     # A host that "has" this many open ports almost always has a firewall,
     # SYN proxy or tarpit answering for ports nothing is listening on.
@@ -623,8 +703,16 @@ class Engine:
         if self.ctx.has("naabu") and self.ctx.has("nmap") and len(hosts) > 1:
             self.ctx.say("ports", "naabu sweep (%s) across %d host(s)"
                          % (spec, len(hosts)))
-            record_hosts = list(hosts)
-            swept = self._naabu(hosts, spec, xml_prefix)
+            indexed = self._netlas_ports(hosts)
+            sweep_hosts = ([h for h in hosts if h not in indexed]
+                           if self.cfg.netlas_trust else list(hosts))
+            if self.cfg.netlas_trust and indexed:
+                self.ctx.say("ports", "netlas-trust: naabu skipped for %d host(s)"
+                             % (len(hosts) - len(sweep_hosts)))
+            record_hosts = list(sweep_hosts)
+            swept = self._naabu(sweep_hosts, spec, xml_prefix) if sweep_hosts else {}
+            for h, ps in indexed.items():
+                swept[h] = sorted(set(swept.get(h, [])) | set(ps))
             self._record_coverage(record_hosts, orig_spec)
             open_ports = sorted({p for ports in swept.values() for p in ports})
             if open_ports:

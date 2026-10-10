@@ -141,6 +141,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-deep-ports", action="store_true",
                    help="skip the serial full-range naabu wave for obscure TCP ports "
                         "(on by default except the deep profile, which already sweeps all ports)")
+    s.add_argument("--deep-budget", type=float, default=None, metavar="HOURS",
+                   help="cap the deep full-range wave at this many hours of probing "
+                        "(default 8; 0 = no cap). Over budget, hosts Netlas covers are "
+                        "dropped first, then hosts with no open ports; the rest are "
+                        "listed in raw/unscanned-deep-budget.txt")
+    s.add_argument("--no-netlas", action="store_true",
+                   help="do not query Netlas.io for known open ports (used automatically "
+                        "when NETLAS_API_KEY is set and passive sources are allowed)")
+    s.add_argument("--netlas-trust", action="store_true",
+                   help="skip the naabu sweep for hosts Netlas already has ports for; "
+                        "faster, but a port Netlas never indexed is missed. nmap -sV "
+                        "still confirms everything it reports")
     s.add_argument("--no-passive", action="store_true",
                    help="do not query third-party OSINT/CVE sources (on by default)")
     s.add_argument("--aggressive", action="store_true",
@@ -424,6 +436,10 @@ def _ask_scan_options(args) -> None:
         console.print("\n  [dim]questions skipped - using defaults for the rest[/dim]")
         return
     console.print("  [dim]running: %s[/dim]" % ", ".join(chosen))
+    if (getattr(args, "portscan", True) and not getattr(args, "no_netlas", False)
+            and not getattr(args, "no_passive", False)):
+        from assay import netlas
+        netlas.prompt_for_key(console)
 
 
 def make_config(args) -> Config:
@@ -521,6 +537,10 @@ def make_config(args) -> Config:
         udp=not getattr(args, "no_udp", False) and not getattr(args, "safe", False),
         deep_ports=not getattr(args, "no_deep_ports", False),
         sweep_batches=int(getattr(args, "sweep_batches", 0) or 0),
+        deep_budget_hours=(8.0 if getattr(args, "deep_budget", None) is None
+                           else float(args.deep_budget)),
+        netlas=not getattr(args, "no_netlas", False),
+        netlas_trust=bool(getattr(args, "netlas_trust", False)),
         rescan=bool(getattr(args, "rescan", False)),
         expand=not getattr(args, "no_expand", False),
         oob=not getattr(args, "no_oob", False),

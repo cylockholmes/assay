@@ -570,3 +570,16 @@ ffuf,seclists`, then `--profile deep`). `--aggressive` enables state-changing
 checks — confirm it's within the program's rules first. Findings are leads with
 evidence attached, not submissions — reproduce by hand (every finding ships a
 `curl`) before reporting.
+
+## Netlas.io port seeding
+
+Set `NETLAS_API_KEY` (or paste it when `assay scan` asks; blank skips) and assay
+looks each host up on Netlas before sweeping. Ports Netlas has indexed are added
+to the candidates nmap `-sV` confirms; in the deep wave they replace the
+65535-port naabu sweep for covered hosts, and naabu still sweeps every host
+Netlas has nothing on. `--netlas-trust` also skips the main naabu sweep for
+covered hosts. `--no-netlas` or `--no-passive` turns it off. Hostnames/IPs are
+sent to Netlas, and its data can be stale, so it is never reported unconfirmed.
+
+The deep wave is capped by `--deep-budget HOURS` (default 8) so it cannot run for
+days; hosts dropped are listed in `raw/unscanned-deep-budget.txt`.

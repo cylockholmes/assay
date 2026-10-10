@@ -1423,7 +1423,17 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
 # Aim each batch at no more than this much probing, so a timeout loses a
 # slice of the work rather than the whole sweep.
 NAABU_BATCH_TARGET_SECONDS = 2 * 3600.0
-NAABU_MAX_BATCHES = 50
+# Upper bound on batches is the host count, not a constant: a fixed 50 made
+# every batch of a full-range sweep over a few thousand hosts several times
+# larger than the per-batch time limit, so each one timed out, was halved and
+# timed out again.
+NAABU_MAX_BATCHES = 10_000
+
+
+def sweep_seconds(n_hosts: int, port_spec: str, tune: Dict) -> float:
+    """Raw probing time for a sweep at the configured rate (no slack)."""
+    rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
+    return n_hosts * port_count(port_spec) / rate
 
 
 def plan_batches(hosts: Sequence[str], port_spec: str, tune: Dict,
@@ -1436,9 +1446,11 @@ def plan_batches(hosts: Sequence[str], port_spec: str, tune: Dict,
     if requested and requested > 0:
         n = requested
     else:
-        rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
-        est = len(hosts) * port_count(port_spec) / rate
-        n = int(-(-est // NAABU_BATCH_TARGET_SECONDS))
+        est = sweep_seconds(len(hosts), port_spec, tune)
+        # A batch must also finish inside the per-batch deadline, which is
+        # NAABU_SLACK x its raw time capped at NAABU_TIMEOUT_CAP.
+        target = min(NAABU_BATCH_TARGET_SECONDS, NAABU_TIMEOUT_CAP / NAABU_SLACK)
+        n = int(-(-est // target))
     n = max(1, min(n, NAABU_MAX_BATCHES, len(hosts)))
     size = -(-len(hosts) // n)
     return [hosts[i:i + size] for i in range(0, len(hosts), size)]

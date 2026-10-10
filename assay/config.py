@@ -298,6 +298,9 @@ class Config:
     sweep_batches: int = 0
     sweep_max_splits: int = 3               # how often a timed-out batch is halved and re-run
     deep_ports: bool = True                  # serial full-range naabu wave for obscure TCP ports
+    deep_budget_hours: float = 8.0          # cap on the deep wave's raw probing time; 0 = no cap
+    netlas: bool = True                     # seed port discovery from Netlas when NETLAS_API_KEY is set
+    netlas_trust: bool = False              # skip naabu for hosts Netlas already knows (faster, less complete)
     expand: bool = True                     # grow the target list via recon
     oob: bool = True                        # out-of-band callbacks for blind checks
     oob_domain: str = ""                    # e.g. a Burp Collaborator payload domain
