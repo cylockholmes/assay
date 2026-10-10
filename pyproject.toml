@@ -6,7 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "assay"
 dynamic = ["version"]
 description = "Signal-first recon and triage for authorized offensive testing"
+readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Joshua Krizek"}]
+keywords = ["security", "recon", "pentesting", "bug-bounty", "osint", "offensive-security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
 dependencies = [
     "requests>=2.28",
     "urllib3>=1.26",
@@ -14,10 +26,15 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/cylockholmes/assay"
+Issues = "https://github.com/cylockholmes/assay/issues"
+
 [project.optional-dependencies]
 # Only the --ai-backend=api route needs the SDK. --ai-backend=claude-cli shells
 # out to the Claude Code binary and has no Python dependency at all.
 ai = ["anthropic>=0.40"]
+dev = ["pytest>=7", "ruff>=0.5", "build", "twine"]
 
 [project.scripts]
 assay = "assay.cli:main"
