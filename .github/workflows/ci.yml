@@ -11,12 +11,25 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TESTS_DEPLOY_KEY: ${{ secrets.TESTS_DEPLOY_KEY }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+
+      # The test suite lives in a private repo (cylockholmes/assay-tests) and is
+      # pulled in with a read-only deploy key. Forks and Dependabot PRs get no
+      # secrets, so the step is skipped there rather than failing the run.
+      - name: Fetch private test suite
+        if: env.TESTS_DEPLOY_KEY != ''
+        uses: actions/checkout@v4
+        with:
+          repository: cylockholmes/assay-tests
+          ssh-key: ${{ secrets.TESTS_DEPLOY_KEY }}
+          path: tests
 
       - uses: actions/setup-python@v5
         with:
@@ -41,7 +54,7 @@ jobs:
           if [ -d tests ]; then
             python -m pytest tests/ -q
           else
-            echo "No tests/ directory in this repository yet - skipping"
+            echo "::warning::tests/ not available (no TESTS_DEPLOY_KEY) - skipping"
           fi
 
   package:

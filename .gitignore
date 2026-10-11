@@ -28,7 +28,9 @@ burp*.xml
 
 # --- tests: kept local, never published -----------------------------------
 # The test suite stays on the developer's machine (it still runs) but is not
-# part of the public repo. Stripped from history too.
+# part of the public repo. Stripped from history too. It lives in the private
+# repo cylockholmes/assay-tests (nested clone at tests/); CI fetches it with a
+# deploy key.
 tests/
 
 # --- python ---------------------------------------------------------------
