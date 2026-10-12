@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List
+import threading
+from typing import Dict, List, Optional
 
 from assay import owasp, tools
 from assay.context import Context
@@ -72,7 +73,7 @@ class ContentDiscoveryModule(Module):
         # Didn't reach the end of the list? Record exactly where it stopped so
         # the CLI can offer to resume it at the end of the run instead of
         # redoing the front.
-        if not sweep.done:
+        if not sweep.done and not sweep.stalled:
             ctx.defer_content({"origin": origin, "wordlist": wordlist,
                                "extensions": extensions, "reached": sweep.reached,
                                "total": sweep.total, "coverage": sweep.coverage})
@@ -147,7 +148,8 @@ class ContentDiscoveryModule(Module):
             dedupe_key="content|%s" % origin,
         )]
 
-    def finalize(self, ctx: Context, job: Dict) -> List[Finding]:
+    def finalize(self, ctx: Context, job: Dict,
+                 stop: Optional[threading.Event] = None) -> List[Finding]:
         """Resume a cut-short pass from exactly where it stopped. Budgeted in
         hours, not minutes, because the operator explicitly asked to finish it;
         it still banks partial progress if even this runs out. The finding's
@@ -163,7 +165,12 @@ class ContentDiscoveryModule(Module):
             timeout=6 * 3600.0,
             start=start,
         )
+        # A stop-all cuts the pass through the same SKIP an 's' does; name it
+        # for what the operator actually pressed.
+        if sweep.skipped and stop is not None and stop.is_set():
+            sweep.skipped, sweep.stopped = False, True
         ctx.say("content", "%s %s" % (origin, sweep.coverage))
+        self.last_sweep = sweep
         return self._ingest(ctx, origin, wordlist, sweep.results, sweep.coverage)
 
     @staticmethod
@@ -179,17 +186,49 @@ class ContentDiscoveryModule(Module):
         return ".txt,.bak,.old,.json,.xml"
 
 
-def finalize_pending(ctx: Context) -> int:
+def finalize_pending(ctx: Context,
+                     stop: Optional[threading.Event] = None) -> Dict[str, int]:
     """Finish every content-discovery pass that was cut short earlier in the
-    run, emitting any new findings directly. Returns how many passes ran. A
-    no-op when nothing was deferred; the CLI calls this only after the
-    operator opts in."""
+    run, emitting any new findings directly. Returns how the passes ended:
+    finished (swept the list), skipped (operator 's'), stopped (cut by a
+    stop-all), partial (ran out of time) and not_run (never started after a
+    stop). A no-op
+    when nothing was deferred; the CLI calls this only after the operator
+    opts in.
+
+    Each pass is its own unit for tools.SKIP: it is cleared before every pass,
+    so 's' cuts only the pass in flight (keeping whatever its finished shards
+    banked) and the next one still runs. `stop`, when set, ends the whole
+    finalize after the current pass instead.
+    """
+    tally = {"finished": 0, "skipped": 0, "stopped": 0, "partial": 0,
+             "not_run": 0}
     jobs = list(ctx.deferred_content)
     if not jobs:
-        return 0
+        return tally
     mod = ContentDiscoveryModule()
-    for job in jobs:
-        for f in mod.finalize(ctx, job):
+    for n, job in enumerate(jobs, 1):
+        if stop is not None and stop.is_set():
+            tally["not_run"] += len(jobs) - n + 1
+            break
+        tools.SKIP.clear()
+        tools.wait_while_paused()
+        if stop is not None and stop.is_set():
+            tally["not_run"] += len(jobs) - n + 1
+            break
+        ctx.say("content", "pass %d/%d" % (n, len(jobs)))
+        mod.last_sweep = None
+        for f in mod.finalize(ctx, job, stop=stop):
             ctx.emit(f)
+        sweep = mod.last_sweep
+        if sweep is not None and sweep.done:
+            tally["finished"] += 1
+        elif sweep is not None and sweep.stopped:
+            tally["stopped"] += 1
+        elif sweep is not None and sweep.skipped:
+            tally["skipped"] += 1
+        else:
+            tally["partial"] += 1
+    tools.SKIP.clear()
     ctx.deferred_content.clear()
-    return len(jobs)
+    return tally

@@ -59,6 +59,11 @@ class ParsedTargets:
     excluded: List[str] = field(default_factory=list)
     source_format: str = "list"
     skipped: List[str] = field(default_factory=list)   # (value, reason)
+    # Burp host regexes that name no single host or domain. Nothing to scan,
+    # but still scope: kept as "re:" rules so an include still admits what it
+    # matches and, more importantly, an exclude is still enforced.
+    scope_allow: List[str] = field(default_factory=list)
+    scope_deny: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -160,34 +165,54 @@ def from_burp(raw: str) -> Optional[ParsedTargets]:
                 bucket.append("%s://%s%s/" % (parts.scheme or "https",
                                               parts.hostname, port))
                 continue
-            host = _host_from_regex(e.get("host") or "")
-            if host:
-                bucket.append(host)
+            hosts = _hosts_from_regex(e.get("host") or "")
+            if hosts:
+                bucket.extend(h for h in hosts if h not in bucket)
             elif e.get("host"):
-                out.skipped.append("%s (host pattern too general to scan)"
-                                   % e.get("host"))
+                rule = "re:" + e["host"]
+                if key == "exclude":
+                    out.scope_deny.append(rule)
+                else:
+                    out.scope_allow.append(rule)
+                    out.skipped.append("%s (regex names no host to scan - "
+                                       "kept as a scope rule)" % e["host"])
     return out
 
 
-def _host_from_regex(pattern: str) -> str:
-    """Recover a hostname from Burp's advanced-mode regex, where possible."""
+# Every way Burp exports (or people hand-write) "any subdomain of", mapped
+# to whether the form also matches the apex itself. Longest first, so a
+# group form is never half-consumed by the bare ".*" below it.
+_WILDCARD_LEADS = (
+    (r"(.*\.)?", True), (r"(.+\.)?", True),
+    (r"([^.]*\.)*", True), (r"([^.]+\.)*", True), (r"([^.]+\.)+", False),
+    (r".*\.", False), (r".+\.", False), (r"[^.]*\.", False), (r"[^.]+\.", False),
+    (r".*", False), (r".+", False),
+)
+
+
+def _hosts_from_regex(pattern: str) -> List[str]:
+    """Recover hostnames from Burp's advanced-mode regex, where possible:
+    [host], [*.domain], or [domain, *.domain] for a form that admits the
+    apex too (fnmatch's *.domain does not match the bare domain)."""
     p = (pattern or "").strip()
     if not p:
-        return ""
+        return []
     p = p.lstrip("^").rstrip("$")
-    wildcard = False
-    for lead in (r".*\.", r"[^.]*\.", r".*"):
+    wildcard = with_apex = False
+    for lead, apex in _WILDCARD_LEADS:
         if p.startswith(lead):
             p = p[len(lead):]
-            wildcard = True
+            wildcard, with_apex = True, apex
             break
     p = p.replace(r"\.", ".").replace(r"\-", "-")
     # Anything with regex metacharacters left is not a literal host.
     if re.search(r"[\\\[\]\(\)\|\+\?\*\{\}]", p):
-        return ""
+        return []
     if not p or not HOSTLIKE.match(p):
-        return ""
-    return ("*." + p) if wildcard else p
+        return []
+    if not wildcard:
+        return [p]
+    return ([p] if with_apex else []) + ["*." + p]
 
 
 def parse(raw: str) -> ParsedTargets:
@@ -299,6 +324,8 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
                 seen.add(t.lower())
                 merged.targets.append(t)
         merged.excluded += [e for e in part.excluded if e not in merged.excluded]
+        merged.scope_allow += [r for r in part.scope_allow if r not in merged.scope_allow]
+        merged.scope_deny += [r for r in part.scope_deny if r not in merged.scope_deny]
         merged.skipped += part.skipped
         merged.warnings += [w for w in part.warnings if w not in merged.warnings]
         formats.append(part.source_format)
@@ -357,4 +384,6 @@ def as_scope(parsed: ParsedTargets) -> "Tuple[List[str], List[str]]":
         host = urlsplit(e).hostname if "://" in e else e
         if host and host not in deny:
             deny.append(host)
+    allow += [r for r in parsed.scope_allow if r not in allow]
+    deny += [r for r in parsed.scope_deny if r not in deny]
     return allow, deny

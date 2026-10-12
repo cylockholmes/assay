@@ -294,7 +294,7 @@ class _Heartbeat:
         while not self._done.wait(self.every):
             if SKIP.is_set() and self._proc is not None:
                 self.was_skipped = True
-                _say("%s: skipped - moving on to the next stage" % self.name,
+                _say("%s: skipped by operator" % self.name,
                      tick=False)
                 _stop(self._proc)
                 return
@@ -441,7 +441,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         # The operator already asked to move past this stage before this
         # call even started - honour it immediately rather than spawning
         # something only to kill it moments later.
-        _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
+        _say("%s: skipped by operator" % (cmd[0] if cmd else "?"),
              tick=False)
         return _ledger_proc(
             Proc(rc=-1, out="", err="skipped by operator", cmd=list(cmd), skipped=True), t0)
@@ -500,7 +500,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     if SKIP.is_set():
         # See run()'s identical check: honour a skip already in effect
         # before spawning anything, rather than starting only to kill it.
-        _say("%s: skipped - moving on to the next stage" % (cmd[0] if cmd else "?"),
+        _say("%s: skipped by operator" % (cmd[0] if cmd else "?"),
              tick=False)
         if ledger:
             _ledger(cmd[0].split("/")[-1] if cmd else "?", list(cmd), -1,
@@ -1841,6 +1841,12 @@ class FfufSweep:
     done: bool = False         # the whole wordlist was swept
     killed: bool = False       # a shard was hard-killed before it could flush
     wordlist: str = ""
+    speed: float = 0.0         # measured words/s over finished shards (0 = none)
+    # Not even a small probe shard finished: the origin is too slow or not
+    # answering ffuf at all. Not worth queueing for an hours-long resume.
+    stalled: bool = False
+    skipped: bool = False      # cut short by the operator's 's', not the clock
+    stopped: bool = False      # cut short by the operator stopping everything
 
     @property
     def coverage(self) -> str:
@@ -1848,11 +1854,23 @@ class FfufSweep:
         took = human_duration(self.elapsed)
         if self.done:
             return "%s: swept all %d words in %s" % (name, self.total, took)
+        if self.stalled:
+            return ("%s: no shard finished in %s - the origin is too slow or not "
+                    "answering ffuf; not worth resuming" % (name, took))
         pct = (" (%d%%)" % (100 * self.reached // self.total)) if self.total else ""
+        pace = " at ~%.0f words/s" % self.speed if self.speed else ""
+        if self.stopped:
+            return ("%s: %d/%d words%s in %s%s - stopped; resume picks up from "
+                    "word %d" % (name, self.reached, self.total, pct, took, pace,
+                                 self.reached))
+        if self.skipped:
+            return ("%s: %d/%d words%s in %s%s - skipped; resume picks up from "
+                    "word %d" % (name, self.reached, self.total, pct, took, pace,
+                                 self.reached))
         tail = " - a shard was hard-killed, some of its hits lost" if self.killed else ""
-        return ("%s: %d/%d words%s in %s - stopped on the time budget; resume "
+        return ("%s: %d/%d words%s in %s%s - stopped on the time budget; resume "
                 "picks up from word %d%s"
-                % (name, self.reached, self.total, pct, took, self.reached, tail))
+                % (name, self.reached, self.total, pct, took, pace, self.reached, tail))
 
 
 # Each shard aims at roughly this many seconds of requests at the rate cap, so
@@ -1861,6 +1879,12 @@ class FfufSweep:
 # worth of progress, large enough that per-shard ffuf startup and -ac
 # calibration stay negligible.
 _SHARD_SECONDS = 300.0
+# The first shard is a probe, sized off the rate cap because nothing has been
+# measured yet. The cap is a ceiling, not a forecast - latency, ffuf's thread
+# count and the pacer's own back-off all hold real throughput under it - so a
+# full-size first shard sized off it overran the standard profile's budget on
+# nearly every host and banked nothing. Later shards size off measured speed.
+_FIRST_SHARD_SECONDS = 60.0
 
 
 def ffuf_sweep(url: str, wordlist: str, tune: Dict,
@@ -1886,6 +1910,10 @@ def ffuf_sweep(url: str, wordlist: str, tune: Dict,
     n_ext = len([e for e in extensions.split(",") if e]) if extensions else 0
     shard_words = max(200, int(rate * _SHARD_SECONDS / (1 + n_ext)))
 
+    cap_speed = shard_words / _SHARD_SECONDS     # words/s at the rate cap
+    speed = 0.0          # measured; 0 until a shard finishes
+    probed = False       # already retried a missed probe with a smaller one
+
     sweep = FfufSweep(total=total, wordlist=wordlist,
                       reached=min(max(0, start), total))
     t0 = time.time()
@@ -1897,14 +1925,26 @@ def ffuf_sweep(url: str, wordlist: str, tune: Dict,
         # progress; stop here and leave the rest for a resume.
         if remaining < 45:
             break
-        chunk = words[i:i + shard_words]
+        # Plan to finish well inside the -maxtime ffuf_discover derives from
+        # `remaining`, so a shard stops on its own word count, not the clock.
+        usable = 0.6 * max(30.0, remaining - max(60.0, remaining * 0.1))
+        secs = _SHARD_SECONDS if speed else min(_FIRST_SHARD_SECONDS, _SHARD_SECONDS)
+        if probed and not speed:
+            secs /= 8.0
+        n = max(50, int((speed or cap_speed) * min(secs, usable)))
+        chunk = words[i:i + n]
+        # Cut a shard that runs far past its plan instead of handing it the
+        # whole remaining budget: against an origin that is not really
+        # answering, that was up to six hours of a resume on one host.
+        planned_secs = len(chunk) / (speed or cap_speed)
+        shard_timeout = min(remaining, planned_secs * 3 + 60.0)
         tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                           encoding="utf-8")
         try:
             tmp.write("\n".join(chunk) + "\n")
             tmp.close()
             fr = ffuf_discover(url, env.to_wsl_path(tmp.name), tune,
-                               extensions=extensions, timeout=remaining)
+                               extensions=extensions, timeout=shard_timeout)
         finally:
             try:
                 os.unlink(tmp.name)
@@ -1914,16 +1954,30 @@ def ffuf_sweep(url: str, wordlist: str, tune: Dict,
         if fr.completed:
             i += len(chunk)
             sweep.reached = min(i, total)
+            if fr.elapsed >= 1.0:
+                speed = len(chunk) / fr.elapsed
+                sweep.speed = speed
+            continue
+        # The first probe missed: the host may just be much slower than the
+        # cap. One much smaller probe tells slow from dead before giving up.
+        if not speed and not probed and not SKIP.is_set():
+            probed = True
+            sweep.killed = sweep.killed or fr.killed
             continue
         # The shard did not finish inside the budget (stopped on its own
         # -maxtime, was hard-killed, or errored): leave `reached` at this
         # shard's start so a resume redoes only this shard, not the ones
         # already banked before it.
         sweep.reached = i
-        sweep.killed = fr.killed
+        sweep.killed = sweep.killed or fr.killed
+        sweep.skipped = SKIP.is_set()
         break
     sweep.elapsed = time.time() - t0
     sweep.done = sweep.reached >= total
+    # Nothing banked, and not because the operator skipped it or the budget
+    # was too short to try: the origin cannot sustain a fuzz worth resuming.
+    sweep.stalled = (not sweep.done and sweep.reached == min(max(0, start), total)
+                     and probed and not SKIP.is_set())
     return sweep
 
 

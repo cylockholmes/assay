@@ -10,6 +10,7 @@ import signal
 import stat
 import sys
 import textwrap
+import threading
 from typing import Dict, List, Optional
 
 from assay import env, notify, tools, version_string
@@ -673,15 +674,57 @@ def _finalize_content(engine, args) -> None:
     saved = engine.ctx.progress
     engine.ctx.progress = lambda stage, msg, advance=0: console.print(
         "  [dim]%s[/dim] %s" % (stage, msg))
+
+    # The scan's own key listener stopped with the dashboard, so without a
+    # fresh one here nothing reads s/p for what can be hours of ffuf. Started
+    # only after input() above has returned: the listener puts the tty in
+    # cbreak mode, which would eat the y/N answer.
+    stop_all = threading.Event()
+    listener = KeyListener()
+
+    def on_key(ch: str) -> None:
+        c = ch.lower()
+        if c == "s":
+            tools.SKIP.set()
+            console.print("  [yellow]skipping this pass[/yellow] - its finished "
+                          "shards are kept; moving to the next one")
+        elif c == "q":
+            stop_all.set()
+            tools.SKIP.set()
+            tools.PAUSE.clear()
+            console.print("  [yellow]stopping[/yellow] - ending the current pass "
+                          "and leaving the rest unfinished")
+        elif c == "p" and not tools.PAUSE.is_set():
+            tools.PAUSE.set()
+            console.print("  [yellow]paused[/yellow] - takes hold when the running "
+                          "shard ends (a few minutes at most); [bold]r[/bold] resumes")
+        elif c == "r" and tools.PAUSE.is_set():
+            tools.PAUSE.clear()
+            console.print("  [green]resumed[/green]")
+
+    listener.on_key = on_key
+    tools.SKIP.clear()
+    if listener.start():
+        # Escaped: rich reads a bare [s] as its strikethrough tag and drops it.
+        console.print("  [dim]\\[s] skip this pass  \\[p] pause  \\[r] resume  "
+                      "\\[q] stop all  (Ctrl-C also stops)[/dim]")
     try:
-        ran = web_content.finalize_pending(engine.ctx)
+        tally = web_content.finalize_pending(engine.ctx, stop=stop_all)
     except KeyboardInterrupt:
         console.print("\n[yellow]interrupted - whatever finished is saved[/yellow]")
-        ran = 0
+        tally = {}
     finally:
+        listener.stop()
+        tools.SKIP.clear()
+        tools.PAUSE.clear()
         engine.ctx.progress = saved
-    if ran:
-        console.print("  [green]finalized %d pass(es)[/green]" % ran)
+    parts = ["%d %s" % (tally[k], label) for k, label in
+             (("finished", "finished the wordlist"), ("partial", "partly done"),
+              ("skipped", "skipped"), ("stopped", "stopped"),
+              ("not_run", "not started"))
+             if tally.get(k)]
+    if parts:
+        console.print("  [green]resume done[/green] - %s" % ", ".join(parts))
 
 
 def cmd_scan(args) -> int:
