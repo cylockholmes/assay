@@ -495,7 +495,7 @@ def make_config(args) -> Config:
                   % (len(targets), parsed.source_format, scope_source))
     if wildcards:
         console.print("  [dim]%d wildcard(s) in scope but not scanned (%s) - "
-                      "--expand enumerates them[/dim]"
+                      "expansion (on unless --no-expand) enumerates them[/dim]"
                       % (len(wildcards), ", ".join(wildcards[:3])))
     if deny:
         console.print("  [dim]%d exclusion(s) applied[/dim]" % len(deny))
@@ -1918,7 +1918,7 @@ def cmd_scope(args) -> int:
 
     if wild:
         console.print("\n  [bold]scope only[/bold] (not directly scannable; "
-                      "use --expand to enumerate)")
+                      "enumerated by expansion, which is on unless --no-expand)")
         for w in wild:
             console.print("    %s" % w)
     if parsed.excluded:

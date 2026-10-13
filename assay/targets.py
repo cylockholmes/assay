@@ -166,6 +166,17 @@ def from_burp(raw: str) -> Optional[ParsedTargets]:
                                               parts.hostname, port))
                 continue
             hosts = _hosts_from_regex(e.get("host") or "")
+            if key == "exclude":
+                # Advanced mode scopes an exclude by file as well as host.
+                # Only a whole-host exclude may become a host deny; a narrower
+                # one would silently drop an in-scope target.
+                f = e.get("file")
+                if f and f not in ("^/.*", "^/", ".*", "^.*$", "^/.*$"):
+                    out.skipped.append(
+                        "%s %s (excludes a path, not a host - assay's scope is "
+                        "host-level, so this rule cannot be applied)"
+                        % (e.get("host") or "", f))
+                    continue
             if hosts:
                 bucket.extend(h for h in hosts if h not in bucket)
             elif e.get("host"):

@@ -358,7 +358,7 @@ Three behaviours that each prevent a silent mistake:
 - **Scope is enforced by default** — no unscoped mode; a redirect off-target is
   not followed.
 - **A wildcard is scope, not a target** — `*.corp.example.com` widens scope
-  without being scanned; `--expand` enumerates it into real hosts.
+  without being scanned; expansion (on by default) enumerates it into real hosts.
 - **A Burp path exclusion is reported, not applied** — assay's scope is
   host-level, so it says the rule could not be applied rather than dropping the
   whole target.
