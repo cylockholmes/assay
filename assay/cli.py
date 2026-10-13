@@ -437,6 +437,14 @@ def _ask_scan_options(args) -> None:
         console.print("\n  [dim]questions skipped - using defaults for the rest[/dim]")
         return
     console.print("  [dim]running: %s[/dim]" % ", ".join(chosen))
+    # Ask for the API key now, not after the scan: the answer is only needed
+    # once triage starts, but nobody wants to wait through a scan to find out.
+    if (getattr(args, "ai", False) or getattr(args, "ai_loop", False)) \
+            and getattr(args, "ai_backend", None) == "api" \
+            and not getattr(args, "ai_dry_run", False):
+        from assay import ai as ai_mod
+        if not ai_mod.credential_status()[0]:
+            ai_mod.prompt_for_key(console)
     if (getattr(args, "portscan", True) and not getattr(args, "no_netlas", False)
             and not getattr(args, "no_passive", False)):
         from assay import netlas
