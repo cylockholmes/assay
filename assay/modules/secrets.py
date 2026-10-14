@@ -110,6 +110,8 @@ class SecretsModule(Module):
                 if token in seen_secret:
                     continue
                 seen_secret.add(token)
+                if label == "Google API key":
+                    ctx.note_google_key(token, url)
                 out.append(Finding(
                     title="%s exposed in client-side asset" % label,
                     target=url,
@@ -175,7 +177,7 @@ class SecretsModule(Module):
                 urls.append(u)
         return urls
 
-    def _scan_map_sources(self, url: str, body: str,
+    def _scan_map_sources(self, ctx: Context, url: str, body: str,
                           out: List[Finding]) -> None:
         """Run the secret patterns over sourcesContent inside a source map."""
         try:
@@ -193,6 +195,8 @@ class SecretsModule(Module):
                     continue
                 token = m.group(0)
                 name = names[i] if i < len(names) else "(unknown)"
+                if label == "Google API key":
+                    ctx.note_google_key(token, url)
                 out.append(Finding(
                     title="%s exposed in source map original source" % label,
                     target=url,
@@ -232,7 +236,7 @@ class SecretsModule(Module):
         # they carry comments and literals the bundle no longer shows. Secrets
         # that were stripped from the shipped file often survive here.
         if has_content:
-            self._scan_map_sources(url, r.body, out_findings)
+            self._scan_map_sources(ctx, url, r.body, out_findings)
         return Finding(
             title="JavaScript source map published in production",
             target=url,

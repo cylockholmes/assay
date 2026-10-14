@@ -34,6 +34,13 @@ INFRA_HOSTS = {
     "crt.sh", "web.archive.org", "archive.org", "rdap.org", "rdap.iana.org",
     "data.iana.org", "otx.alienvault.com", "urlscan.io", "index.commoncrawl.org",
     "dns.google", "cloudflare-dns.com", "services.nvd.nist.gov",
+    # Google API endpoints, exact hosts only (never the bare googleapis.com).
+    # Used solely to ask Google whether a key found on the target is accepted;
+    # the request goes to Google, not the target. See assay/gmaps.py.
+    "maps.googleapis.com", "roads.googleapis.com", "www.googleapis.com",
+    "addressvalidation.googleapis.com", "airquality.googleapis.com",
+    "aerialview.googleapis.com", "routes.googleapis.com",
+    "fcm.googleapis.com", "generativelanguage.googleapis.com",
 }
 
 

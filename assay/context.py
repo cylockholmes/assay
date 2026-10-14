@@ -34,6 +34,9 @@ class Context:
     # Recorded here so the CLI can offer, once the run is otherwise done, to
     # finish them off rather than leaving most of the wordlist untried.
     deferred_content: List[dict] = field(default_factory=list)
+    # Google API keys (AIza...) seen in client-side assets: key -> where it was
+    # found. Filled by the secrets module, drained by gmaps_key in a later stage.
+    google_keys: Dict[str, str] = field(default_factory=dict)
     # UI hook: fn(stage, message, advance)
     progress: Optional[Callable[[str, str, int], None]] = None
     # The stage whose messages are currently flowing. Remembered so that a
@@ -72,6 +75,10 @@ class Context:
         if new and finding.triage in ("CHASE", "LOOK"):
             self.say("finding", "%s  %s  [%s]" % (finding.triage, finding.title, finding.target))
         return new
+
+    def note_google_key(self, key: str, source: str) -> None:
+        with self._lock:
+            self.google_keys.setdefault(key, source)
 
     def defer_content(self, job: dict) -> None:
         """Record a content-discovery pass that did not finish. Locked: the
