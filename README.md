@@ -415,9 +415,55 @@ the profile, so `standard`/`deep` cost more than bare scans; `--no-passive
 ## Authentication and blind checks
 
 `--basic user:pass`, `--cookie` and `-H` apply to assay's own requests and pass
-through to httpx, nuclei and katana. Authenticated web-app logic (IDOR,
+through to httpx, nuclei, katana and ffuf. Authenticated web-app logic (IDOR,
 privilege escalation) is deliberately out of scope — it needs a human with two
 accounts.
+
+### Scanning behind a login, through Burp
+
+A fixed `--cookie` expires mid-scan, and from then on every request quietly
+returns the login page. Instead, let Burp own the session and send assay
+through it:
+
+```bash
+assay scan app.internal --scope scope.txt --proxy burp \
+  --session-check https://app.internal/account --session-expect 'Sign out' \
+  --seed sitemap.xml
+```
+
+**Burp (once per target)**
+
+1. *Proxy → Proxy settings → Listeners*: bind to **all interfaces**. From WSL in
+   NAT mode, also allow the port through the Windows firewall. `--proxy burp`
+   finds the Windows host address itself.
+2. *Settings → Sessions → Macros*: record the login request(s). If the form has
+   a CSRF token, have the macro take it from the login page response.
+3. *Settings → Sessions → Session handling rules*: add a rule that **checks
+   whether the session is valid** against a logged-in page (check only every N
+   requests). If it isn't, the rule **runs the macro** and **updates the
+   request with cookies from the cookie jar**. On the *Scope* tab, **tick
+   Proxy**. It is off by default, and without it nothing happens to assay's
+   traffic.
+4. Apps that use bearer tokens need an extension (e.g. ATOR). Macros only
+   refresh cookies.
+
+**assay**
+
+| flag | what it does |
+|---|---|
+| `--proxy URL\|burp` | every request to a target goes through Burp: assay's own, plus httpx, katana, nuclei, ffuf and arjun. Lookups against recon infrastructure go direct |
+| `--session-check URL` | a page only a logged-in user sees. Checked before the scan, which refuses to start if you're logged out, and every `--session-interval` seconds (default 60) during it |
+| `--session-expect REGEX` | text that page contains when logged in. Without it, a login form, 401/403 or redirect counts as logged out |
+| `--seed FILE` | Burp XML export or HAR of you browsing logged in. Its in-scope GET URLs join the injection pool and become katana start points. Pages behind a login are rarely reachable by crawling from `/` |
+| `--avoid REGEX` | add to the built-in avoid list: logout, sign-out, delete/remove/revoke…, password change/reset. Nothing on the list is ever requested by assay, crawled by katana or fuzzed by ffuf while the scan is authenticated. `--no-avoid-defaults` drops the built-in list |
+
+If the canary finds you logged out, it checks once more and then **pauses the
+scan**. It is the same pause as the `p` key, and a Slack ping goes out if a
+webhook is set. It resumes on its own once the canary passes again, so fixing
+the macro or logging in again in Burp's browser is enough. A tool already
+running when the session dropped finishes its current run, so findings from
+just before a pause deserve a second look. The run summary says how often it
+happened.
 
 Blind SSRF produces no response change, so the only evidence is an out-of-band
 callback. assay runs no listener: with `--oob-domain` (a Burp Collaborator

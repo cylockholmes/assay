@@ -201,6 +201,55 @@ def windows_host_ip() -> Optional[str]:
     return None
 
 
+BURP_PORT = 8080
+
+
+def burp_proxy_url(port: int = BURP_PORT) -> str:
+    """Where Burp's proxy listener is, as seen from here.
+
+    Burp runs on the Windows side. In WSL2's default NAT mode that is the
+    Windows host's address, not 127.0.0.1, and Burp's listener must be bound to
+    all interfaces (Proxy > Proxy settings > Listeners) for it to answer there.
+    In mirrored mode, and outside WSL, it is plain localhost.
+    """
+    host = "127.0.0.1"
+    if is_wsl() and wsl_networking_mode() == "nat":
+        host = windows_host_ip() or host
+    return "http://%s:%d" % (host, port)
+
+
+def _wslconfig_mirrored() -> bool:
+    """Does the Windows user's .wslconfig put WSL in mirrored networking?"""
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    try:
+        with open(os.path.join(home, ".wslconfig"), "r", encoding="utf-8",
+                  errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    return bool(re.search(r"^\s*networkingMode\s*=\s*mirrored\b", text,
+                          re.I | re.M))
+
+
+def proxy_for_tools(proxy: str) -> str:
+    """The proxy address as the external tools will see it.
+
+    Normally the same as assay's own. Under the WSL bridge (assay on Windows,
+    tools inside WSL), a loopback address names the distribution itself rather
+    than the Windows host where Burp listens - in NAT mode the tools need the
+    Windows host's address instead.
+    """
+    if not proxy or not use_wsl_bridge() or _wslconfig_mirrored():
+        return proxy
+    m = re.match(r"^(\w+://)(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(.*)$", proxy, re.I)
+    if not m:
+        return proxy
+    gw = wsl_gateway_ip()
+    if not gw:
+        return proxy
+    return m.group(1) + gw + (m.group(3) or "") + m.group(4)
+
+
 def open_in_browser(path: str) -> bool:
     """Open a local report. Under WSL this must hand off to Windows."""
     abspath = os.path.abspath(path)

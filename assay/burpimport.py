@@ -196,6 +196,34 @@ def worth_replaying(r: CapturedRequest, aggressive: bool = False) -> Tuple[bool,
     return True, "ready"
 
 
+def seed_urls(path: str) -> Tuple[List[str], Dict[str, int]]:
+    """URLs from a logged-in capture worth starting a crawl from.
+
+    GET and HEAD only - a captured POST may have changed something the first
+    time and would again. Static assets and error responses are dropped.
+    Returns (urls in capture order, deduplicated; counts of what was dropped).
+    """
+    reqs, _fmt = load(path)
+    out: List[str] = []
+    seen = set()
+    dropped = {"method": 0, "static": 0, "error": 0}
+    for r in reqs:
+        if r.method not in ("GET", "HEAD"):
+            dropped["method"] += 1
+            continue
+        if STATIC_RE.search(r.path):
+            dropped["static"] += 1
+            continue
+        if r.status >= 400:
+            dropped["error"] += 1
+            continue
+        url = r.url.split("#", 1)[0]
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out, dropped
+
+
 def dedupe(requests: Iterable[CapturedRequest]) -> List[CapturedRequest]:
     """One representative per (method, generalised path)."""
     seen: Dict[str, CapturedRequest] = {}

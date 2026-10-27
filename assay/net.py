@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import requests
 import urllib3
 
+from assay import tools
 from assay.config import Config
 from assay.models import Evidence
 
@@ -197,6 +198,11 @@ class HttpClient:
         self.journal = None                 # set by the engine
         self.throttle_events = 0
         self._last_throttle = 0.0
+        self.avoided = 0                    # requests the avoid list dropped
+        # Target traffic goes through cfg.proxy; recon infrastructure never
+        # does (Burp has no business holding a session for crt.sh).
+        self._proxies = ({"http": cfg.proxy, "https": cfg.proxy}
+                         if cfg.proxy else {})
 
     def _host_limiter(self, host: str) -> Optional[RateLimiter]:
         if self.cfg.rate_per_host <= 0:
@@ -251,20 +257,35 @@ class HttpClient:
         timeout: Optional[float] = None,
         stream_limit: int = MAX_BODY,
         infra: bool = False,
+        canary: bool = False,
     ) -> Resp:
         """`infra=True` marks a lookup against public recon infrastructure.
 
         It still has to be on the INFRA_HOSTS allowlist; the flag only means
         the caller knows this is not a target host. Nothing else can bypass
         the scope guard.
+
+        `canary=True` is the session canary's own probe: it must get through
+        while the scan is paused, since it is what decides to resume it.
         """
         host = urlsplit(url).hostname or ""
-        allowed = self.cfg.scope.allows(host) or (infra and is_infra(host))
-        if not allowed:
+        in_scope = self.cfg.scope.allows(host)
+        direct = not in_scope and infra and is_infra(host)
+        if not (in_scope or direct):
             with self._lock:
                 self._blocked.add(host)
             return Resp(url=url, status=0, headers={}, body="", elapsed=0.0,
                         method=method, error="out-of-scope")
+        if not direct and not canary and self.cfg.avoids(url):
+            with self._lock:
+                self.avoided += 1
+            return Resp(url=url, status=0, headers={}, body="", elapsed=0.0,
+                        method=method, error="avoided")
+        # A paused scan (operator 'p', or the session canary) holds target
+        # traffic here too, not only at the next tool launch: a module halfway
+        # through a list of URLs would otherwise keep testing a dead session.
+        if not direct and not canary:
+            tools.wait_while_paused()
 
         hdrs = self.cfg.request_headers()
         if headers:
@@ -297,6 +318,7 @@ class HttpClient:
                     timeout=tmo,
                     verify=not self.cfg.insecure,
                     stream=True,
+                    proxies={} if direct else self._proxies,
                 )
                 # Reading the raw stream ourselves (rather than r.content /
                 # r.iter_content) is what lets stream_limit cap the bytes we

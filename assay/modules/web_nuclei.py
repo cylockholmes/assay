@@ -72,11 +72,9 @@ class NucleiModule(Module):
 
         out: List[Finding] = []
         kept = dropped = 0
-        headers: Dict[str, str] = {}
-        auth = ctx.cfg.auth_header()
-        if auth:
-            headers["Authorization"] = auth
-        headers.update(ctx.cfg.headers)
+        # tool_headers, not just Authorization: nuclei used to drop --cookie
+        # and --tag, so an authenticated scan's templates ran logged out.
+        headers = ctx.cfg.tool_headers()
         for obj in tools.nuclei_scan(urls, sev, ctx.tune,
                                      headers=headers or None):
             f = self._convert(obj)

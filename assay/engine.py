@@ -21,7 +21,9 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from assay import correlate, domains, env, netlas, recon, tools, urls as urlsrc
-from assay import gateway
+from assay import gateway, notify
+from assay.burpimport import seed_urls
+from assay.session import SessionCanary
 from assay.journal import Journal
 from assay.oob import OOBSession
 from assay.config import Config, Scope
@@ -120,6 +122,11 @@ class Engine:
         # Every external command now reports through the run's progress
         # hook, so a tool that works quietly still shows it is alive.
         tools.PROGRESS = self.ctx.tool_progress
+        # Run-wide: every external tool goes through the same proxy and skips
+        # the same URLs assay's own client refuses to request.
+        tools.PROXY = env.proxy_for_tools(cfg.proxy)
+        tools.AVOID = cfg.avoid_regex()
+        self.canary: Optional[SessionCanary] = None
         self.started = 0.0
 
     # ------------------------------------------------------------------
@@ -135,35 +142,56 @@ class Engine:
         say("oob", self.oob.start())
         self.ctx.oob = self.oob
 
-        self._run_stage("resolve", self._stage_resolve)
-        if self.cfg.expand:
-            self._run_stage("recon", self._stage_recon)
-        if self.cfg.portscan:
-            self._run_stage("ports", lambda: (
-                self._stage_portscan(),
-                self._stage_discover_hostnames(),
-                self._stage_deep_ports(),
-                self._stage_udp(),
-                self._stage_nmapview(),
-            ))
-        self._run_stage("probe", self._stage_probe)
-        if self.cfg.module_enabled("crawl"):
-            self._run_stage("urls", self._stage_urls)
-        # Content discovery runs after the other URL sources so it can add to
-        # the same pool, and before the checks that consume it.
-        if self.cfg.opts.get("content_discovery") and self.ctx.web:
-            if not self.ctx.has("ffuf"):
-                self.ctx.say("probe", "content discovery skipped: ffuf not installed")
-            elif not tools.default_wordlist(self.cfg.profile):
-                self.ctx.say("probe", "content discovery skipped: no wordlist found "
-                                      "(install seclists or dirb)")
-        self._run_stage("modules:probe", lambda: self._stage_modules("probe"))
-        self._run_stage("modules:analyze", lambda: self._stage_modules("analyze"))
-        if self.cfg.opts.get("active_web"):
-            self._run_stage("modules:active", lambda: self._stage_modules("active"))
-        self._run_stage("modules:external", lambda: self._stage_modules("external"))
+        if self.cfg.proxy:
+            say("session", "target traffic via %s" % self.cfg.proxy)
+        if self.cfg.session_check:
+            self.canary = SessionCanary(
+                self.http, self.cfg.session_check,
+                expect=self.cfg.session_expect,
+                interval=self.cfg.session_interval,
+                say=lambda stage, msg: self.ctx.say(stage, msg),
+                notify=notify.from_cfg(self.cfg).needs_input,
+                note=self.journal.note)
+            self.canary.start()
+            say("session", "canary %s every %.0fs"
+                % (self.cfg.session_check, self.canary.interval))
+        try:
+            self._run_stage("resolve", self._stage_resolve)
+            if self.cfg.expand:
+                self._run_stage("recon", self._stage_recon)
+            if self.cfg.portscan:
+                self._run_stage("ports", lambda: (
+                    self._stage_portscan(),
+                    self._stage_discover_hostnames(),
+                    self._stage_deep_ports(),
+                    self._stage_udp(),
+                    self._stage_nmapview(),
+                ))
+            self._run_stage("probe", self._stage_probe)
+            if self.cfg.module_enabled("crawl"):
+                self._run_stage("urls", self._stage_urls)
+            # Content discovery runs after the other URL sources so it can add to
+            # the same pool, and before the checks that consume it.
+            if self.cfg.opts.get("content_discovery") and self.ctx.web:
+                if not self.ctx.has("ffuf"):
+                    self.ctx.say("probe", "content discovery skipped: ffuf not installed")
+                elif not tools.default_wordlist(self.cfg.profile):
+                    self.ctx.say("probe", "content discovery skipped: no wordlist found "
+                                          "(install seclists or dirb)")
+            self._run_stage("modules:probe", lambda: self._stage_modules("probe"))
+            self._run_stage("modules:analyze", lambda: self._stage_modules("analyze"))
+            if self.cfg.opts.get("active_web"):
+                self._run_stage("modules:active", lambda: self._stage_modules("active"))
+            self._run_stage("modules:external", lambda: self._stage_modules("external"))
 
-        self._run_stage("correlate", self._stage_correlate)
+            self._run_stage("correlate", self._stage_correlate)
+        finally:
+            if self.canary is not None:
+                self.canary.stop()
+                say("session", self.canary.summary())
+        if self.http.avoided:
+            say("session", "%d request(s) skipped by the avoid list (logout, "
+                           "delete, password change...)" % self.http.avoided)
 
         fired = self.oob.fired()
         if fired:
@@ -1067,7 +1095,7 @@ class Engine:
         added = 0
         try:
             stream = tools.httpx_probe(targets, self.tune,
-                                       headers=self._tool_headers() or None)
+                                       headers=self.cfg.tool_headers() or None)
             for obj in stream:
                 url = obj.get("url") or ""
                 if not url:
@@ -1208,9 +1236,17 @@ class Engine:
         origins = [origin_of(w.base_url)
                    for w in self.ctx.web]
 
+        # 0. seeds from a logged-in capture ----------------------------------
+        # First, so the per-host cap keeps them: they are the pages a crawl
+        # from / would never reach.
+        seeds = self._seed_urls()
+        for origin, found in seeds.items():
+            add(origin, found)
+
         # 1. crawl -----------------------------------------------------------
         if self.cfg.opts.get("crawl"):
-            self._source_crawl(add, cap)
+            self._source_crawl(add, cap,
+                               extra=[u for v in seeds.values() for u in v])
 
         # 2. historical archives (third-party; opt-in) ------------------------
         if self.cfg.passive:
@@ -1224,8 +1260,17 @@ class Engine:
 
         # Collapse to distinct (path, parameter-set) shapes before spending
         # any further budget on them.
+        avoided = 0
         for origin in set(origins):
-            self.ctx.urls[origin] = urlsrc.dedupe_by_shape(raw.get(origin, []), cap)
+            kept = []
+            for u in raw.get(origin, []):
+                if self.cfg.avoids(u):
+                    avoided += 1
+                else:
+                    kept.append(u)
+            self.ctx.urls[origin] = urlsrc.dedupe_by_shape(kept, cap)
+        if avoided:
+            self.ctx.say("urls", "%d URL(s) dropped by the avoid list" % avoided)
 
         # 4. parameter discovery on what survived ----------------------------
         if self.cfg.opts.get("param_discovery") and self.ctx.has("arjun"):
@@ -1236,13 +1281,70 @@ class Engine:
         self.ctx.say("urls", "%d injection point(s), %d carrying parameters"
                      % (total, withp))
 
-    def _source_crawl(self, add, cap: int) -> None:
+    def _seed_urls(self) -> Dict[str, List[str]]:
+        """--seed captures, grouped under the web target origin they belong to.
+
+        A capture is full of third-party hosts (analytics, CDNs, SSO) and of
+        hosts this run is not scanning; only URLs on a live web target are
+        kept, and the rest are counted so the operator knows to add them.
+        """
+        if not self.cfg.seeds:
+            return {}
+
+        def key(url: str):
+            p = urlsplit(url)
+            try:
+                port = p.port
+            except ValueError:
+                return None
+            scheme = (p.scheme or "").lower()
+            return (scheme, (p.hostname or "").lower(),
+                    port or {"http": 80, "https": 443}.get(scheme))
+
+        by_key = {key(w.base_url): origin_of(w.base_url) for w in self.ctx.web}
+        out: Dict[str, List[str]] = {}
+        other_hosts: Set[str] = set()
+        total = avoided = 0
+        for path in self.cfg.seeds:
+            found, dropped = seed_urls(path)
+            skipped = ", ".join("%d %s" % (n, why) for why, n in dropped.items() if n)
+            self.ctx.say("urls", "seed %s: %d URL(s)%s"
+                         % (os.path.basename(path), len(found),
+                            " (dropped %s)" % skipped if skipped else ""))
+            for u in found:
+                origin = by_key.get(key(u))
+                if origin is None:
+                    host = urlsplit(u).hostname or ""
+                    if self.cfg.scope.allows(host):
+                        other_hosts.add(host)
+                    continue
+                if self.cfg.avoids(u):
+                    avoided += 1
+                    continue
+                out.setdefault(origin, []).append(u)
+                total += 1
+        self.ctx.say("urls", "%d seed URL(s) on %d web target(s)%s"
+                     % (total, len(out),
+                        ", %d on the avoid list" % avoided if avoided else ""))
+        if other_hosts:
+            self.ctx.say("urls", "seeds also cover in-scope host(s) this run is "
+                                 "not scanning: %s - add them as targets"
+                         % ", ".join(sorted(other_hosts)[:5]))
+        return out
+
+    def _source_crawl(self, add, cap: int, extra: Optional[List[str]] = None) -> None:
         targets = [w.base_url for w in self.ctx.web]
+        # Seeds are start points too: katana crawls outward from each, which
+        # is how it reaches the rest of a logged-in area.
+        starts = list(dict.fromkeys(targets + list(extra or [])))
         if self.ctx.has("katana"):
-            self.ctx.say("urls", "katana over %d endpoint(s)" % len(targets))
-            results = tools.katana_crawl(targets, depth=2, tune=self.tune,
+            self.ctx.say("urls", "katana over %d endpoint(s)%s"
+                         % (len(targets), " + %d seed(s)" % (len(starts) - len(targets))
+                            if len(starts) > len(targets) else ""))
+            results = tools.katana_crawl(starts, depth=2, tune=self.tune,
                                          max_urls=cap * max(1, len(targets)),
-                                         headers=self._tool_headers())
+                                         headers=self.cfg.tool_headers(),
+                                         avoid=self._katana_avoid())
             n = 0
             for obj in results:
                 u = (obj.get("request") or {}).get("endpoint") or obj.get("endpoint")
@@ -1439,18 +1541,17 @@ class Engine:
             self.ctx.say("correlate", "%d attack chain(s): %s"
                          % (len(found), "; ".join(c.name for c in found[:3])))
 
-    def _tool_headers(self) -> Dict[str, str]:
-        """Auth and custom headers to hand to external tools."""
-        h: Dict[str, str] = {}
-        if self.cfg.traffic_tag:
-            h[self.cfg.traffic_tag_header] = self.cfg.traffic_tag
-        auth = self.cfg.auth_header()
-        if auth:
-            h["Authorization"] = auth
-        h.update(self.cfg.headers)
-        if self.cfg.cookies:
-            h["Cookie"] = self.cfg.cookies
-        return h
+    def _katana_avoid(self) -> Optional[str]:
+        """The avoid list as a katana -cos regex.
+
+        katana matches it against the whole URL, so it is anchored past the
+        host: unanchored, "log-off" matched catalog-offers.example.com and
+        excluded every page on it.
+        """
+        rx = self.cfg.avoid_regex()
+        if rx is None:
+            return None
+        return r"(?i)^[a-z][a-z0-9+.-]*://[^/?#]*[/?].*(?:%s)" % rx.pattern
 
     # -- summary ----------------------------------------------------------
     def assets(self) -> Dict:

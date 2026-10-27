@@ -60,6 +60,7 @@ class ContentDiscoveryModule(Module):
         sweep = tools.ffuf_sweep(
             origin, wordlist, ctx.tune,
             extensions=extensions,
+            headers=ctx.cfg.tool_headers() or None,
             # deep is the overnight profile: give each host a real hour so the
             # frequency-ordered list gets meaningfully past its first percent.
             # At 900s it covered no more of the wordlist than standard already
@@ -164,6 +165,7 @@ class ContentDiscoveryModule(Module):
             extensions=job.get("extensions", ""),
             timeout=6 * 3600.0,
             start=start,
+            headers=ctx.cfg.tool_headers() or None,
         )
         # A stop-all cuts the pass through the same SKIP an 's' does; name it
         # for what the operator actually pressed.

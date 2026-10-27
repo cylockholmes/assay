@@ -640,6 +640,34 @@ def stream_json(cmd: Sequence[str], timeout: float = 900.0,
 # --------------------------------------------------------------------------
 
 
+# Upstream HTTP proxy (normally Burp) for every tool that talks to a target.
+# Set by the engine from cfg.proxy; empty means connect directly. Run-wide like
+# JOURNAL, so no call site can forget to pass it.
+PROXY = ""
+
+# Compiled avoid-list regex (Config.avoid_regex) while an authenticated scan
+# is running, else None. The crawler and the content fuzzer must not request
+# what assay's own client refuses to.
+AVOID = None
+
+
+def proxy_args(tool: str) -> List[str]:
+    """Render PROXY in each tool's own flag syntax."""
+    if not PROXY:
+        return []
+    flag = {"httpx": "-http-proxy", "nuclei": "-proxy", "katana": "-proxy",
+            "ffuf": "-x"}.get(tool)
+    return [flag, PROXY] if flag else []
+
+
+def proxy_env() -> Dict[str, str]:
+    """PROXY as environment variables, for tools with no proxy flag (arjun)."""
+    if not PROXY:
+        return {}
+    return {"HTTP_PROXY": PROXY, "HTTPS_PROXY": PROXY,
+            "http_proxy": PROXY, "https_proxy": PROXY}
+
+
 def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str]:
     """Render extra request headers in each tool's own flag syntax."""
     if not headers:
@@ -1578,7 +1606,7 @@ def httpx_probe(targets: List[str], tune: Dict,
         "-timeout", "10", "-retries", "1",
         "-threads", str(tune.get("concurrency", 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
-    ] + header_args("httpx", headers)
+    ] + header_args("httpx", headers) + proxy_args("httpx")
     with _target_list_file(targets) as path:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
@@ -1610,7 +1638,7 @@ def nuclei_scan(urls: List[str], severity: str, tune: Dict,
     ]
     if extra_tags:
         cmd += ["-tags", extra_tags]
-    cmd += header_args("nuclei", headers)
+    cmd += header_args("nuclei", headers) + proxy_args("nuclei")
     with _target_list_file(urls) as path:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
@@ -1640,7 +1668,9 @@ def katana_timeout(candidates: Sequence[str], depth: int, tune: Dict) -> float:
 
 def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
                  timeout: Optional[float] = None,
-                 headers: Optional[Dict[str, str]] = None) -> List[dict]:
+                 headers: Optional[Dict[str, str]] = None,
+                 avoid: Optional[str] = None) -> List[dict]:
+    """`avoid` is a regex of URLs the crawler must never follow (-cos)."""
     # Flat 600s was the same bug already fixed for nmap, naabu and httpx
     # today: a crawl of 359 endpoints hit it and cut short at 317 URLs.
     # katana_timeout scales with candidates and depth instead.
@@ -1672,7 +1702,9 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
         # "all" is the choice that covers both robots.txt and sitemap.xml.
         "-timeout", "10", "-kf", "all",
         "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
-    ] + header_args("katana", headers)
+    ] + header_args("katana", headers) + proxy_args("katana")
+    if avoid:
+        cmd += ["-cos", avoid]
     out: List[dict] = []
     with _target_list_file(urls) as path:
         for obj in stream_json(cmd + ["-list", path], timeout=timeout):
@@ -1763,7 +1795,8 @@ def _wordlist_len(path: str) -> int:
 
 
 def ffuf_discover(url: str, wordlist: str, tune: Dict,
-                  extensions: str = "", timeout: float = 600.0) -> "FfufRun":
+                  extensions: str = "", timeout: float = 600.0,
+                  headers: Optional[Dict[str, str]] = None) -> "FfufRun":
     """Content discovery with ffuf's own auto-calibration to suppress soft-404s.
 
     A wordlist times the extension list is hundreds of thousands of requests,
@@ -1801,6 +1834,7 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict,
     ]
     if extensions:
         cmd += ["-e", extensions]
+    cmd += header_args("ffuf", headers) + proxy_args("ffuf")
     t0 = time.time()
     proc = run(cmd, timeout=timeout)
     elapsed = time.time() - t0
@@ -1889,7 +1923,8 @@ _FIRST_SHARD_SECONDS = 60.0
 
 def ffuf_sweep(url: str, wordlist: str, tune: Dict,
                extensions: str = "", timeout: float = 600.0,
-               start: int = 0) -> "FfufSweep":
+               start: int = 0,
+               headers: Optional[Dict[str, str]] = None) -> "FfufSweep":
     """Fuzz `wordlist` in ordered shards, from word index `start`, until the
     list is exhausted or `timeout` is spent.
 
@@ -1940,11 +1975,16 @@ def ffuf_sweep(url: str, wordlist: str, tune: Dict,
         shard_timeout = min(remaining, planned_secs * 3 + 60.0)
         tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                           encoding="utf-8")
+        # Words on the avoid list are dropped from the shard file only, never
+        # from `words`: the index a resume continues from is into the full
+        # list, and must not shift when the avoid list does.
+        send = [w for w in chunk if not (AVOID is not None and AVOID.search(w.lower()))]
         try:
-            tmp.write("\n".join(chunk) + "\n")
+            tmp.write("\n".join(send) + "\n")
             tmp.close()
             fr = ffuf_discover(url, env.to_wsl_path(tmp.name), tune,
-                               extensions=extensions, timeout=shard_timeout)
+                               extensions=extensions, timeout=shard_timeout,
+                               headers=headers)
         finally:
             try:
                 os.unlink(tmp.name)
@@ -2078,7 +2118,9 @@ def arjun_params(url: str, tune: Dict, timeout: float = 300.0) -> List[str]:
     # bounds it at about 24 concurrent requests.
     cmd = ["arjun", "-u", url, "-oJ", tmp.name, "-q",
            "-t", str(min(tune.get("ffuf_threads", 4), 4))]
-    run(cmd, timeout=timeout)
+    # arjun has no proxy flag; it is a requests program, so the environment
+    # variables reach it.
+    run(cmd, timeout=timeout, env_extra=proxy_env() or None)
     try:
         with open(tmp.name, "r", encoding="utf-8") as fh:
             data = json.load(fh)

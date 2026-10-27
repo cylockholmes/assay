@@ -41,6 +41,10 @@ examples:
   assay install --dry-run                       # preview external tool install
   assay install -y                              # install everything missing
   assay scan 10.0.0.0/24 --basic admin:admin    # behind HTTP Basic auth
+  assay scan app.internal --proxy burp \
+      --session-check https://app.internal/account \
+      --session-expect 'Sign out' --seed burp-sitemap.xml
+                                                # logged in via Burp, re-login on expiry
   assay scan target.tld --no-passive             # stay off third-party lookups
 """
 
@@ -175,6 +179,36 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag-header", default="X-Scan-Tag", metavar="NAME",
                    help="header name carrying --tag. Programme-specific; set it "
                         "to whatever yours mandates (default X-Scan-Tag)")
+
+    a = s.add_argument_group(
+        "authenticated scanning",
+        "Burp owns the session: send assay through it with --proxy and let a "
+        "session handling rule (tool scope: Proxy) add cookies and log back in. "
+        "The canary pauses the scan while the session is gone.")
+    a.add_argument("--proxy", default="", metavar="URL|burp",
+                   help="upstream HTTP proxy for every request to a target, "
+                        "assay's own and httpx/katana/nuclei/ffuf/arjun's. "
+                        "'burp' finds Burp's listener on port 8080, using the "
+                        "Windows host address under WSL NAT networking")
+    a.add_argument("--session-check", default="", metavar="URL",
+                   help="a page only a logged-in user sees; checked before the "
+                        "scan and every --session-interval seconds during it, "
+                        "pausing the scan while it looks logged out")
+    a.add_argument("--session-expect", default="", metavar="REGEX",
+                   help="text the --session-check page contains when logged in "
+                        "(e.g. 'Sign out|My account'). Without it, a login "
+                        "form, 401/403 or redirect means logged out")
+    a.add_argument("--session-interval", type=float, default=60.0, metavar="SECONDS",
+                   help="how often the canary checks (default 60)")
+    a.add_argument("--seed", action="append", default=[], metavar="FILE",
+                   help="Burp XML export or HAR of logged-in browsing; its "
+                        "in-scope GET URLs seed the crawl. Repeatable")
+    a.add_argument("--avoid", action="append", default=[], metavar="REGEX",
+                   help="path/query regex never to request while authenticated, "
+                        "on top of the built-in logout/delete/password list. "
+                        "Repeatable")
+    a.add_argument("--no-avoid-defaults", action="store_true",
+                   help="drop the built-in avoid list (keeps any --avoid)")
 
     g = s.add_argument_group("surface expansion and blind checks")
     g.add_argument("--no-expand", action="store_true",
@@ -560,8 +594,21 @@ def make_config(args) -> Config:
         basic_auth=getattr(args, "basic", None) or "",
         traffic_tag=getattr(args, "tag", "") or "",
         traffic_tag_header=(getattr(args, "tag_header", "") or "X-Scan-Tag"),
+        proxy=_proxy_url(getattr(args, "proxy", "") or ""),
+        session_check=getattr(args, "session_check", "") or "",
+        session_expect=getattr(args, "session_expect", "") or "",
+        session_interval=float(getattr(args, "session_interval", 60.0) or 60.0),
+        seeds=list(getattr(args, "seed", None) or []),
+        avoid=list(getattr(args, "avoid", None) or []),
+        avoid_defaults=not getattr(args, "no_avoid_defaults", False),
         quiet=args.quiet,
     )
+    for rx in cfg.avoid:
+        try:
+            re.compile(rx)
+        except re.error as exc:
+            console.print("[red]--avoid %r is not a valid regex: %s[/red]" % (rx, exc))
+            raise SystemExit(2)
     if getattr(args, "basic", None) and ":" not in args.basic:
         console.print("[red]--basic expects USER:PASS[/red]")
         raise SystemExit(2)
@@ -735,11 +782,30 @@ def _finalize_content(engine, args) -> None:
         console.print("  [green]resume done[/green] - %s" % ", ".join(parts))
 
 
+def _proxy_url(value: str) -> str:
+    """--proxy as a URL: 'burp' resolved, a bare host:port given a scheme."""
+    value = value.strip()
+    if not value:
+        return ""
+    m = re.match(r"^burp(?::(\d+))?$", value, re.I)
+    if m:
+        return env.burp_proxy_url(int(m.group(1) or env.BURP_PORT))
+    if "://" not in value:
+        value = "http://" + value
+    return value
+
+
 def cmd_scan(args) -> int:
     from assay.engine import Engine
     from assay import report as report_mod
+    from assay import session
 
     cfg = make_config(args)
+    problems = session.preflight(cfg)
+    if problems:
+        for p in problems:
+            console.print("[red]cannot start:[/red] %s" % p)
+        return 2
     _decide_rescan(cfg)
 
     if getattr(args, "install_missing", False):

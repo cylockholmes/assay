@@ -26,6 +26,28 @@ DEFAULT_UA = (
 )
 
 
+# Requests a logged-in scan must never make: the ones that end the session or
+# change state just by being fetched. Matched against path + query, lower-cased.
+# Applied only when the scan carries a session (Config.authenticated) - logged
+# out, a GET of /logout costs nothing.
+DEFAULT_AVOID = [
+    r"log[-_]?(?:out|off)",
+    r"sign[-_]?(?:out|off)",
+    r"end[-_]?session",
+    # \b, not a consumed separator, so the same pattern works inside katana's
+    # host-anchored version (Engine._katana_avoid). _ is a word character to
+    # \b, hence the explicit alternative.
+    r"(?:\b|_)(?:delete|remove|destroy|purge|deactivate|disable|revoke|"
+    r"cancel|unsubscribe|terminate)(?:\b|_)",
+    r"(?:reset|change|update)[-_]?password",
+    r"password[-_/]?(?:reset|change)",
+]
+
+# Request headers that mean "this request is logged in".
+_SESSION_HEADERS = {"cookie", "authorization", "x-api-key", "x-auth-token",
+                    "x-access-token", "x-session-token"}
+
+
 class ScopeError(Exception):
     pass
 
@@ -335,6 +357,27 @@ class Config:
     # name is programme-specific; set it to whatever yours mandates.
     traffic_tag: str = ""
     traffic_tag_header: str = "X-Scan-Tag"
+    # Upstream HTTP proxy - normally Burp - for every request to a target,
+    # assay's own and the external tools'. Recon infrastructure lookups go
+    # direct. With a Burp session handling rule scoped to Proxy, this is how
+    # an authenticated scan gets its cookies and logs back in when they expire.
+    proxy: str = ""
+    # Session canary: a page only a logged-in user sees, fetched every
+    # session_interval seconds. When it stops looking logged in the scan
+    # pauses rather than spend hours testing the login page. session_expect is
+    # a regex the logged-in page matches; without it, assay falls back to
+    # spotting a login form, a 401/403 or a redirect.
+    session_check: str = ""
+    session_expect: str = ""
+    session_interval: float = 60.0
+    # Burp XML or HAR captures of logged-in browsing. Their in-scope GET URLs
+    # seed the crawl and the injection pool - pages behind a login are rarely
+    # reachable by crawling from /.
+    seeds: List[str] = field(default_factory=list)
+    # Extra path/query regexes never to request while authenticated, on top
+    # of DEFAULT_AVOID unless avoid_defaults is off.
+    avoid: List[str] = field(default_factory=list)
+    avoid_defaults: bool = True
     # NOTE: credentials provisioned for the engagement are simply the test -
     # supplying them implies nothing that needs guarding. The rule worth
     # respecting is narrower: do not use credentials or access you *discovered*
@@ -421,3 +464,51 @@ class Config:
             return None
         token = base64.b64encode(self.basic_auth.encode("utf-8")).decode("ascii")
         return "Basic " + token
+
+    def tool_headers(self) -> Dict[str, str]:
+        """Auth and custom headers to hand to external tools."""
+        h: Dict[str, str] = {}
+        if self.traffic_tag:
+            h[self.traffic_tag_header] = self.traffic_tag
+        auth = self.auth_header()
+        if auth:
+            h["Authorization"] = auth
+        h.update(self.headers)
+        if self.cookies:
+            h["Cookie"] = self.cookies
+        return h
+
+    @property
+    def authenticated(self) -> bool:
+        """Does this scan carry a session worth protecting?
+
+        A proxy counts: assay cannot see whether Burp is adding cookies, and
+        assuming it is costs only the few requests the avoid list drops.
+        """
+        return bool(self.cookies or self.basic_auth or self.proxy
+                    or self.session_check
+                    or any(k.lower() in _SESSION_HEADERS for k in self.headers))
+
+    def avoid_patterns(self) -> List[str]:
+        return (list(DEFAULT_AVOID) if self.avoid_defaults else []) + list(self.avoid)
+
+    def avoid_regex(self) -> Optional["re.Pattern"]:
+        """One compiled regex for the avoid list, or None when it is not in force."""
+        pats = self.avoid_patterns() if self.authenticated else []
+        if not pats:
+            return None
+        cached = getattr(self, "_avoid_cache", None)
+        if cached is not None and cached[0] == pats:
+            return cached[1]
+        rx = re.compile("|".join("(?:%s)" % p for p in pats), re.I)
+        object.__setattr__(self, "_avoid_cache", (pats, rx))
+        return rx
+
+    def avoids(self, url: str) -> bool:
+        """Is this a URL the authenticated scan must not request?"""
+        rx = self.avoid_regex()
+        if rx is None:
+            return False
+        parts = urlsplit(url)
+        target = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+        return bool(rx.search(target.lower()))
