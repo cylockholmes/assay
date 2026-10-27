@@ -1825,7 +1825,11 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict,
     planned = _wordlist_len(wordlist) * (1 + n_ext)
     cmd = [
         "ffuf", "-u", base + "/FUZZ", "-w", wordlist,
-        "-ac", "-acc", "-mc", "200,201,204,301,302,307,401,403,405,500",
+        # No -acc: it takes a value (a custom calibration string), so it
+        # swallowed "-mc" and left the status list as a bare word - where Go's
+        # flag parser stops. Everything after it (rate, maxtime, -s, -o, -H,
+        # -x) was silently ignored. Confirmed against Kali's ffuf.
+        "-ac", "-mc", "200,201,204,301,302,307,401,403,405,500",
         "-fs", "0", "-t", str(tune.get("ffuf_threads", 10)),
         "-rate", str(rate),
         "-maxtime", str(int(maxtime)),
