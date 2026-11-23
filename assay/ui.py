@@ -7,6 +7,8 @@ VM, so refresh is throttled and the findings table is capped.
 
 from __future__ import annotations
 
+import codecs
+import os
 import select
 import shutil
 import sys
@@ -235,6 +237,8 @@ class KeyListener:
         self._thread: Optional[threading.Thread] = None
         self._stop_evt: Optional[threading.Event] = None
         self.on_key: Optional[Callable[[str], None]] = None
+        self._fd: int = -1
+        self._old_attrs: Optional[list] = None
 
     def start(self) -> bool:
         """Arm the listener. Returns whether it actually did - False when
@@ -242,6 +246,19 @@ class KeyListener:
         avoid advertising a key that nothing is listening for."""
         if self._thread is not None or termios is None or not sys.stdin.isatty():
             return False
+        # Switch to cbreak here, before returning, not on the background
+        # thread: otherwise a key pressed right after start() can land while
+        # the terminal is still line-buffered, and the switch itself would
+        # throw it away. TCSANOW rather than setcbreak()'s default TCSAFLUSH
+        # for the same reason - flushing discards input already typed.
+        try:
+            fd = sys.stdin.fileno()
+            self._old_attrs = termios.tcgetattr(fd)
+            tty.setcbreak(fd, termios.TCSANOW)
+        except Exception:
+            self._old_attrs = None
+            return False
+        self._fd = fd
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -256,32 +273,35 @@ class KeyListener:
         self._stop_evt = None
 
     def _loop(self) -> None:
-        fd = sys.stdin.fileno()
+        fd = self._fd
+        old = self._old_attrs
+        # Bytes straight off the fd, decoded incrementally. sys.stdin.read(1)
+        # would pull a whole chunk into Python's text buffer and hand back one
+        # character; the rest would sit there unseen by select(), so a second
+        # key typed quickly would not arrive until a third was pressed.
+        decoder = codecs.getincrementaldecoder(
+            getattr(sys.stdin, "encoding", None) or "utf-8")(errors="replace")
         try:
-            old = termios.tcgetattr(fd)
-        except termios.error:
-            return
-        try:
-            tty.setcbreak(fd)
             while not self._stop_evt.is_set():
                 # A short select() timeout, not a blocking read(): this is
                 # what lets stop() return promptly instead of waiting on
                 # whatever the operator does or doesn't type next.
-                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                ready, _, _ = select.select([fd], [], [], 0.25)
                 if not ready:
                     continue
-                ch = sys.stdin.read(1)
-                if not ch:
+                data = os.read(fd, 64)
+                if not data:
                     # select() reported readable but the read came back empty:
                     # stdin has hit EOF (it was closed). Without this the loop
                     # would spin at full CPU - select() stays readable on EOF,
                     # so the 0.25s timeout never gets a chance to idle it.
                     break
-                if self.on_key:
-                    try:
-                        self.on_key(ch)
-                    except Exception:  # a bad handler must not kill input
-                        pass
+                for ch in decoder.decode(data):
+                    if self.on_key:
+                        try:
+                            self.on_key(ch)
+                        except Exception:  # a bad handler must not kill input
+                            pass
         except Exception:
             pass
         finally:
