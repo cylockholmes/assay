@@ -7,7 +7,7 @@ name = "assay"
 dynamic = ["version"]
 description = "Signal-first recon and triage for authorized offensive testing"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "Joshua Krizek"}]
 keywords = ["security", "recon", "pentesting", "bug-bounty", "osint", "offensive-security"]
