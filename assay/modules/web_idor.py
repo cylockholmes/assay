@@ -13,7 +13,6 @@ it is exactly what gets skipped when a scan produces four hundred rows.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp, params
@@ -38,14 +37,14 @@ class IdorInventoryModule(Module):
     impact_class = "read"
     desc = "Inventory of object references worth testing with a second account"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         origin = origin_of(wt.base_url)
         urls = ctx.urls.get(origin, [])
         if not urls:
             return []
 
         # Group by (path, parameter) so a paginated list contributes once.
-        seen: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
+        seen: dict[tuple[str, str], tuple[str, str, str]] = {}
         for u in urls:
             path = urlsplit(u).path
             for name, value, kind in params.idor_candidates(u):
@@ -53,7 +52,7 @@ class IdorInventoryModule(Module):
         if not seen:
             return []
 
-        rows: List[str] = []
+        rows: list[str] = []
         sensitive = 0
         for (path, name), (url, value, kind) in sorted(seen.items()):
             hot = bool(SENSITIVE_PATH.search(path))

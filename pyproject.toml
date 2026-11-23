@@ -1,22 +1,29 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "assay"
+# "assay" on PyPI is an unrelated project, so the distribution is published as
+# assay-recon. The import package and the command are both still "assay".
+name = "assay-recon"
 dynamic = ["version"]
 description = "Signal-first recon and triage for authorized offensive testing"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Joshua Krizek"}]
 keywords = ["security", "recon", "pentesting", "bug-bounty", "osint", "offensive-security"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
 ]
 dependencies = [
@@ -48,3 +55,13 @@ packages = ["assay", "assay.modules"]
 
 [tool.setuptools.package-data]
 assay = ["data/*.yaml", "data/*.xsl"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Real bugs (pyflakes, syntax) plus pyupgrade, so typing stays on the 3.11
+# floor. printf-style formatting is the house style, so UP031 is off; short
+# loop names like `l` are fine here, so E741 is off.
+select = ["E4", "E7", "E9", "F", "UP"]
+ignore = ["UP031", "E741"]

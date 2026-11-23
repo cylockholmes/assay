@@ -6,7 +6,6 @@ import datetime
 import hashlib
 import socket
 import ssl
-from typing import List, Optional, Tuple
 
 from assay import owasp
 from assay.context import Context
@@ -14,7 +13,7 @@ from assay.models import Evidence, Finding, Target
 from assay.modules import Module, register
 
 
-def fetch_cert(host: str, port: int, timeout: float = 8.0) -> Tuple[Optional[dict], str]:
+def fetch_cert(host: str, port: int, timeout: float = 8.0) -> tuple[dict | None, str]:
     """Grab the certificate without validating it, plus the negotiated version."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -32,7 +31,7 @@ def fetch_cert(host: str, port: int, timeout: float = 8.0) -> Tuple[Optional[dic
         return None, ""
 
 
-def _decode(der: bytes) -> Optional[dict]:
+def _decode(der: bytes) -> dict | None:
     import tempfile
     try:
         pem = ssl.DER_cert_to_PEM_cert(der)
@@ -75,18 +74,18 @@ class TlsModule(Module):
     impact_class = "read"
     desc = "Certificate validity and legacy TLS protocol support"
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         host = target.host
-        out: List[Finding] = []
+        out: list[Finding] = []
         for port in target.ports:
             if not (port.is_tls or port.port in (443, 8443, 9443, 4443, 993, 995, 465)):
                 continue
             out.extend(self._check(host, port.port))
         return out
 
-    def _check(self, host: str, port: int) -> List[Finding]:
+    def _check(self, host: str, port: int) -> list[Finding]:
         cert, version = fetch_cert(host, port)
-        out: List[Finding] = []
+        out: list[Finding] = []
         where = "%s:%d" % (host, port)
         if cert:
             out.extend(self._cert_findings(host, port, cert))
@@ -123,8 +122,8 @@ class TlsModule(Module):
             ))
         return out
 
-    def _cert_findings(self, host: str, port: int, cert: dict) -> List[Finding]:
-        out: List[Finding] = []
+    def _cert_findings(self, host: str, port: int, cert: dict) -> list[Finding]:
+        out: list[Finding] = []
         where = "%s:%d" % (host, port)
         subject = dict(x[0] for x in cert.get("subject", []) if x)
         issuer = dict(x[0] for x in cert.get("issuer", []) if x)
@@ -134,8 +133,11 @@ class TlsModule(Module):
         not_after = cert.get("notAfter")
         if not_after:
             try:
-                exp = datetime.datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                days = (exp - datetime.datetime.utcnow()).days
+                # notAfter is always GMT; make both sides aware rather than
+                # use utcnow(), which is deprecated from Python 3.12.
+                exp = datetime.datetime.strptime(
+                    not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=datetime.UTC)
+                days = (exp - datetime.datetime.now(datetime.UTC)).days
                 if days < 0:
                     out.append(Finding(
                         title="TLS certificate expired %d days ago" % abs(days),

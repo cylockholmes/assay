@@ -8,7 +8,6 @@ because a reflected-origin + credentials combination is directly reportable.
 from __future__ import annotations
 
 import re
-from typing import List
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -38,9 +37,9 @@ class CorsModule(Module):
     impact_class = "probe"
     desc = "Cross-origin resource sharing trust boundaries"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         url = wt.base_url
-        out: List[Finding] = []
+        out: list[Finding] = []
 
         base = ctx.http.get(url)
         if not base.ok:
@@ -144,7 +143,7 @@ class CorsModule(Module):
         out.extend(self._sibling_trust(ctx, url, wt))
         return out
 
-    def _null_origin(self, ctx: Context, url: str) -> List[Finding]:
+    def _null_origin(self, ctx: Context, url: str) -> list[Finding]:
         r = ctx.http.get(url, headers={"Origin": "null"})
         if not r.ok:
             return []
@@ -173,7 +172,7 @@ class CorsModule(Module):
             )]
         return []
 
-    def _sibling_trust(self, ctx: Context, url: str, wt: WebTarget) -> List[Finding]:
+    def _sibling_trust(self, ctx: Context, url: str, wt: WebTarget) -> list[Finding]:
         """Does the app trust *any* subdomain of its own registrable domain?"""
         host = urlsplit(url).hostname or ""
         # registrable() rejects IPs and single labels itself, and knows the
@@ -219,11 +218,11 @@ class CookieModule(Module):
     impact_class = "read"
     desc = "Session cookie attributes"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         raw = wt.headers.get("Set-Cookie") or wt.headers.get("set-cookie") or ""
         if not raw:
             return []
-        problems: List[str] = []
+        problems: list[str] = []
         for chunk in re.split(r",\s*(?=[A-Za-z0-9_\-]+=)", raw):
             name = chunk.split("=", 1)[0].strip()
             low = chunk.lower()
@@ -274,7 +273,7 @@ class HeaderHygieneModule(Module):
     impact_class = "read"
     desc = "Security header baseline (single consolidated row)"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         if "html" not in (wt.content_type or ""):
             return []
         h = {k.lower(): v for k, v in wt.headers.items()}
@@ -320,10 +319,10 @@ class MethodsModule(Module):
     impact_class = "probe"
     desc = "Dangerous HTTP methods"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         url = wt.base_url
         r = ctx.http.request("OPTIONS", url)
-        out: List[Finding] = []
+        out: list[Finding] = []
         allow = (r.header("Allow") or r.header("Access-Control-Allow-Methods")).upper()
         risky = [m for m in ("PUT", "DELETE", "PATCH", "TRACE", "CONNECT") if m in allow]
         if risky:

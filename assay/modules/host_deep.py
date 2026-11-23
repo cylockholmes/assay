@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional
 
 import yaml
 
@@ -24,13 +23,13 @@ from assay.modules import Module, register
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
-_RULES: Optional[List[dict]] = None
+_RULES: list[dict] | None = None
 
 
-def load_rules() -> List[dict]:
+def load_rules() -> list[dict]:
     global _RULES
     if _RULES is None:
-        with open(os.path.join(DATA, "nse.yaml"), "r", encoding="utf-8") as fh:
+        with open(os.path.join(DATA, "nse.yaml"), encoding="utf-8") as fh:
             doc = yaml.safe_load(fh) or {}
         rules = doc.get("rules", [])
         for r in rules:
@@ -52,7 +51,7 @@ class HostDeepModule(Module):
             return False
         return ctx.has("nmap")
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         host = target.ip or target.host
         open_ports = {p.port for p in target.ports if p.proto == "tcp"}
         if not open_ports:
@@ -62,7 +61,7 @@ class HostDeepModule(Module):
         tcp_rules = [r for r in rules if not r.get("udp")]
         udp_rules = [r for r in rules if r.get("udp")]
 
-        out: List[Finding] = []
+        out: list[Finding] = []
         out += self._sweep(ctx, host, tcp_rules, open_ports, udp=False)
 
         # UDP is slow; only worth it when the profile has already opted into depth.
@@ -72,10 +71,10 @@ class HostDeepModule(Module):
         return out
 
     # ------------------------------------------------------------------
-    def _sweep(self, ctx: Context, host: str, rules: List[dict],
-               candidate_ports: set, udp: bool) -> List[Finding]:
+    def _sweep(self, ctx: Context, host: str, rules: list[dict],
+               candidate_ports: set, udp: bool) -> list[Finding]:
         # Only run scripts whose port is actually open (or, for UDP, plausible).
-        applicable: List[dict] = []
+        applicable: list[dict] = []
         for r in rules:
             if candidate_ports & set(r["ports"]):
                 applicable.append(r)
@@ -94,7 +93,7 @@ class HostDeepModule(Module):
         if not results:
             return []
 
-        out: List[Finding] = []
+        out: list[Finding] = []
         for rule in applicable:
             for port, scripts_out in results.items():
                 output = scripts_out.get(rule["script"])

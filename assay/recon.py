@@ -19,7 +19,7 @@ import json
 import re
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
 
 from assay import tools
 from assay.net import HttpClient, Resp, similarity, rand_token
@@ -58,7 +58,7 @@ def detect_cdn(resp: Resp) -> str:
 
 
 def crtsh_subdomains(domain: str, http: HttpClient,
-                     limit: int = 500) -> List[str]:
+                     limit: int = 500) -> list[str]:
     """Certificate transparency logs. Third-party lookup - passive mode only."""
     url = "https://crt.sh/?q=%%25.%s&output=json" % domain
     r = http.get(url, timeout=30.0, infra=True)
@@ -68,7 +68,7 @@ def crtsh_subdomains(domain: str, http: HttpClient,
         rows = json.loads(r.body)
     except ValueError:
         return []
-    found: Set[str] = set()
+    found: set[str] = set()
     for row in rows if isinstance(rows, list) else []:
         for name in str(row.get("name_value", "")).split("\n"):
             name = name.strip().lower().lstrip("*.")
@@ -79,7 +79,7 @@ def crtsh_subdomains(domain: str, http: HttpClient,
     return sorted(found)
 
 
-def passive_subdomains(domain: str, http: HttpClient, limit: int = 500) -> Tuple[List[str], str]:
+def passive_subdomains(domain: str, http: HttpClient, limit: int = 500) -> tuple[list[str], str]:
     if tools.have("subfinder"):
         got = tools.subfinder_enum(domain)
         if got:
@@ -93,9 +93,9 @@ def passive_subdomains(domain: str, http: HttpClient, limit: int = 500) -> Tuple
 # --------------------------------------------------------------------------
 
 
-def permute(known: Iterable[str], apex: str, cap: int = 400) -> List[str]:
+def permute(known: Iterable[str], apex: str, cap: int = 400) -> list[str]:
     """Generate plausible sibling names from an apex and any known hosts."""
-    out: Set[str] = set()
+    out: set[str] = set()
     for word in PERMUTATIONS:
         out.add("%s.%s" % (word, apex))
     for host in list(known)[:40]:
@@ -110,15 +110,15 @@ def permute(known: Iterable[str], apex: str, cap: int = 400) -> List[str]:
     return sorted(out)[:cap]
 
 
-def wordlist_subdomains(apex: str, wordlist_path: str, cap: int = 150000) -> List[str]:
+def wordlist_subdomains(apex: str, wordlist_path: str, cap: int = 150000) -> list[str]:
     """Real wordlist-driven subdomain brute-forcing - the same technique as
     gobuster's dns mode or Sublist3r's brute-force pass. Generating the
     candidate names is the only part worth doing by hand; resolving them at
     volume is dnsx's job, via resolve_bulk() below.
     """
-    out: List[str] = []
+    out: list[str] = []
     try:
-        with open(wordlist_path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(wordlist_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 word = line.strip()
                 if not word or word.startswith("#"):
@@ -131,12 +131,12 @@ def wordlist_subdomains(apex: str, wordlist_path: str, cap: int = 150000) -> Lis
     return out
 
 
-def resolve_bulk(hosts: List[str], workers: int = 16) -> Dict[str, str]:
+def resolve_bulk(hosts: list[str], workers: int = 16) -> dict[str, str]:
     """Resolve many names. Uses dnsx when available, else threaded getaddrinfo."""
     if not hosts:
         return {}
     if tools.have("dnsx"):
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for obj in tools.dnsx_resolve(hosts):
             host = obj.get("host")
             a = obj.get("a") or []
@@ -145,13 +145,13 @@ def resolve_bulk(hosts: List[str], workers: int = 16) -> Dict[str, str]:
         if out:
             return out
 
-    def one(h: str) -> Tuple[str, str]:
+    def one(h: str) -> tuple[str, str]:
         try:
             return h, socket.gethostbyname(h)
         except (socket.gaierror, OSError):
             return h, ""
 
-    found: Dict[str, str] = {}
+    found: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for fut in as_completed([pool.submit(one, h) for h in hosts]):
             h, ip = fut.result()
@@ -160,9 +160,9 @@ def resolve_bulk(hosts: List[str], workers: int = 16) -> Dict[str, str]:
     return found
 
 
-def wildcard_ips(apex: str) -> Set[str]:
+def wildcard_ips(apex: str) -> set[str]:
     """IPs a wildcard record resolves to, so we can discard them."""
-    ips: Set[str] = set()
+    ips: set[str] = set()
     for _ in range(2):
         probe = "assay%s.%s" % (rand_token(10), apex)
         try:
@@ -177,8 +177,8 @@ def wildcard_ips(apex: str) -> Set[str]:
 # --------------------------------------------------------------------------
 
 
-def vhost_probe(http: HttpClient, base_url: str, candidates: List[str],
-                workers: int = 8) -> List[Tuple[str, Resp]]:
+def vhost_probe(http: HttpClient, base_url: str, candidates: list[str],
+                workers: int = 8) -> list[tuple[str, Resp]]:
     """Find hostnames this IP serves differently from its default response.
 
     A vhost only counts when its response diverges from BOTH the default
@@ -190,7 +190,7 @@ def vhost_probe(http: HttpClient, base_url: str, candidates: List[str],
     if not default.ok:
         return []
 
-    def check(name: str) -> Optional[Tuple[str, Resp]]:
+    def check(name: str) -> tuple[str, Resp] | None:
         r = http.get(base_url, headers={"Host": name})
         if not r.ok or r.status in (0, 429) or r.status >= 500:
             return None
@@ -200,7 +200,7 @@ def vhost_probe(http: HttpClient, base_url: str, candidates: List[str],
             return None
         return name, r
 
-    hits: List[Tuple[str, Resp]] = []
+    hits: list[tuple[str, Resp]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for fut in as_completed([pool.submit(check, n) for n in candidates]):
             got = fut.result()
@@ -215,7 +215,7 @@ def vhost_probe(http: HttpClient, base_url: str, candidates: List[str],
 
 
 def origin_exposed(http: HttpClient, hostname: str, ip: str,
-                   scheme: str = "https") -> Optional[Tuple[Resp, Resp]]:
+                   scheme: str = "https") -> tuple[Resp, Resp] | None:
     """Does connecting straight to the IP serve the same application?
 
     If it does, the CDN/WAF in front of the hostname is bypassable, which
@@ -288,15 +288,15 @@ def is_cdn_ip(ip: str) -> bool:
     return any(addr in net for net in _CDN_NETS)
 
 
-def _dig(record: str, name: str, timeout: float = 8.0) -> List[str]:
+def _dig(record: str, name: str, timeout: float = 8.0) -> list[str]:
     out = tools.dns_lookup(record, name, timeout=timeout)
     return [l.strip().rstrip(".") for l in out.splitlines()
             if l.strip() and not l.startswith(";")]
 
 
-def spf_ips(domain: str) -> List[str]:
+def spf_ips(domain: str) -> list[str]:
     """IPs authorised to send mail. Mail usually leaves from the real origin."""
-    out: List[str] = []
+    out: list[str] = []
     for txt in _dig("TXT", domain):
         if "v=spf1" not in txt.lower():
             continue
@@ -309,9 +309,9 @@ def spf_ips(domain: str) -> List[str]:
     return out
 
 
-def mx_ips(domain: str) -> List[str]:
+def mx_ips(domain: str) -> list[str]:
     import socket
-    out: List[str] = []
+    out: list[str] = []
     for line in _dig("MX", domain):
         parts = line.split()
         host = parts[-1] if parts else ""
@@ -325,7 +325,7 @@ def mx_ips(domain: str) -> List[str]:
 
 
 def origin_candidates(hostname: str, known_hosts: Iterable[str],
-                      workers: int = 12) -> Dict[str, str]:
+                      workers: int = 12) -> dict[str, str]:
     """Gather plausible origin IPs and say where each came from.
 
     Sources, in rough order of how often they pay off: sibling hostnames that
@@ -338,7 +338,7 @@ def origin_candidates(hostname: str, known_hosts: Iterable[str],
         return {}
     apex = ".".join(parts[-2:])
 
-    candidates: Dict[str, str] = {}
+    candidates: dict[str, str] = {}
 
     def add(ip: str, source: str) -> None:
         if ip and not is_cdn_ip(ip) and ip not in candidates:
@@ -347,7 +347,7 @@ def origin_candidates(hostname: str, known_hosts: Iterable[str],
     names = ["%s.%s" % (label, apex) for label in ORIGIN_LABELS]
     names += [h for h in known_hosts if h.endswith(apex)]
 
-    def resolve(n: str) -> Tuple[str, str]:
+    def resolve(n: str) -> tuple[str, str]:
         try:
             return n, socket.gethostbyname(n)
         except (socket.gaierror, OSError):
@@ -367,7 +367,7 @@ def origin_candidates(hostname: str, known_hosts: Iterable[str],
 
 
 def confirm_origin(http, hostname: str, ip: str, scheme: str,
-                   edge: Resp) -> Optional[Resp]:
+                   edge: Resp) -> Resp | None:
     """Does this IP serve the same application without the edge in front?"""
     direct = http.get("%s://%s/" % (scheme, ip), headers={"Host": hostname},
                       timeout=8.0)

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List
 
 from assay import cve as cve_mod
 from assay import owasp
@@ -39,7 +38,7 @@ class InventoryModule(Module):
     impact_class = "passive"
     desc = "Software/version inventory, with an optional NVD CVE cross-reference"
 
-    def run_global(self, ctx: Context) -> List[Finding]:
+    def run_global(self, ctx: Context) -> list[Finding]:
         items = []
         for t in ctx.targets:
             items.extend(collect_from_host(t))
@@ -50,7 +49,7 @@ class InventoryModule(Module):
             return []
         ctx.say("inventory", "%d software item(s) identified" % len(rows))
 
-        matches_by_key: Dict[str, List[cve_mod.CveMatch]] = {}
+        matches_by_key: dict[str, list[cve_mod.CveMatch]] = {}
         if ctx.cfg.passive:
             versioned = [r for r in rows if r["version"]]
             if versioned:
@@ -69,8 +68,8 @@ class InventoryModule(Module):
         return [self._cve_finding(row, matches_by_key[_row_key(row)])
                 for row in rows if _row_key(row) in matches_by_key]
 
-    def _write_report_data(self, ctx: Context, rows: List[Dict],
-                           matches_by_key: Dict[str, List[cve_mod.CveMatch]]) -> None:
+    def _write_report_data(self, ctx: Context, rows: list[dict],
+                           matches_by_key: dict[str, list[cve_mod.CveMatch]]) -> None:
         items = []
         for row in rows:
             matches = matches_by_key.get(_row_key(row), [])
@@ -96,7 +95,7 @@ class InventoryModule(Module):
         except OSError:
             pass
 
-    def _cve_finding(self, row: Dict, matches: List[cve_mod.CveMatch]) -> Finding:
+    def _cve_finding(self, row: dict, matches: list[cve_mod.CveMatch]) -> Finding:
         name, version = row["name"], row["version"]
         where = row["where"][0] if row["where"] else name
         worst = min(matches, key=lambda m: _SEV_ORDER.get(m.severity, 4))
@@ -135,7 +134,7 @@ class InventoryModule(Module):
         )
 
 
-def _proof_evidence(row: Dict) -> List[Evidence]:
+def _proof_evidence(row: dict) -> list[Evidence]:
     """Where the version number itself was read, one entry per place seen, so
     the hunter can re-check it before trusting the CVE lookup built on it."""
     out = []
@@ -150,5 +149,5 @@ def _proof_evidence(row: Dict) -> List[Evidence]:
     return out
 
 
-def _row_key(row: Dict) -> str:
+def _row_key(row: dict) -> str:
     return "%s|%s" % (row["name"].lower(), row["version"])

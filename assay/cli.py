@@ -11,7 +11,6 @@ import stat
 import sys
 import textwrap
 import threading
-from typing import Dict, List, Optional
 
 from assay import env, notify, tools, version_string
 from assay.config import Config, Scope, ScopeError, PROFILES
@@ -241,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-q", "--quiet", action="store_true")
 
     # -- other commands ----------------------------------------------------
-    d = sub.add_parser("doctor", help="check tools, WSL and resources")
+    sub.add_parser("doctor", help="check tools, WSL and resources")
 
     r = sub.add_parser("report", help="rebuild the HTML report from a previous run")
     r.add_argument("-o", "--out", default="./assay-out")
@@ -432,7 +431,7 @@ def open_run(path: str, what: str = "results"):
     return Store(db), run_dir
 
 
-def _ask_codename(targets: List[str]) -> str:
+def _ask_codename(targets: list[str]) -> str:
     """Ask for the engagement codename when -n was not given.
 
     The codename names the output folder and titles the report, and targets
@@ -797,7 +796,6 @@ def _proxy_url(value: str) -> str:
 
 def cmd_scan(args) -> int:
     from assay.engine import Engine
-    from assay import report as report_mod
     from assay import session
 
     cfg = make_config(args)
@@ -969,7 +967,7 @@ def cmd_scan(args) -> int:
     return 0
 
 
-def _notify_scan_done(store: Store, cfg: Config, assets: Dict) -> None:
+def _notify_scan_done(store: Store, cfg: Config, assets: dict) -> None:
     """Ping Slack with a one-line result summary once the run is complete.
     A no-op unless a webhook is configured."""
     n = notify.from_cfg(cfg)
@@ -1063,8 +1061,8 @@ def _redaction_map(run_dir: str):
         return None
 
 
-def run_ai(store: Store, cfg: Config, args, assets: Dict,
-           redactor=None, followups=None) -> Optional[Dict]:
+def run_ai(store: Store, cfg: Config, args, assets: dict,
+           redactor=None, followups=None) -> dict | None:
     from assay import ai as ai_mod
     from assay.redact import Redactor, terms_from_context
 
@@ -1212,7 +1210,7 @@ def run_ai(store: Store, cfg: Config, args, assets: Dict,
     return local
 
 
-def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]:
+def run_ai_loop(store: Store, cfg: Config, args, assets: dict) -> dict | None:
     """Iterative AI triage (PLAN-LOOP §2). Each round: triage -> collect the
     model's suggested commands -> auto-run the passive, in-scope ones (the
     active ones are queued for `assay followup --run` consent) -> record each
@@ -1260,8 +1258,8 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
 
     from assay.store import TOOL_OUTPUT_CAP
 
-    last: Optional[Dict] = None
-    sendable: List[Dict] = []   # redacted results accumulated across rounds
+    last: dict | None = None
+    sendable: list[dict] = []   # redacted results accumulated across rounds
     seen_cmds: set = set()      # commands already run, so rounds don't repeat them
     for rnd in range(rounds):
         console.print("\n[bold]AI loop[/bold] round %d/%d" % (rnd + 1, rounds))
@@ -1289,7 +1287,7 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
         console.print("  [dim]%d new suggested: %d auto-run, %d queued for consent, "
                       "%d refused[/dim]" % (len(vetted), len(auto), len(queued), len(refused)))
 
-        new_sendable: List[Dict] = []
+        new_sendable: list[dict] = []
         for v in auto:
             console.print("  [bold]$ %s[/bold]" % v.display)
             followup.run(v, timeout=timeout)
@@ -1377,7 +1375,6 @@ def run_ai_loop(store: Store, cfg: Config, args, assets: Dict) -> Optional[Dict]
 
 
 def cmd_ai(args) -> int:
-    from assay import report as report_mod
     store, args.out = open_run(args.out, "findings")
     if store is None:
         return 1
@@ -1478,7 +1475,6 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_report(args) -> int:
-    from assay import report as report_mod
     store, args.out = open_run(args.out, "results")
     if store is None:
         return 1
@@ -1487,7 +1483,7 @@ def cmd_report(args) -> int:
     ai_path = os.path.join(args.out, "ai-triage.json")
     ai = None
     if os.path.exists(ai_path):
-        with open(ai_path, "r", encoding="utf-8") as fh:
+        with open(ai_path, encoding="utf-8") as fh:
             ai = json.load(fh)
     path = report_mod.build(store, assets, os.path.join(args.out, "report.html"), ai=ai)
     console.print("  report  [cyan]%s[/cyan]" % path)
@@ -1576,7 +1572,7 @@ def cmd_replay(args) -> int:
     cfg.ensure_dirs()
 
     candidates = []
-    reasons: Dict[str, int] = {}
+    reasons: dict[str, int] = {}
     for r in burpimport.dedupe(requests_):
         ok, why = burpimport.worth_replaying(r, aggressive=args.aggressive)
         if ok and cfg.scope.allows(r.host):
@@ -2027,7 +2023,9 @@ def cmd_modules(args) -> int:
     from assay.modules import all_modules
     from rich.table import Table
     t = Table(title="detection modules", title_style="bold")
-    t.add_column("stage"); t.add_column("scope"); t.add_column("name")
+    t.add_column("stage")
+    t.add_column("scope")
+    t.add_column("name")
     t.add_column("what it looks for", overflow="fold")
     for m in sorted(all_modules(), key=lambda x: (x.stage, x.name)):
         t.add_row(m.stage, m.scope, m.name, m.desc)
@@ -2035,7 +2033,7 @@ def cmd_modules(args) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handlers = {
         "scan": cmd_scan, "doctor": cmd_doctor, "report": cmd_report,

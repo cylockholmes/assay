@@ -20,7 +20,6 @@ import os
 import shlex
 import threading
 import time
-from typing import Dict, List, Optional, Set
 
 from assay import version_string
 
@@ -67,15 +66,15 @@ class Journal:
         self.log_path = os.path.join(out_dir, "activity.log")
         self.replay_path = os.path.join(out_dir, "replay.sh")
         self._lock = threading.Lock()
-        self._log: Optional[object] = None
-        self._seen: Set[str] = set()
-        self._replay: List[str] = []
+        self._log: object | None = None
+        self._seen: set[str] = set()
+        self._replay: list[str] = []
         self.requests = 0
         self.commands = 0
         self.started = time.time()
 
     # -- lifecycle ---------------------------------------------------------
-    def open(self, targets: List[str], profile: str) -> None:
+    def open(self, targets: list[str], profile: str) -> None:
         if not self.enabled:
             return
         os.makedirs(self.out_dir, exist_ok=True)
@@ -121,7 +120,7 @@ class Journal:
     def _stamp(self) -> str:
         return "%7.2fs" % (time.time() - self.started)
 
-    def request(self, method: str, url: str, headers: Optional[Dict] = None,
+    def request(self, method: str, url: str, headers: dict | None = None,
                 body: str = "", module: str = "") -> None:
         """Record one HTTP request as a curl command."""
         if not self.enabled:
@@ -136,7 +135,7 @@ class Journal:
                 self._seen.add(cmd)
                 self._replay.append(cmd)
 
-    def command(self, argv: List[str], module: str = "") -> None:
+    def command(self, argv: list[str], module: str = "") -> None:
         """Record one external tool invocation."""
         if not self.enabled:
             return
@@ -157,7 +156,7 @@ class Journal:
             self._write("%s  NOTE   %s" % (self._stamp(), text))
 
     @staticmethod
-    def _curl(method: str, url: str, headers: Dict, body: str) -> str:
+    def _curl(method: str, url: str, headers: dict, body: str) -> str:
         parts = ["curl -sSik"]
         if method != "GET":
             parts.append("-X %s" % method)

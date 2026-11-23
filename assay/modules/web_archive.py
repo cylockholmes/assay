@@ -9,7 +9,6 @@ Third-party traffic, so --passive only.
 
 from __future__ import annotations
 
-from typing import List, Set
 
 from assay import archive, owasp
 from assay.context import Context
@@ -32,8 +31,8 @@ class ArchivedSecretsModule(Module):
         # Queries web.archive.org, so it is a passive third-party lookup.
         return ctx.cfg.passive
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        cache: Set[str] = getattr(ctx, "_archive_hosts", set())
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
+        cache: set[str] = getattr(ctx, "_archive_hosts", set())
         setattr(ctx, "_archive_hosts", cache)
         if wt.host in cache:
             return []
@@ -46,8 +45,8 @@ class ArchivedSecretsModule(Module):
         ctx.say("archive", "%s: %d archived artefact(s) to review"
                 % (wt.host, min(len(snaps), budget)))
 
-        out: List[Finding] = []
-        seen: Set[str] = set()
+        out: list[Finding] = []
+        seen: set[str] = set()
         for snap in snaps[:budget]:
             body = archive.fetch(snap, ctx.http)
             if not body:

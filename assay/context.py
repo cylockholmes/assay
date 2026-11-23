@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional
+from collections.abc import Callable, Iterable
 
 from assay.config import Config
 from assay.models import Finding, Target, WebTarget
@@ -17,28 +17,28 @@ class Context:
     cfg: Config
     store: Store
     http: HttpClient
-    tune: Dict
-    targets: List[Target] = field(default_factory=list)
-    web: List[WebTarget] = field(default_factory=list)
+    tune: dict
+    targets: list[Target] = field(default_factory=list)
+    web: list[WebTarget] = field(default_factory=list)
     # origin -> Baseline, shared so every module benefits from one calibration
-    baselines: Dict[str, Baseline] = field(default_factory=dict)
+    baselines: dict[str, Baseline] = field(default_factory=dict)
     # origin -> crawled URLs (populated by the crawl stage)
-    urls: Dict[str, List[str]] = field(default_factory=dict)
-    tools: Dict[str, Optional[str]] = field(default_factory=dict)
+    urls: dict[str, list[str]] = field(default_factory=dict)
+    tools: dict[str, str | None] = field(default_factory=dict)
     # Out-of-band callback session, used by the blind checks. None when the
     # run has no OOB domain configured.
-    oob: Optional[object] = None
+    oob: object | None = None
     # Content-discovery (ffuf) passes that were cut short - stopped on their
     # time budget or hard-killed before they could finish the wordlist. Each
     # is a dict carrying enough to re-run it (origin, wordlist, extensions).
     # Recorded here so the CLI can offer, once the run is otherwise done, to
     # finish them off rather than leaving most of the wordlist untried.
-    deferred_content: List[dict] = field(default_factory=list)
+    deferred_content: list[dict] = field(default_factory=list)
     # Google API keys (AIza...) seen in client-side assets: key -> where it was
     # found. Filled by the secrets module, drained by gmaps_key in a later stage.
-    google_keys: Dict[str, str] = field(default_factory=dict)
+    google_keys: dict[str, str] = field(default_factory=dict)
     # UI hook: fn(stage, message, advance)
-    progress: Optional[Callable[[str, str, int], None]] = None
+    progress: Callable[[str, str, int], None] | None = None
     # The stage whose messages are currently flowing. Remembered so that a
     # reporter with no idea what a stage is -- an external command, which runs
     # several layers below any of them -- can still be labelled with one.
@@ -96,7 +96,7 @@ class Context:
                 self.baselines[origin] = bl
         return bl
 
-    def add_urls(self, origin: str, urls: "Iterable[str]", cap: int) -> int:
+    def add_urls(self, origin: str, urls: Iterable[str], cap: int) -> int:
         """Add injection points for an origin, respecting a cap.
 
         Modules in the same stage run concurrently, so the obvious

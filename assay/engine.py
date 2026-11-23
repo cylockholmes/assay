@@ -17,7 +17,7 @@ import shutil
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
 from assay import correlate, domains, env, netlas, recon, tools, urls as urlsrc
@@ -59,7 +59,7 @@ NON_HTTP_SERVICES = {
     "mongodb", "redis", "memcached", "irc", "xmpp-client",
 }
 
-TECH_SIGNATURES: List[Tuple[str, str]] = [
+TECH_SIGNATURES: list[tuple[str, str]] = [
     ("WordPress", r"/wp-content/|/wp-includes/|name=[\"']generator[\"'] content=[\"']WordPress"),
     ("Drupal", r"Drupal\.settings|/sites/default/files/|X-Generator: Drupal"),
     ("Joomla", r"/media/jui/|option=com_"),
@@ -100,7 +100,7 @@ class _Ledger:
 
 
 class Engine:
-    def __init__(self, cfg: Config, progress: Optional[Callable] = None) -> None:
+    def __init__(self, cfg: Config, progress: Callable | None = None) -> None:
         cfg.ensure_dirs()
         env.augment_path()
         self.cfg = cfg
@@ -126,7 +126,7 @@ class Engine:
         # the same URLs assay's own client refuses to request.
         tools.PROXY = env.proxy_for_tools(cfg.proxy)
         tools.AVOID = cfg.avoid_regex()
-        self.canary: Optional[SessionCanary] = None
+        self.canary: SessionCanary | None = None
         self.started = 0.0
 
     # ------------------------------------------------------------------
@@ -249,8 +249,8 @@ class Engine:
     # -- stage 1: resolve ------------------------------------------------
     def _stage_resolve(self) -> None:
         self.ctx.say("resolve", "expanding %d target spec(s)" % len(self.cfg.targets))
-        targets: Dict[str, Target] = {}
-        seeds: List[WebTarget] = []
+        targets: dict[str, Target] = {}
+        seeds: list[WebTarget] = []
 
         for raw in self.cfg.targets:
             raw = raw.strip()
@@ -281,7 +281,7 @@ class Engine:
                      % (len(self.ctx.targets), len(seeds)))
 
     @staticmethod
-    def _expand(raw: str, cap: int = 1024) -> List[str]:
+    def _expand(raw: str, cap: int = 1024) -> list[str]:
         if "/" in raw:
             try:
                 net = ipaddress.ip_network(raw, strict=False)
@@ -311,7 +311,7 @@ class Engine:
         Permutation and resolution touch only DNS. Archive and CT-log lookups
         touch a third party, so they stay behind --passive.
         """
-        apexes: Dict[str, Set[str]] = {}
+        apexes: dict[str, set[str]] = {}
         for t in self.ctx.targets:
             if t.is_ip:
                 continue
@@ -322,7 +322,7 @@ class Engine:
             return
 
         known = {t.host for t in self.ctx.targets}
-        candidates: Set[str] = set()
+        candidates: set[str] = set()
 
         for apex, hosts in apexes.items():
             if self.cfg.passive:
@@ -352,7 +352,7 @@ class Engine:
                                       workers=self.tune["concurrency"])
 
         # Discard anything that merely matched a wildcard record.
-        wildcards: Set[str] = set()
+        wildcards: set[str] = set()
         for apex in apexes:
             wildcards |= recon.wildcard_ips(apex)
         added = 0
@@ -373,7 +373,7 @@ class Engine:
         self._portscan(targets)
 
     # -- scan history: skip hosts already covered, record what gets done ----
-    def _skip_already_scanned(self, targets: List[Target]) -> List[Target]:
+    def _skip_already_scanned(self, targets: list[Target]) -> list[Target]:
         """Drop hosts a previous run already swept thoroughly enough, loading
         their stored ports so the rest of the pipeline still sees them.
 
@@ -409,7 +409,7 @@ class Engine:
                               "(--rescan redoes all)" % (len(done), spec, len(fresh)))
         return fresh
 
-    def _load_stored_ports(self, targets: List[Target]) -> None:
+    def _load_stored_ports(self, targets: list[Target]) -> None:
         """Repopulate t.ports for a skipped host from the store, so probing
         and the modules run on it without re-sweeping."""
         by_host = {r["host"]: r for r in self.store.host_rows()}
@@ -432,7 +432,7 @@ class Engine:
             if row["ip"] and not t.ip:
                 t.ip = row["ip"]
 
-    def _record_coverage(self, hosts: List[str], spec: str) -> None:
+    def _record_coverage(self, hosts: list[str], spec: str) -> None:
         """Note in the scan history that these hosts were swept at `spec`.
         A host in the just-finished sweep's missed set is recorded as timed
         out, so it is re-swept next time rather than treated as complete."""
@@ -509,7 +509,7 @@ class Engine:
             self.ctx.say("ports", "deep sweep: Netlas covers %d of %d host(s); "
                                   "sweeping the other %d" % (len(indexed), len(hosts), len(need)))
         need = self._fit_deep_budget(need, targets)
-        swept: Dict[str, List[int]] = {}
+        swept: dict[str, list[int]] = {}
         if need:
             self.ctx.say("ports", "deep naabu sweep (all ports) across %d host(s)" % len(need))
             swept = self._naabu(need, "all", "deep")
@@ -545,7 +545,7 @@ class Engine:
                 "ports": [p.__dict__ for p in t.ports]})
         self.ctx.say("ports", "deep sweep added %d fingerprinted port(s)" % added)
 
-    def _netlas_ports(self, hosts: List[str]) -> Dict[str, List[int]]:
+    def _netlas_ports(self, hosts: list[str]) -> dict[str, list[int]]:
         """Ports Netlas has indexed for these hosts (candidates, not facts).
 
         Empty unless NETLAS_API_KEY is set and passive sources are allowed. The
@@ -575,7 +575,7 @@ class Engine:
                          % (len(out), len(hosts)))
         return out
 
-    def _fit_deep_budget(self, hosts: List[str], targets: List[Target]) -> List[str]:
+    def _fit_deep_budget(self, hosts: list[str], targets: list[Target]) -> list[str]:
         """Trim the deep wave to the time budget, instead of letting it run for
         days and time out batch after batch.
 
@@ -616,7 +616,7 @@ class Engine:
     # SYN proxy or tarpit answering for ports nothing is listening on.
     SUSPECT_PORT_COUNT = 100
 
-    def _reconcile_naabu(self, swept: Dict[str, List[int]], results: Dict,
+    def _reconcile_naabu(self, swept: dict[str, list[int]], results: dict,
                          label: str) -> None:
         """Ledger which of naabu's candidate ports nmap -sV did NOT confirm.
 
@@ -627,7 +627,7 @@ class Engine:
         """
         if not swept:
             return
-        lines: List[str] = []
+        lines: list[str] = []
         total_dropped = 0
         for addr, ports in sorted(swept.items()):
             cand = sorted(set(ports))
@@ -658,7 +658,7 @@ class Engine:
         tools._ledger("naabu-vs-nmap", ["reconcile", label], 0,
                       "findings" if lines else "no-findings", 0.0, body)
 
-    def _naabu(self, hosts: List[str], spec: str, tag: str) -> Dict[str, List[int]]:
+    def _naabu(self, hosts: list[str], spec: str, tag: str) -> dict[str, list[int]]:
         """Batched naabu sweep that records what it could not cover.
 
         Deep scans get a much longer per-batch allowance than the default 3h
@@ -699,7 +699,7 @@ class Engine:
                 pass
         return found
 
-    def _portscan(self, targets: List[Target], xml_prefix: str = "nmap") -> None:
+    def _portscan(self, targets: list[Target], xml_prefix: str = "nmap") -> None:
         """Run the naabu-sweep-then-nmap-sV pipeline against exactly these
         targets, populating t.ports (and t.discovered_hostnames) in place.
 
@@ -717,7 +717,7 @@ class Engine:
         orig_spec = spec                      # coverage key: profile spec, pre-augmentation
         spec = self._with_ai_ports(spec)
         self._sweep_missed = set()
-        swept: Optional[Dict[str, List[int]]] = None
+        swept: dict[str, list[int]] | None = None
 
         if self.cfg.resume:
             targets = self._apply_resume(targets, xml_prefix)
@@ -784,7 +784,7 @@ class Engine:
         self.ctx.say("ports", "%d open port(s) across %d host(s)" % (found, len(results)))
 
     # -- --resume ----------------------------------------------------------
-    def _apply_resume(self, targets: List[Target], xml_prefix: str) -> List[Target]:
+    def _apply_resume(self, targets: list[Target], xml_prefix: str) -> list[Target]:
         """Reuse whatever an earlier nmap already finished under this prefix.
 
         Returns only the targets still needing a scan. A target this recovers
@@ -800,7 +800,7 @@ class Engine:
                                   "run here, scanning fresh" % xml_prefix)
             return targets
 
-        covered_ids: Set[int] = set()   # Target has no __hash__; key on identity
+        covered_ids: set[int] = set()   # Target has no __hash__; key on identity
         found = 0
         for addr, nh in recovered.items():
             t = by_ip.get(addr) or by_host.get(addr)
@@ -858,7 +858,7 @@ class Engine:
         if not candidates:
             return
 
-        new_targets: List[Target] = []
+        new_targets: list[Target] = []
         for name, ip in sorted(candidates.items()):
             if not self.cfg.scope.allows(name):
                 self.cfg.scope.allow.append(name)
@@ -901,8 +901,8 @@ class Engine:
             self.ctx.say("ports", "NmapView render failed - see activity.log")
 
     @staticmethod
-    def _hostname_discovery_candidates(targets: List[Target],
-                                       scope: Scope) -> Dict[str, str]:
+    def _hostname_discovery_candidates(targets: list[Target],
+                                       scope: Scope) -> dict[str, str]:
         """Which reverse-DNS-discovered hostnames are new, and what IP each
         came from.
 
@@ -913,7 +913,7 @@ class Engine:
         it never overrides an exclusion the user set on purpose.
         """
         known = {t.host for t in targets}
-        candidates: Dict[str, str] = {}
+        candidates: dict[str, str] = {}
         for t in targets:
             if not t.is_ip or not t.discovered_hostnames:
                 continue
@@ -927,7 +927,7 @@ class Engine:
         return candidates
 
     @staticmethod
-    def _resolve_swept_hosts(targets: List[Target], swept_keys) -> List[str]:
+    def _resolve_swept_hosts(targets: list[Target], swept_keys) -> list[str]:
         """Map naabu's result keys back to the target hostnames the rest of
         the engine matches against.
 
@@ -964,10 +964,10 @@ class Engine:
             return "top-1000+" + extra
         return spec + "," + extra
 
-    def _native_portscan(self, hosts: List[str]) -> None:
+    def _native_portscan(self, hosts: list[str]) -> None:
         by_host = {t.host: t for t in self.ctx.targets}
 
-        def check(host: str, port: int) -> Optional[Tuple[str, int]]:
+        def check(host: str, port: int) -> tuple[str, int] | None:
             try:
                 with socket.create_connection((host, port), timeout=3):
                     return host, port
@@ -989,7 +989,7 @@ class Engine:
 
     # -- stage 3: HTTP probe ---------------------------------------------
     def _stage_probe(self) -> None:
-        candidates: List[Tuple[Target, Port]] = []
+        candidates: list[tuple[Target, Port]] = []
         for t in self.ctx.targets:
             for p in t.ports:
                 if p.proto != "tcp":
@@ -1016,7 +1016,7 @@ class Engine:
         # itself still holds from before filtering ever ran.
         if candidates:
             self.ctx.say("probe", "probing %d host:port candidate(s)" % len(candidates))
-            seen: Set[str] = {w.key() for w in self.ctx.web}
+            seen: set[str] = {w.key() for w in self.ctx.web}
 
             used_httpx = False
             # httpx probes far faster than a Python thread pool once there are
@@ -1052,8 +1052,8 @@ class Engine:
         # Calibrate soft-404 baselines up front; every content check depends on it.
         self._calibrate()
 
-    def _apply_probe_resume(self, candidates: List[Tuple[Target, "Port"]]
-                            ) -> List[Tuple[Target, "Port"]]:
+    def _apply_probe_resume(self, candidates: list[tuple[Target, Port]]
+                            ) -> list[tuple[Target, Port]]:
         """--resume: reuse whatever the probe stage already confirmed live,
         the same spirit as _apply_resume() reusing a prior nmap.xml.
 
@@ -1090,7 +1090,7 @@ class Engine:
                      % (added, len(remaining)))
         return remaining
 
-    def _probe_via_httpx(self, candidates, seen: Set[str]) -> int:
+    def _probe_via_httpx(self, candidates, seen: set[str]) -> int:
         targets = ["%s:%d" % (t.host, p.port) for t, p in candidates]
         added = 0
         try:
@@ -1168,7 +1168,7 @@ class Engine:
         with ThreadPoolExecutor(max_workers=min(6, self.tune["concurrency"])) as pool:
             list(pool.map(self.ctx.baseline_for, origins))
 
-    def _probe_one(self, t: Target, p: Port) -> Optional[WebTarget]:
+    def _probe_one(self, t: Target, p: Port) -> WebTarget | None:
         schemes = ("https", "http") if (p.is_tls or p.port in (443, 8443, 9443)) \
             else ("http", "https")
         for scheme in schemes:
@@ -1197,7 +1197,7 @@ class Engine:
         return None
 
     @staticmethod
-    def _fingerprint(body: str, headers: Dict[str, str]) -> List[str]:
+    def _fingerprint(body: str, headers: dict[str, str]) -> list[str]:
         blob = body + "\n" + "\n".join("%s: %s" % kv for kv in headers.items())
         tech = [name for name, pattern in TECH_SIGNATURES
                 if re.search(pattern, blob, re.I)]
@@ -1207,7 +1207,7 @@ class Engine:
         powered = headers.get("X-Powered-By") or headers.get("x-powered-by")
         if powered:
             tech.append(powered.split("/")[0].strip())
-        seen: List[str] = []
+        seen: list[str] = []
         for x in tech:
             if x and x not in seen:
                 seen.append(x)
@@ -1223,7 +1223,7 @@ class Engine:
         if not self.ctx.web:
             return
         cap = self.cfg.opts.get("max_urls_per_host", 60)
-        raw: Dict[str, List[str]] = {}
+        raw: dict[str, list[str]] = {}
 
         def add(origin: str, found: Iterable[str]) -> int:
             bucket = raw.setdefault(origin, [])
@@ -1281,7 +1281,7 @@ class Engine:
         self.ctx.say("urls", "%d injection point(s), %d carrying parameters"
                      % (total, withp))
 
-    def _seed_urls(self) -> Dict[str, List[str]]:
+    def _seed_urls(self) -> dict[str, list[str]]:
         """--seed captures, grouped under the web target origin they belong to.
 
         A capture is full of third-party hosts (analytics, CDNs, SSO) and of
@@ -1302,8 +1302,8 @@ class Engine:
                     port or {"http": 80, "https": 443}.get(scheme))
 
         by_key = {key(w.base_url): origin_of(w.base_url) for w in self.ctx.web}
-        out: Dict[str, List[str]] = {}
-        other_hosts: Set[str] = set()
+        out: dict[str, list[str]] = {}
+        other_hosts: set[str] = set()
         total = avoided = 0
         for path in self.cfg.seeds:
             found, dropped = seed_urls(path)
@@ -1332,7 +1332,7 @@ class Engine:
                          % ", ".join(sorted(other_hosts)[:5]))
         return out
 
-    def _source_crawl(self, add, cap: int, extra: Optional[List[str]] = None) -> None:
+    def _source_crawl(self, add, cap: int, extra: list[str] | None = None) -> None:
         targets = [w.base_url for w in self.ctx.web]
         # Seeds are start points too: katana crawls outward from each, which
         # is how it reaches the rest of a logged-in area.
@@ -1382,7 +1382,7 @@ class Engine:
             if r.ok:
                 scripts += [urljoin(r.url, src) for src in
                             script_re.findall(r.body[:400000])]
-            seen_js: Set[str] = set()
+            seen_js: set[str] = set()
             for js_url in scripts:
                 if js_url in seen_js or js_url.startswith("data:"):
                     continue
@@ -1409,7 +1409,7 @@ class Engine:
         calls concurrently and report as they land.
         """
         budget = 4 if self.cfg.profile == "standard" else 12
-        tasks: List[Tuple[str, str]] = []
+        tasks: list[tuple[str, str]] = []
         for origin, bucket in self.ctx.urls.items():
             # Prefer parameterless URLs - those are the ones a crawl cannot help.
             for u in [b for b in bucket if "?" not in b][:budget]:
@@ -1470,7 +1470,7 @@ class Engine:
             return
         self.ctx.say(stage, "running %s" % ", ".join(m.name for m in mods))
 
-        jobs: List[Tuple] = []
+        jobs: list[tuple] = []
         for m in mods:
             if m.scope == "web":
                 jobs += [(m, "web", w) for w in self.ctx.web]
@@ -1498,7 +1498,7 @@ class Engine:
                                     type(exc).__name__))
                 self.ctx.say(stage, "%d/%d" % (done, len(jobs)), advance=1)
 
-    def _run_module(self, module, kind: str, subject) -> List[Finding]:
+    def _run_module(self, module, kind: str, subject) -> list[Finding]:
         # Every job for this stage was already submitted to the pool before
         # _stage_modules() started draining it (as_completed doesn't support
         # cancelling a future that hasn't started yet), so this is the one
@@ -1541,7 +1541,7 @@ class Engine:
             self.ctx.say("correlate", "%d attack chain(s): %s"
                          % (len(found), "; ".join(c.name for c in found[:3])))
 
-    def _katana_avoid(self) -> Optional[str]:
+    def _katana_avoid(self) -> str | None:
         """The avoid list as a katana -cos regex.
 
         katana matches it against the whole URL, so it is anchored past the
@@ -1554,9 +1554,9 @@ class Engine:
         return r"(?i)^[a-z][a-z0-9+.-]*://[^/?#]*[/?].*(?:%s)" % rx.pattern
 
     # -- summary ----------------------------------------------------------
-    def assets(self) -> Dict:
-        tech: Set[str] = set()
-        services: Set[str] = set()
+    def assets(self) -> dict:
+        tech: set[str] = set()
+        services: set[str] = set()
         for w in self.ctx.web:
             tech.update(w.tech)
         for t in self.ctx.targets:

@@ -20,7 +20,6 @@ one-shot 200 is often noise rather than a bypass.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -31,7 +30,7 @@ from assay.net import Resp, similarity
 from assay.urls import origin_of
 
 # Path mutations. Each is (label, transform) applied to the guarded path.
-PATH_TRICKS: List[Tuple[str, str]] = [
+PATH_TRICKS: list[tuple[str, str]] = [
     ("trailing dot", "%s/."),
     ("double slash", "%s//"),
     ("leading dot-slash", "/.%s"),
@@ -50,7 +49,7 @@ PATH_TRICKS: List[Tuple[str, str]] = [
 
 # Headers that make a reverse proxy or framework re-evaluate the route or the
 # apparent client address.
-HEADER_TRICKS: List[Tuple[str, Dict[str, str]]] = [
+HEADER_TRICKS: list[tuple[str, dict[str, str]]] = [
     ("X-Original-URL", {"X-Original-URL": "{path}"}),
     ("X-Rewrite-URL", {"X-Rewrite-URL": "{path}"}),
     ("X-Forwarded-For localhost", {"X-Forwarded-For": "127.0.0.1"}),
@@ -74,7 +73,7 @@ PROBE_PATHS = ["/admin", "/administrator", "/manage", "/management", "/console",
                "/metrics", "/debug", "/status", "/server-status", "/config"]
 
 
-def case_variants(path: str) -> List[Tuple[str, str]]:
+def case_variants(path: str) -> list[tuple[str, str]]:
     """Some routers match case-sensitively while the guard does not."""
     letters = [c for c in path if c.isalpha()]
     if not letters:
@@ -98,14 +97,14 @@ class ForbiddenBypassModule(Module):
     impact_class = "probe"
     desc = "401/403 access-control bypass via path, header and method tricks"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         origin = origin_of(wt.base_url)
         guarded = self._guarded_paths(ctx, origin)
         if not guarded:
             return []
 
         bl = ctx.baseline_for(origin)
-        out: List[Finding] = []
+        out: list[Finding] = []
         budget = 2 if ctx.cfg.profile == "quick" else (
             5 if ctx.cfg.profile == "standard" else 12)
 
@@ -117,9 +116,9 @@ class ForbiddenBypassModule(Module):
 
     # ------------------------------------------------------------------
     def _guarded_paths(self, ctx: Context,
-                       origin: str) -> List[Tuple[str, Resp]]:
+                       origin: str) -> list[tuple[str, Resp]]:
         """Paths that actually answer 401/403 - the only ones worth bypassing."""
-        candidates: List[str] = []
+        candidates: list[str] = []
         for u in ctx.urls.get(origin, []):
             p = urlsplit(u).path
             if p and p not in candidates:
@@ -127,7 +126,7 @@ class ForbiddenBypassModule(Module):
         if ctx.cfg.profile != "quick":
             candidates += [p for p in PROBE_PATHS if p not in candidates]
 
-        guarded: List[Tuple[str, Resp]] = []
+        guarded: list[tuple[str, Resp]] = []
         for path in candidates[:24]:
             r = ctx.http.get(origin + path)
             if r.ok and r.status in (401, 403):
@@ -137,7 +136,7 @@ class ForbiddenBypassModule(Module):
         return guarded
 
     def _attempt(self, ctx: Context, origin: str, path: str,
-                 denial: Resp, bl) -> Optional[Finding]:
+                 denial: Resp, bl) -> Finding | None:
         for label, variant in self._variants(path):
             r = ctx.http.get(origin + variant)
             if not self._is_bypass(r, denial, bl):
@@ -185,7 +184,7 @@ class ForbiddenBypassModule(Module):
                                  r.curl(), denial, r)
         return None
 
-    def _variants(self, path: str) -> List[Tuple[str, str]]:
+    def _variants(self, path: str) -> list[tuple[str, str]]:
         out = [(label, tmpl % path) for label, tmpl in PATH_TRICKS]
         out += case_variants(path)
         return out

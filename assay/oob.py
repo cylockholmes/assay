@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Dict, Optional, Tuple
 
 from assay.net import rand_token
 
@@ -25,13 +24,13 @@ from assay.net import rand_token
 class OOBSession:
     """Issues correlatable payloads and records what carried each one."""
 
-    def __init__(self, out_dir: str, domain: Optional[str] = None,
+    def __init__(self, out_dir: str, domain: str | None = None,
                  enabled: bool = True) -> None:
         self.out_dir = out_dir
         self.mode = "off"
-        self.domain: Optional[str] = domain
+        self.domain: str | None = domain
         self.enabled = enabled
-        self._ledger: Dict[str, str] = {}      # payload id -> what carried it
+        self._ledger: dict[str, str] = {}      # payload id -> what carried it
         self._lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
@@ -54,7 +53,7 @@ class OOBSession:
     def active(self) -> bool:
         return self.mode == "ledger"
 
-    def payload(self, label: str) -> Tuple[str, str]:
+    def payload(self, label: str) -> tuple[str, str]:
         """Mint a correlatable hostname. Returns (payload_id, hostname)."""
         pid = "sf%s" % rand_token(8)
         host = "%s.%s" % (pid, self.domain) if self.domain else pid
@@ -62,7 +61,7 @@ class OOBSession:
             self._ledger[pid] = label
         return pid, host
 
-    def flush_ledger(self) -> Optional[str]:
+    def flush_ledger(self) -> str | None:
         """Write payload -> carrier so a callback can be traced back."""
         with self._lock:
             if not self._ledger:

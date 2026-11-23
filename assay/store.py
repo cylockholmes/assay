@@ -12,7 +12,8 @@ import sqlite3
 import threading
 import time
 from dataclasses import asdict, fields
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
+from collections.abc import Iterator
 from urllib.parse import urlsplit
 
 from assay.models import Evidence, Finding, WebTarget
@@ -175,7 +176,7 @@ class Store:
         self._conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
-    def start_run(self, profile: str, targets: List[str], args: str = "") -> int:
+    def start_run(self, profile: str, targets: list[str], args: str = "") -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO runs (started, profile, targets, args) VALUES (?,?,?,?)",
@@ -218,7 +219,7 @@ class Store:
             )
             self._conn.commit()
 
-    def stage_status(self, stage: str) -> Optional[str]:
+    def stage_status(self, stage: str) -> str | None:
         """How `stage` last ended, across every run against this database -
         None if it has never been attempted at all."""
         with self._lock:
@@ -228,7 +229,7 @@ class Store:
             ).fetchone()
             return row["status"] if row else None
 
-    def stage_history(self) -> List[sqlite3.Row]:
+    def stage_history(self) -> list[sqlite3.Row]:
         """The most recent attempt at each stage, for a human-readable
         summary of what a prior run did and did not get through."""
         with self._lock:
@@ -265,7 +266,7 @@ class Store:
             )
             self._conn.commit()
 
-    def tool_runs(self, run_id: Optional[int] = None) -> List[sqlite3.Row]:
+    def tool_runs(self, run_id: int | None = None) -> list[sqlite3.Row]:
         """Every tool invocation for a run, in order. Defaults to the current
         run; `assay report` on a prior run passes that run's id."""
         rid = self.run_id if run_id is None else run_id
@@ -282,7 +283,7 @@ class Store:
     # page, output_sent is the redacted+capped text (if any) that went back to
     # the model. The two never mix - the proof surface is local-only.
     def record_followup_result(self, round: int, finding_id: str, finding_title: str,
-                               tool: str, argv: str, tier: str, rc: Optional[int], state: str,
+                               tool: str, argv: str, tier: str, rc: int | None, state: str,
                                output_local: str = "", output_sent: str = "",
                                sent: bool = False) -> None:
         local = output_local or ""
@@ -298,7 +299,7 @@ class Store:
             )
             self._conn.commit()
 
-    def followup_results(self, run_id: Optional[int] = None) -> List[sqlite3.Row]:
+    def followup_results(self, run_id: int | None = None) -> list[sqlite3.Row]:
         rid = self.run_id if run_id is None else run_id
         with self._lock:
             return self._conn.execute(
@@ -365,7 +366,7 @@ class Store:
             return True
 
     def findings(self, min_score: float = 0.0, limit: int = 0,
-                 include_muted: bool = True) -> List[Finding]:
+                 include_muted: bool = True) -> list[Finding]:
         q = "SELECT * FROM findings WHERE score >= ?"
         if not include_muted:
             q += " AND (status IS NULL OR status NOT IN (%s))" % ",".join(
@@ -385,7 +386,7 @@ class Store:
         for r in rows:
             yield self._row_to_finding(r)
 
-    def counts(self) -> Dict[str, int]:
+    def counts(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT triage, COUNT(*) c FROM findings GROUP BY triage"
@@ -411,7 +412,7 @@ class Store:
                 "SELECT status FROM findings WHERE fid=?", (fid,)).fetchone()
         return (row["status"] if row else "new") or "new"
 
-    def status_counts(self) -> Dict[str, int]:
+    def status_counts(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT status, COUNT(*) c FROM findings GROUP BY status").fetchall()
@@ -453,7 +454,7 @@ class Store:
         return f
 
     # -- assets ------------------------------------------------------------
-    def save_host(self, host: str, ip: str, data: Dict) -> None:
+    def save_host(self, host: str, ip: str, data: dict) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO hosts (host, ip, data, updated, first_run, last_run)"
@@ -504,7 +505,7 @@ class Store:
                 (host, ip, spec, time.time(), to, self.run_id))
             self._conn.commit()
 
-    def scan_history(self) -> Dict[str, sqlite3.Row]:
+    def scan_history(self) -> dict[str, sqlite3.Row]:
         """host -> its coverage row (port_spec, completed, timed_out, run_id)."""
         with self._lock:
             try:
@@ -514,7 +515,7 @@ class Store:
         return {r["host"]: r for r in rows}
 
     def save_web(self, url: str, host: str, port: int, status: int, title: str,
-                 server: str, tech: List[str], data: Dict) -> None:
+                 server: str, tech: list[str], data: dict) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO web (url, host, port, status, title, server, tech,"
@@ -549,7 +550,7 @@ class Store:
         self.save_web(wt.url, wt.host, wt.port, wt.status, wt.title,
                       wt.server, wt.tech, data)
 
-    def web_targets(self) -> List[WebTarget]:
+    def web_targets(self) -> list[WebTarget]:
         """Reconstruct every stored WebTarget - the inverse of
         save_web_target(), and what --resume rebuilds ctx.web from instead
         of re-probing every candidate.
@@ -560,7 +561,7 @@ class Store:
         than raising on a missing key, so an old database degrades to "not
         much to resume from" instead of refusing to start.
         """
-        out: List[WebTarget] = []
+        out: list[WebTarget] = []
         for row in self.web_rows():
             try:
                 data = json.loads(row["data"] or "{}")
@@ -581,21 +582,21 @@ class Store:
             ))
         return out
 
-    def web_rows(self) -> List[sqlite3.Row]:
+    def web_rows(self) -> list[sqlite3.Row]:
         with self._lock:
             return self._conn.execute("SELECT * FROM web ORDER BY host, port").fetchall()
 
-    def host_rows(self) -> List[sqlite3.Row]:
+    def host_rows(self) -> list[sqlite3.Row]:
         with self._lock:
             return self._conn.execute("SELECT * FROM hosts ORDER BY host").fetchall()
 
     # -- diffing -----------------------------------------------------------
-    def runs(self, limit: int = 20) -> List[sqlite3.Row]:
+    def runs(self, limit: int = 20) -> list[sqlite3.Row]:
         with self._lock:
             return self._conn.execute(
                 "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
-    def diff(self, run_id: Optional[int] = None) -> Dict[str, Any]:
+    def diff(self, run_id: int | None = None) -> dict[str, Any]:
         """What changed in `run_id` compared with everything before it.
 
         Re-running against the same engagement should surface the delta, not
@@ -634,7 +635,7 @@ class Store:
         return bool(row and row["run_id"] == self.run_id)
 
     # -- AI triage ---------------------------------------------------------
-    def save_ai(self, result: Dict) -> int:
+    def save_ai(self, result: dict) -> int:
         """Persist an AI triage pass. Returns the number of findings annotated."""
         n = 0
         with self._lock:
@@ -665,20 +666,20 @@ class Store:
         return n
 
     @staticmethod
-    def _ai_row(row: sqlite3.Row) -> Dict:
+    def _ai_row(row: sqlite3.Row) -> dict:
         return {"verdict": row["verdict"], "priority": row["priority"],
                 "fp_risk": row["fp_risk"], "rationale": row["rationale"],
                 "impact": row["impact"],
                 "next_steps": json.loads(row["next_steps"] or "[]"),
                 "commands": json.loads(row["commands"] or "[]")}
 
-    def ai_for(self, fid: str) -> Optional[Dict]:
+    def ai_for(self, fid: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM ai_triage WHERE fid=?", (fid,)).fetchone()
         return self._ai_row(row) if row else None
 
-    def ai_map(self) -> Dict[str, Dict]:
+    def ai_map(self) -> dict[str, dict]:
         """Every AI verdict, keyed by finding, in one query.
 
         Rendering asked ai_for() once per finding, so a report over a few
@@ -689,7 +690,7 @@ class Store:
             rows = self._conn.execute("SELECT * FROM ai_triage").fetchall()
         return {r["fid"]: self._ai_row(r) for r in rows}
 
-    def save_chains(self, chains: List[Dict], source: str = "assay") -> int:
+    def save_chains(self, chains: list[dict], source: str = "assay") -> int:
         """Persist locally-derived chains, replacing the previous set."""
         with self._lock:
             self._conn.execute("DELETE FROM ai_chains WHERE source=?", (source,))
@@ -705,14 +706,14 @@ class Store:
         return len(chains)
 
     def update_finding_score(self, fid: str, score: float, triage: str,
-                             tags: List[str], notes: str) -> None:
+                             tags: list[str], notes: str) -> None:
         with self._lock:
             self._conn.execute(
                 "UPDATE findings SET score=?, triage=?, tags=?, notes=? WHERE fid=?",
                 (score, triage, json.dumps(tags), notes, fid))
             self._conn.commit()
 
-    def ai_chains(self) -> List[Dict]:
+    def ai_chains(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM ai_chains ORDER BY"

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional
 
 import yaml
 
@@ -34,13 +33,13 @@ CATEGORY_MAP = {
 
 TIER_RANK = {"quick": 0, "standard": 1, "deep": 2}
 
-_SIGCACHE: Optional[List[dict]] = None
+_SIGCACHE: list[dict] | None = None
 
 
-def load_signatures() -> List[dict]:
+def load_signatures() -> list[dict]:
     global _SIGCACHE
     if _SIGCACHE is None:
-        with open(os.path.join(DATA, "paths.yaml"), "r", encoding="utf-8") as fh:
+        with open(os.path.join(DATA, "paths.yaml"), encoding="utf-8") as fh:
             doc = yaml.safe_load(fh) or {}
         sigs = doc.get("signatures", [])
         for s in sigs:
@@ -57,13 +56,13 @@ class ExposureModule(Module):
     impact_class = "read"
     desc = "Exposed VCS dirs, secrets files, debug endpoints and admin consoles"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         origin = wt.base_url.rstrip("/")
         # Strip any path so signatures are tested against the web root.
         origin = origin_of(origin)
         max_tier = TIER_RANK.get(ctx.cfg.profile, 1)
         bl = ctx.baseline_for(origin)
-        out: List[Finding] = []
+        out: list[Finding] = []
 
         for sig in load_signatures():
             if TIER_RANK.get(sig.get("tier", "standard"), 1) > max_tier:
@@ -74,7 +73,7 @@ class ExposureModule(Module):
         return out
 
     # ------------------------------------------------------------------
-    def _test(self, ctx: Context, origin: str, sig: dict, bl) -> Optional[Finding]:
+    def _test(self, ctx: Context, origin: str, sig: dict, bl) -> Finding | None:
         url = origin + sig["path"]
         r = ctx.http.get(url)
         if not self._is_hit(r, sig, bl):
@@ -150,11 +149,11 @@ class DirListingModule(Module):
             "/backups/", "/images/", "/js/", "/css/", "/tmp/", "/logs/",
             "/download/", "/media/", "/data/", "/includes/", "/config/"]
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         origin = origin_of(wt.base_url)
         bl = ctx.baseline_for(origin)
         limit = 3 if ctx.cfg.profile == "quick" else len(self.DIRS)
-        hits: List[str] = []
+        hits: list[str] = []
         first = None
         for d in self.DIRS[:limit]:
             r = ctx.http.get(origin + d)
@@ -208,11 +207,11 @@ class BackupFileModule(Module):
     def applicable(self, ctx: Context) -> bool:
         return ctx.cfg.profile == "deep" and Module.applicable(self, ctx)
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         origin = origin_of(wt.base_url)
         bl = ctx.baseline_for(origin)
         candidates = self._candidates(ctx, origin)
-        out: List[Finding] = []
+        out: list[Finding] = []
         for base in candidates[:12]:
             for suffix in self.SUFFIXES:
                 r = ctx.http.get(base + suffix)
@@ -246,8 +245,8 @@ class BackupFileModule(Module):
                 break
         return out
 
-    def _candidates(self, ctx: Context, origin: str) -> List[str]:
-        seen: List[str] = []
+    def _candidates(self, ctx: Context, origin: str) -> list[str]:
+        seen: list[str] = []
         for u in ctx.urls.get(origin, []):
             if re.search(r"\.(php|aspx?|jsp|jspx|cfm|py|rb|pl|inc|config)(\?|$)", u, re.I):
                 base = u.split("?")[0]

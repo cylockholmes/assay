@@ -23,8 +23,10 @@ import os
 import re
 import stat
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
+from functools import cache
+from typing import Any
+from re import Pattern
+from collections.abc import Iterable
 
 # The redaction allowlist (public domains never pseudonymised) lives in its own
 # module so it can be read and tuned on its own. See domain_allowlist.py.
@@ -39,7 +41,7 @@ def _rx(pattern: str, flags: int = 0) -> Pattern:
 # Detectors. Order is significant: earlier detectors win the text they claim.
 # --------------------------------------------------------------------------
 
-DETECTORS: List[Tuple[str, Pattern]] = [
+DETECTORS: list[tuple[str, Pattern]] = [
     # -- high-entropy credentials first, before anything can fragment them ---
     ("KEY", _rx(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----"
                 r"[\s\S]{0,4000}?-----END (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----")),
@@ -82,7 +84,7 @@ DETECTORS: List[Tuple[str, Pattern]] = [
 # Detectors that must run after the known-client-term pass. Splitting here keeps
 # the client-term substitution from fragmenting an email or a credential before
 # its own detector has had a chance to claim the whole string.
-NETWORK_DETECTORS: List[Tuple[str, Pattern]] = [
+NETWORK_DETECTORS: list[tuple[str, Pattern]] = [
     ("MAC", _rx(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")),
     ("IPV6", _rx(r"\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b")),
     ("IP", _rx(r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
@@ -99,7 +101,7 @@ NETWORK_DETECTORS: List[Tuple[str, Pattern]] = [
     ("BLOB", _rx(r"\b[A-Za-z0-9+/]{60,}={0,2}\b")),
 ]
 
-ALL_DETECTORS: List[Tuple[str, Pattern]] = DETECTORS + NETWORK_DETECTORS
+ALL_DETECTORS: list[tuple[str, Pattern]] = DETECTORS + NETWORK_DETECTORS
 
 # Detectors whose *capture group 1* is the sensitive part (the rest is a label
 # we want to keep so the model still understands the shape of the data).
@@ -110,9 +112,9 @@ GROUP_DETECTORS = {"SECRET", "COOKIE", "AUTHHDR", "USER"}
 class RedactionMap:
     """Bidirectional map between real values and their pseudonyms."""
 
-    forward: Dict[str, str] = field(default_factory=dict)   # real -> token
-    reverse: Dict[str, str] = field(default_factory=dict)   # token -> real
-    counters: Dict[str, int] = field(default_factory=dict)
+    forward: dict[str, str] = field(default_factory=dict)   # real -> token
+    reverse: dict[str, str] = field(default_factory=dict)   # token -> real
+    counters: dict[str, int] = field(default_factory=dict)
 
     def token_for(self, kind: str, value: str) -> str:
         key = "%s\x00%s" % (kind, value)
@@ -144,8 +146,8 @@ class RedactionMap:
         os.replace(tmp, path)   # atomic on POSIX and Windows
 
     @classmethod
-    def load(cls, path: str) -> "RedactionMap":
-        with open(path, "r", encoding="utf-8") as fh:
+    def load(cls, path: str) -> RedactionMap:
+        with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
         m = cls()
         m.reverse = payload.get("reverse", {})
@@ -162,17 +164,17 @@ class RedactionMap:
         return text
 
 
-@lru_cache(maxsize=None)
-def _term_rx(term: str) -> "re.Pattern":
+@cache
+def _term_rx(term: str) -> re.Pattern:
     return re.compile(re.escape(term), re.I)
 
 
 class Redactor:
-    def __init__(self, extra_terms: Optional[Iterable[str]] = None) -> None:
+    def __init__(self, extra_terms: Iterable[str] | None = None) -> None:
         self.map = RedactionMap()
         # Terms we positively know identify this client: scope entries, target
         # hostnames, resolved IPs. Used both to redact and to verify.
-        self.extra_terms: List[str] = sorted(
+        self.extra_terms: list[str] = sorted(
             {t.strip().lower() for t in (extra_terms or []) if t and len(t.strip()) > 3},
             key=len, reverse=True,
         )
@@ -200,7 +202,7 @@ class Redactor:
             out = rx.sub(lambda m, k=kind: self._replace(m, k), out)
         return out
 
-    def _replace(self, m: "re.Match", kind: str) -> str:
+    def _replace(self, m: re.Match, kind: str) -> str:
         whole = m.group(0)
         if kind in GROUP_DETECTORS and m.lastindex:
             sensitive = m.group(1)
@@ -255,12 +257,12 @@ class Redactor:
         return value
 
     # -- verification ------------------------------------------------------
-    def verify(self, text: str) -> List[str]:
+    def verify(self, text: str) -> list[str]:
         """Re-scan redacted output. Returns a list of residual leaks.
 
         A non-empty result means the payload MUST NOT be transmitted.
         """
-        leaks: List[str] = []
+        leaks: list[str] = []
         # Lowercased once. This runs over the whole redacted payload - a
         # megabyte on a large engagement - and both loops below are over
         # hundreds or thousands of entries, so folding it inside them copied
@@ -294,7 +296,7 @@ class Redactor:
 
 
 def terms_from_context(targets: Iterable[str], scope_allow: Iterable[str],
-                       hosts: Iterable[str]) -> List[str]:
+                       hosts: Iterable[str]) -> list[str]:
     """Build the known-client-term list used for redaction and verification."""
     terms: set = set()
     for group in (targets, scope_allow, hosts):

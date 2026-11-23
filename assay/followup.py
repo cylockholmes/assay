@@ -23,7 +23,6 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import tools
@@ -79,7 +78,7 @@ SEND_ELIGIBLE = {
 }
 
 
-def tier_of(argv: List[str]) -> str:
+def tier_of(argv: list[str]) -> str:
     """'passive' (auto-run eligible) or 'active' (needs consent). Default-deny:
     anything not provably passive is active."""
     if not argv:
@@ -119,10 +118,10 @@ class Command:
     finding_title: str = ""
     ok: bool = False
     reason: str = ""
-    argv: List[str] = field(default_factory=list)
-    hosts: List[str] = field(default_factory=list)
+    argv: list[str] = field(default_factory=list)
+    hosts: list[str] = field(default_factory=list)
     output: str = ""
-    rc: Optional[int] = None
+    rc: int | None = None
     tier: str = "active"   # 'passive' (auto-run eligible) or 'active' (consent)
 
     @property
@@ -130,8 +129,8 @@ class Command:
         return " ".join(self.argv) if self.argv else self.raw
 
 
-def extract_hosts(text: str) -> List[str]:
-    found: List[str] = []
+def extract_hosts(text: str) -> list[str]:
+    found: list[str] = []
     for m in HOSTLIKE.finditer(text):
         host = m.group(0)
         if host.startswith("http"):
@@ -190,7 +189,7 @@ def vet(raw: str, cfg: Config) -> Command:
     return cmd
 
 
-def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> Tuple[Optional[str], List[str]]:
+def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> tuple[str | None, list[str]]:
     """Decide whether a command's output may go back to the AI (PLAN-LOOP §3).
 
     Returns (sendable_text, leaks). sendable_text is None when the output must
@@ -214,7 +213,7 @@ def rescrub(output: str, tool: str, redactor, cap: int = 8192) -> Tuple[Optional
 _HTTP_STATUS = re.compile(r"^HTTP/[\d.]+\s+(\d{3})", re.M)
 
 
-def digest(output: str, rc: Optional[int]) -> str:
+def digest(output: str, rc: int | None) -> str:
     """Content-free summary of output that may not be sent verbatim.
 
     Tools outside SEND_ELIGIBLE (curl, openssl, ...) can return arbitrary
@@ -232,8 +231,8 @@ def digest(output: str, rc: Optional[int]) -> str:
     return "output withheld (not send-eligible): " + "; ".join(parts)
 
 
-def plan_followups(vetted: List[Command], auto_mode: str = "passive",
-                   rate_cap_per_host: int = 5) -> Tuple[List[Command], List[Command], List[Command]]:
+def plan_followups(vetted: list[Command], auto_mode: str = "passive",
+                   rate_cap_per_host: int = 5) -> tuple[list[Command], list[Command], list[Command]]:
     """Partition vetted commands into (auto_run, queued, refused) for one round.
 
     Default-deny all the way down:
@@ -243,10 +242,10 @@ def plan_followups(vetted: List[Command], auto_mode: str = "passive",
         within the per-host rate cap - anything over the cap is queued, so
         'passive' can never become a slow scan by sheer volume.
     """
-    auto: List[Command] = []
-    queued: List[Command] = []
-    refused: List[Command] = []
-    per_host: Dict[str, int] = {}
+    auto: list[Command] = []
+    queued: list[Command] = []
+    refused: list[Command] = []
+    per_host: dict[str, int] = {}
     for c in vetted:
         if not c.ok:
             refused.append(c)
@@ -280,14 +279,14 @@ def run(cmd: Command, timeout: float = 120.0) -> Command:
     return cmd
 
 
-def collect(store, redaction_map=None) -> List[Command]:
+def collect(store, redaction_map=None) -> list[Command]:
     """Gather every AI-suggested command, un-redacted, in priority order.
 
     `redaction_map` is the run's RedactionMap. The model wrote these commands
     against pseudonyms, so without it they still carry [HOST-02] and will not
     resolve; putting the real values back is a purely local operation.
     """
-    out: List[Command] = []
+    out: list[Command] = []
     ai_by_fid = store.ai_map()          # one query, not one per finding
     for f in store.iter_findings():
         ai = ai_by_fid.get(f.fingerprint())

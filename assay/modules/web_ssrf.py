@@ -17,7 +17,6 @@ manual correlation beats a check that was skipped.
 from __future__ import annotations
 
 import re
-from typing import List, Optional
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -45,9 +44,9 @@ class SsrfModule(Module):
     impact_class = "probe"
     desc = "Server-side request forgery, in-band and out-of-band"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         oob = getattr(ctx, "oob", None)
-        out: List[Finding] = []
+        out: list[Finding] = []
         tested: set = set()
         budget = 6 if ctx.cfg.profile == "quick" else (
             16 if ctx.cfg.profile == "standard" else 40)
@@ -69,7 +68,7 @@ class SsrfModule(Module):
         return out
 
     # ------------------------------------------------------------------
-    def _probe(self, ctx: Context, url: str, param: str, oob) -> Optional[Finding]:
+    def _probe(self, ctx: Context, url: str, param: str, oob) -> Finding | None:
         if not (oob and oob.active):
             return None
 

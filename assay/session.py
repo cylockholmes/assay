@@ -25,7 +25,7 @@ import re
 import socket
 import threading
 import time
-from typing import Callable, List, Optional, Tuple
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from assay import tools
@@ -38,7 +38,7 @@ RECHECK_SECONDS = 5.0
 PAUSED_POLL_SECONDS = 15.0
 
 
-def logged_in(resp, expect: str = "") -> Tuple[bool, str]:
+def logged_in(resp, expect: str = "") -> tuple[bool, str]:
     """Does this canary response look like a logged-in page? (ok, reason)"""
     if resp.status == 0:
         if resp.error == "avoided":
@@ -59,7 +59,7 @@ def logged_in(resp, expect: str = "") -> Tuple[bool, str]:
     return True, "HTTP %d" % resp.status
 
 
-def proxy_reachable(proxy: str, timeout: float = 5.0) -> Optional[str]:
+def proxy_reachable(proxy: str, timeout: float = 5.0) -> str | None:
     """None when something is listening at the proxy address, else why not."""
     parts = urlsplit(proxy if "://" in proxy else "http://" + proxy)
     host = parts.hostname
@@ -77,14 +77,14 @@ def proxy_reachable(proxy: str, timeout: float = 5.0) -> Optional[str]:
             host, port, exc.strerror or type(exc).__name__)
 
 
-def preflight(cfg, http=None) -> List[str]:
+def preflight(cfg, http=None) -> list[str]:
     """Problems that make an authenticated scan pointless, found before it starts.
 
     Each is something that would otherwise surface hours in as a scan of the
     login page: Burp not listening, a canary that is not actually logged in,
     a seed file with nothing in it.
     """
-    problems: List[str] = []
+    problems: list[str] = []
     if cfg.proxy:
         err = proxy_reachable(cfg.proxy)
         if err:
@@ -135,9 +135,9 @@ class SessionCanary:
 
     def __init__(self, http, url: str, expect: str = "",
                  interval: float = 60.0,
-                 say: Optional[Callable[[str, str], None]] = None,
-                 notify: Optional[Callable[[str], object]] = None,
-                 note: Optional[Callable[[str], None]] = None) -> None:
+                 say: Callable[[str, str], None] | None = None,
+                 notify: Callable[[str], object] | None = None,
+                 note: Callable[[str], None] | None = None) -> None:
         self.http = http
         self.url = url
         self.expect = expect
@@ -146,13 +146,13 @@ class SessionCanary:
         self._notify = notify or (lambda text: None)
         self._note = note or (lambda text: None)
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self.paused_by_us = False
         self.checks = 0
         # (started, ended) wall-clock pairs; ended is None while still out.
-        self.outages: List[List[Optional[float]]] = []
+        self.outages: list[list[float | None]] = []
 
-    def check(self) -> Tuple[bool, str]:
+    def check(self) -> tuple[bool, str]:
         self.checks += 1
         r = self.http.request("GET", self.url, allow_redirects=False, canary=True)
         return logged_in(r, self.expect)

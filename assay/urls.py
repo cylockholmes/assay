@@ -18,7 +18,7 @@ Historical sources query third-party archives, so they are gated behind
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Set, Tuple
+from collections.abc import Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from assay import tools
@@ -78,13 +78,13 @@ def param_signature(url: str) -> str:
     return "%s|%s" % (parts.path, ",".join(names))
 
 
-def dedupe_by_shape(urls: Iterable[str], cap: int) -> List[str]:
+def dedupe_by_shape(urls: Iterable[str], cap: int) -> list[str]:
     """Collapse to one representative URL per (path, parameter-set).
 
     A crawl of a paginated list yields hundreds of URLs that differ only by id.
     Testing all of them wastes the request budget and finds nothing extra.
     """
-    seen: Dict[str, str] = {}
+    seen: dict[str, str] = {}
     for u in urls:
         if not is_useful(u):
             continue
@@ -102,15 +102,15 @@ def dedupe_by_shape(urls: Iterable[str], cap: int) -> List[str]:
 
 
 def extract_from_js(body: str, base_url: str, host: str,
-                    limit: int = 300) -> Tuple[List[str], List[str]]:
+                    limit: int = 300) -> tuple[list[str], list[str]]:
     """Pull endpoints out of a JS bundle.
 
     Returns (same-origin URLs, foreign absolute URLs). Foreign URLs are kept
     separately because they are recon leads, not injection targets.
     """
-    local: List[str] = []
-    foreign: List[str] = []
-    seen: Set[str] = set()
+    local: list[str] = []
+    foreign: list[str] = []
+    seen: set[str] = set()
 
     def add(path_or_url: str) -> None:
         if len(local) + len(foreign) >= limit:
@@ -146,7 +146,7 @@ def extract_from_js(body: str, base_url: str, host: str,
 # --------------------------------------------------------------------------
 
 
-def historical(domain: str, limit: int) -> Tuple[List[str], str]:
+def historical(domain: str, limit: int) -> tuple[list[str], str]:
     """Query archive services for URLs this host has ever served."""
     if tools.have("gau"):
         return tools.gau_urls(domain, limit), "gau"
@@ -160,7 +160,7 @@ def historical(domain: str, limit: int) -> Tuple[List[str], str]:
 # --------------------------------------------------------------------------
 
 
-def with_params(url: str, names: List[str]) -> str:
+def with_params(url: str, names: list[str]) -> str:
     """Attach discovered parameter names so the active checks can inject."""
     if not names:
         return url

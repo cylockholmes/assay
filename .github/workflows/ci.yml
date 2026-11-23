@@ -16,22 +16,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The test suite lives in a private repo (cylockholmes/assay-tests) and is
       # pulled in with a read-only deploy key. Forks and Dependabot PRs get no
       # secrets, so the step is skipped there rather than failing the run.
       - name: Fetch private test suite
         if: env.TESTS_DEPLOY_KEY != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cylockholmes/assay-tests
           ssh-key: ${{ secrets.TESTS_DEPLOY_KEY }}
           path: tests
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -41,8 +41,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Lint (syntax errors and undefined names)
-        run: ruff check --select E9,F63,F7,F82 assay
+      - name: Lint
+        run: ruff check assay
 
       - name: Smoke test
         run: |
@@ -60,11 +60,11 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Build and verify distributions
         run: |

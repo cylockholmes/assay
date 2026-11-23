@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 
 def git_build_meta() -> str:
@@ -76,7 +75,7 @@ def is_windows() -> bool:
 # filesystem path get translated with `wslpath`.
 # --------------------------------------------------------------------------
 
-_WSL_STATE: Dict[str, object] = {"checked": False, "distro": None, "ok": False}
+_WSL_STATE: dict[str, object] = {"checked": False, "distro": None, "ok": False}
 
 
 def wsl_available() -> bool:
@@ -109,13 +108,13 @@ def wsl_available() -> bool:
     return True
 
 
-def wsl_distro() -> Optional[str]:
+def wsl_distro() -> str | None:
     wsl_available()
     d = _WSL_STATE.get("distro")
     return d if isinstance(d, str) else None
 
 
-def wsl_prefix() -> List[str]:
+def wsl_prefix() -> list[str]:
     """Argv prefix that runs the rest of the command inside WSL."""
     distro = wsl_distro()
     if not distro:
@@ -128,7 +127,7 @@ def use_wsl_bridge() -> bool:
     return is_windows() and wsl_available()
 
 
-_PATH_CACHE: Dict[str, str] = {}
+_PATH_CACHE: dict[str, str] = {}
 
 
 def to_wsl_path(path: str) -> str:
@@ -159,7 +158,7 @@ def to_wsl_path(path: str) -> str:
 
 def is_wsl() -> bool:
     try:
-        with open("/proc/version", "r", encoding="utf-8", errors="replace") as fh:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
             v = fh.read().lower()
         return "microsoft" in v or "wsl" in v
     except OSError:
@@ -175,7 +174,7 @@ def wsl_networking_mode() -> str:
     return "mirrored" if os.path.exists("/proc/sys/net/ipv4/conf/loopback0") else "nat"
 
 
-def windows_host_ip() -> Optional[str]:
+def windows_host_ip() -> str | None:
     """Best-effort IP of the Windows host as seen from inside WSL2 (NAT mode)."""
     if not is_wsl():
         return None
@@ -192,7 +191,7 @@ def windows_host_ip() -> Optional[str]:
         pass
     # Fallback: resolv.conf nameserver is the host in default WSL2 configs.
     try:
-        with open("/etc/resolv.conf", "r", encoding="utf-8") as fh:
+        with open("/etc/resolv.conf", encoding="utf-8") as fh:
             for line in fh:
                 if line.startswith("nameserver"):
                     return line.split()[1].strip()
@@ -222,7 +221,7 @@ def _wslconfig_mirrored() -> bool:
     """Does the Windows user's .wslconfig put WSL in mirrored networking?"""
     home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     try:
-        with open(os.path.join(home, ".wslconfig"), "r", encoding="utf-8",
+        with open(os.path.join(home, ".wslconfig"), encoding="utf-8",
                   errors="replace") as fh:
             text = fh.read()
     except OSError:
@@ -253,7 +252,7 @@ def proxy_for_tools(proxy: str) -> str:
 def open_in_browser(path: str) -> bool:
     """Open a local report. Under WSL this must hand off to Windows."""
     abspath = os.path.abspath(path)
-    candidates: List[List[str]] = []
+    candidates: list[list[str]] = []
     if is_wsl():
         candidates.append(["wslview", abspath])
         try:
@@ -295,7 +294,7 @@ class Resources:
 def resources() -> Resources:
     r = Resources(cpus=os.cpu_count() or 2, wsl=is_wsl())
     try:
-        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
             for line in fh:
                 if line.startswith("MemTotal:"):
                     r.mem_total_mb = int(line.split()[1]) // 1024
@@ -306,7 +305,7 @@ def resources() -> Resources:
     return r
 
 
-def autotune(res: Optional[Resources] = None) -> Dict[str, object]:
+def autotune(res: Resources | None = None) -> dict[str, object]:
     """Pick concurrency/rate that will not swap a 2-4 GB VM into the ground.
 
     Returns knobs consumed by Config and by the external tool wrappers. Every
@@ -338,7 +337,7 @@ def autotune(res: Optional[Resources] = None) -> Dict[str, object]:
 # --------------------------------------------------------------------------
 
 
-def wsl_gateway_ip() -> Optional[str]:
+def wsl_gateway_ip() -> str | None:
     """The address WSL uses to reach the Windows host (NAT mode default route)."""
     if not use_wsl_bridge():
         return None
@@ -358,10 +357,10 @@ def wsl_gateway_ip() -> Optional[str]:
     return None
 
 
-_WSL_WHICH: Dict[str, Optional[str]] = {}
+_WSL_WHICH: dict[str, str | None] = {}
 
 
-def wsl_which_many(names: List[str]) -> Dict[str, Optional[str]]:
+def wsl_which_many(names: list[str]) -> dict[str, str | None]:
     """Resolve several tools inside WSL in one call.
 
     One wsl.exe spawn costs ~200ms, so resolving seventeen tools individually
@@ -372,7 +371,7 @@ def wsl_which_many(names: List[str]) -> Dict[str, Optional[str]]:
         return {n: None for n in names}
     missing = [n for n in names if n not in _WSL_WHICH]
     if missing:
-        found: Dict[str, Optional[str]] = {n: None for n in missing}
+        found: dict[str, str | None] = {n: None for n in missing}
         try:
             # -lc so the login shell puts ~/go/bin and friends on PATH.
             script = "which " + " ".join(missing) + " 2>/dev/null"
@@ -391,7 +390,7 @@ def wsl_which_many(names: List[str]) -> Dict[str, Optional[str]]:
     return {n: _WSL_WHICH.get(n) for n in names}
 
 
-def which(name: str) -> Optional[str]:
+def which(name: str) -> str | None:
     if use_wsl_bridge():
         return wsl_which_many([name]).get(name)
     path = shutil.which(name)

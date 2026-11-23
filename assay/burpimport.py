@@ -20,7 +20,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 # Headers that carry identity. All are removed before replay.
@@ -48,7 +48,7 @@ STATIC_RE = re.compile(
 class CapturedRequest:
     method: str
     url: str
-    headers: Dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
     body: str = ""
     status: int = 0
     response: str = ""
@@ -66,7 +66,7 @@ class CapturedRequest:
     def had_auth(self) -> bool:
         return any(k.lower() in AUTH_HEADERS for k in self.headers)
 
-    def stripped_headers(self) -> Dict[str, str]:
+    def stripped_headers(self) -> dict[str, str]:
         return {k: v for k, v in self.headers.items()
                 if k.lower() not in AUTH_HEADERS and k.lower() != "host"}
 
@@ -83,7 +83,7 @@ class CapturedRequest:
 # --------------------------------------------------------------------------
 
 
-def _decode(el: Optional[ET.Element]) -> str:
+def _decode(el: ET.Element | None) -> str:
     if el is None or el.text is None:
         return ""
     if (el.get("base64") or "").lower() == "true":
@@ -94,7 +94,7 @@ def _decode(el: Optional[ET.Element]) -> str:
     return el.text
 
 
-def _split_http(raw: str) -> Tuple[str, Dict[str, str], str]:
+def _split_http(raw: str) -> tuple[str, dict[str, str], str]:
     """Split a raw HTTP message into (start-line, headers, body)."""
     if not raw:
         return "", {}, ""
@@ -103,7 +103,7 @@ def _split_http(raw: str) -> Tuple[str, Dict[str, str], str]:
         head, _, body = raw.partition("\n\n")
     lines = head.replace("\r\n", "\n").split("\n")
     start = lines[0] if lines else ""
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     for line in lines[1:]:
         if ":" in line:
             k, v = line.split(":", 1)
@@ -111,8 +111,8 @@ def _split_http(raw: str) -> Tuple[str, Dict[str, str], str]:
     return start, headers, body
 
 
-def parse_burp_xml(path: str) -> List[CapturedRequest]:
-    out: List[CapturedRequest] = []
+def parse_burp_xml(path: str) -> list[CapturedRequest]:
+    out: list[CapturedRequest] = []
     try:
         tree = ET.parse(path)
     except (ET.ParseError, OSError):
@@ -136,10 +136,10 @@ def parse_burp_xml(path: str) -> List[CapturedRequest]:
     return out
 
 
-def parse_har(path: str) -> List[CapturedRequest]:
-    out: List[CapturedRequest] = []
+def parse_har(path: str) -> list[CapturedRequest]:
+    out: list[CapturedRequest] = []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             doc = json.load(fh)
     except (OSError, ValueError):
         return out
@@ -160,7 +160,7 @@ def parse_har(path: str) -> List[CapturedRequest]:
     return out
 
 
-def load(path: str) -> Tuple[List[CapturedRequest], str]:
+def load(path: str) -> tuple[list[CapturedRequest], str]:
     """Detect the format and parse. Returns (requests, format-name)."""
     lower = path.lower()
     if lower.endswith(".har") or lower.endswith(".json"):
@@ -179,7 +179,7 @@ def load(path: str) -> Tuple[List[CapturedRequest], str]:
 # --------------------------------------------------------------------------
 
 
-def worth_replaying(r: CapturedRequest, aggressive: bool = False) -> Tuple[bool, str]:
+def worth_replaying(r: CapturedRequest, aggressive: bool = False) -> tuple[bool, str]:
     """Which captured requests could demonstrate broken access control."""
     if not r.had_auth:
         return False, "request carried no credentials, so nothing to strip"
@@ -196,7 +196,7 @@ def worth_replaying(r: CapturedRequest, aggressive: bool = False) -> Tuple[bool,
     return True, "ready"
 
 
-def seed_urls(path: str) -> Tuple[List[str], Dict[str, int]]:
+def seed_urls(path: str) -> tuple[list[str], dict[str, int]]:
     """URLs from a logged-in capture worth starting a crawl from.
 
     GET and HEAD only - a captured POST may have changed something the first
@@ -204,7 +204,7 @@ def seed_urls(path: str) -> Tuple[List[str], Dict[str, int]]:
     Returns (urls in capture order, deduplicated; counts of what was dropped).
     """
     reqs, _fmt = load(path)
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     dropped = {"method": 0, "static": 0, "error": 0}
     for r in reqs:
@@ -224,9 +224,9 @@ def seed_urls(path: str) -> Tuple[List[str], Dict[str, int]]:
     return out, dropped
 
 
-def dedupe(requests: Iterable[CapturedRequest]) -> List[CapturedRequest]:
+def dedupe(requests: Iterable[CapturedRequest]) -> list[CapturedRequest]:
     """One representative per (method, generalised path)."""
-    seen: Dict[str, CapturedRequest] = {}
+    seen: dict[str, CapturedRequest] = {}
     for r in requests:
         seen.setdefault(r.shape(), r)
     return list(seen.values())
@@ -252,7 +252,7 @@ def replay(http, r: CapturedRequest):
                         data=r.body or None, allow_redirects=False)
 
 
-def verdict(r: CapturedRequest, resp, similarity_fn) -> Tuple[bool, float, str]:
+def verdict(r: CapturedRequest, resp, similarity_fn) -> tuple[bool, float, str]:
     """Did the endpoint serve authenticated content to an anonymous caller?
 
     Returns (is_finding, similarity, reason).

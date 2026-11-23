@@ -26,7 +26,6 @@ import json
 import os
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
 
 from assay import owasp
 from assay.context import Context
@@ -57,7 +56,7 @@ _TLS_PORTS = {443, 465, 636, 853, 989, 990, 993, 995, 4443, 8443, 9443, 9093}
 # Silent, request-first services where one standard, read-only line draws out a
 # versioned reply. Only sent when not --safe. Kept deliberately tiny: these are
 # protocol-correct health pokes, not crafted input.
-_NUDGES: Dict[str, bytes] = {
+_NUDGES: dict[str, bytes] = {
     "redis": b"PING\r\n",
     "memcached": b"version\r\n",
     "memcache": b"version\r\n",
@@ -68,7 +67,7 @@ _NUDGES: Dict[str, bytes] = {
 # baseline the report always shows; the AI pass proposes more on top of it
 # (see ServiceConfirmModule - each confirmed non-web service is emitted as an
 # info finding so AI triage returns enumeration commands for it too).
-_ENUM: Dict[str, str] = {
+_ENUM: dict[str, str] = {
     "ssh": "nmap -Pn -p{port} --script ssh2-enum-algos,ssh-auth-methods {host}",
     "ftp": "nmap -Pn -p{port} --script ftp-anon,ftp-syst {host}",
     "ftp-data": "nmap -Pn -p{port} --script ftp-anon,ftp-syst {host}",
@@ -102,7 +101,6 @@ _ENUM: Dict[str, str] = {
     # UDP services (nmap's -sU service names).
     "domain": "nmap -Pn -sU -p{port} --script dns-recursion,dns-nsid {host}",
     "ntp": "nmap -Pn -sU -p{port} --script ntp-info,ntp-monlist {host}",
-    "snmp": "snmpwalk -v2c -c public {host}",
     "upnp": "nmap -Pn -sU -p{port} --script upnp-info {host}",
     "ssdp": "nmap -Pn -sU -p{port} --script upnp-info {host}",
     "mdns": "nmap -Pn -sU -p{port} --script dns-service-discovery {host}",
@@ -142,7 +140,7 @@ def _udp_banner(data: bytes) -> str:
 # socket; these two functions are the only things in the module that touch the
 # network at the socket layer, so a test monkeypatches them to feed fixtures.
 
-def _grab_banner(host: str, port: int, nudge: Optional[bytes] = None) -> bytes:
+def _grab_banner(host: str, port: int, nudge: bytes | None = None) -> bytes:
     """Connect, read any unprompted greeting, and - if asked and nothing came
     back - send one short nudge and read again. Returns raw bytes (possibly
     empty). Never raises."""
@@ -152,13 +150,13 @@ def _grab_banner(host: str, port: int, nudge: Optional[bytes] = None) -> bytes:
             data = b""
             try:
                 data = s.recv(_BANNER_MAX)
-            except (OSError, socket.timeout):
+            except (TimeoutError, OSError):
                 data = b""
             if not data and nudge:
                 try:
                     s.sendall(nudge)
                     data = s.recv(_BANNER_MAX)
-                except (OSError, socket.timeout):
+                except (TimeoutError, OSError):
                     data = b""
             return data or b""
     except OSError:
@@ -233,7 +231,7 @@ _UDP_PROBES = {
 }
 
 
-def _grab_tls(host: str, port: int) -> Dict:
+def _grab_tls(host: str, port: int) -> dict:
     """Handshake only (no application data) and report the certificate and the
     negotiated version. Reuses the host-deep TLS cert grabber so verification
     is disabled the same way everywhere. Returns {} on any failure."""
@@ -241,7 +239,7 @@ def _grab_tls(host: str, port: int) -> Dict:
     cert, version = fetch_cert(host, port, timeout=_CONNECT_TIMEOUT)
     if not cert and not version:
         return {}
-    out: Dict = {"version": version}
+    out: dict = {"version": version}
     if cert:
         subject = dict(x[0] for x in cert.get("subject", []) if x)
         issuer = dict(x[0] for x in cert.get("issuer", []) if x)
@@ -272,7 +270,7 @@ class ServiceConfirmModule(Module):
     impact_class = "read"
     desc = "Active confirmation of exposed services (banner / version / headers)"
 
-    def run_global(self, ctx: Context) -> List[Finding]:
+    def run_global(self, ctx: Context) -> list[Finding]:
         jobs = []  # (host, ip, Port)
         for t in ctx.targets:
             if t.kind == "url":
@@ -301,7 +299,7 @@ class ServiceConfirmModule(Module):
                 % (len(jobs), len({j[0] for j in jobs})))
 
         workers = max(4, min(int(ctx.tune.get("concurrency", 8)) * 4, 32))
-        records: List[Dict] = []
+        records: list[dict] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {pool.submit(self._confirm_one, ctx, h, ip, p): (h, p)
                     for (h, ip, p) in jobs}
@@ -328,7 +326,7 @@ class ServiceConfirmModule(Module):
         return [self._finding(r) for r in records
                 if r.get("method") in ("banner", "tls", "udp", "udp-scan")]
 
-    def _finding(self, r: Dict) -> Finding:
+    def _finding(self, r: dict) -> Finding:
         where = "%s:%d" % (r["host"], r["port"])
         svc = r.get("service") or "service"
         live = r.get("summary") or r.get("detail") or ""
@@ -358,7 +356,7 @@ class ServiceConfirmModule(Module):
         )
 
     # ------------------------------------------------------------------
-    def _confirm_one(self, ctx: Context, host: str, ip: str, port) -> Optional[Dict]:
+    def _confirm_one(self, ctx: Context, host: str, ip: str, port) -> dict | None:
         addr = ip or host
         base = {
             "host": host, "ip": ip, "port": port.port, "proto": port.proto,
@@ -410,7 +408,7 @@ class ServiceConfirmModule(Module):
                     status=0, title="",
                     repro="nc %s %d" % (addr, port.port))
 
-    def _confirm_udp(self, ctx: Context, addr: str, port, base: Dict) -> Optional[Dict]:
+    def _confirm_udp(self, ctx: Context, addr: str, port, base: dict) -> dict | None:
         """Confirm a UDP service. First by sending its own standard query and
         reading the reply (the real confirmation); failing that, by trusting
         nmap's own result - a UDP port nmap reports plainly 'open' (not
@@ -440,7 +438,7 @@ class ServiceConfirmModule(Module):
                         repro="nmap -Pn -sUV -p%d %s" % (port.port, addr))
         return None   # open|filtered, no reply - ambiguous, not confirmed
 
-    def _confirm_http(self, ctx: Context, addr: str, port, prefer_tls: bool) -> Optional[Dict]:
+    def _confirm_http(self, ctx: Context, addr: str, port, prefer_tls: bool) -> dict | None:
         schemes = ("https", "http") if prefer_tls else ("http", "https")
         for scheme in schemes:
             url = "%s://%s:%d/" % (scheme, addr, port.port)
@@ -462,7 +460,7 @@ class ServiceConfirmModule(Module):
         return None
 
     @staticmethod
-    def _tls_detail(tls: Dict) -> str:
+    def _tls_detail(tls: dict) -> str:
         bits = []
         if tls.get("version"):
             bits.append(tls["version"])
@@ -477,7 +475,7 @@ class ServiceConfirmModule(Module):
         a, b = (a or "").strip(), (b or "").strip()
         return (a + ("\n" if a and b else "") + b) if (a or b) else ""
 
-    def _write(self, ctx: Context, records: List[Dict], scanned: int) -> None:
+    def _write(self, ctx: Context, records: list[dict], scanned: int) -> None:
         doc = {"scanned": scanned, "confirmed": len(records), "items": records}
         raw_dir = os.path.join(ctx.cfg.out_dir, "raw")
         try:

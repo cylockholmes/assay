@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 # A line that is a section heading rather than a target. Anything under an
@@ -55,16 +55,16 @@ DANGEROUS = {"0.0.0.0/0", "::/0", "*", "*.*", ".", "localhost", "127.0.0.1"}
 
 @dataclass
 class ParsedTargets:
-    targets: List[str] = field(default_factory=list)
-    excluded: List[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
+    excluded: list[str] = field(default_factory=list)
     source_format: str = "list"
-    skipped: List[str] = field(default_factory=list)   # (value, reason)
+    skipped: list[str] = field(default_factory=list)   # (value, reason)
     # Burp host regexes that name no single host or domain. Nothing to scan,
     # but still scope: kept as "re:" rules so an include still admits what it
     # matches and, more importantly, an exclude is still enforced.
-    scope_allow: List[str] = field(default_factory=list)
-    scope_deny: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    scope_allow: list[str] = field(default_factory=list)
+    scope_deny: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -112,7 +112,7 @@ def classify(token: str) -> str:
     return ""
 
 
-def expand_range(token: str) -> List[str]:
+def expand_range(token: str) -> list[str]:
     """Turn 10.0.0.1-10.0.0.9 or 10.0.0.1-9 into individual addresses."""
     m = IPRANGE.match(token.strip())
     if not m:
@@ -129,7 +129,7 @@ def expand_range(token: str) -> List[str]:
     return [str(ipaddress.ip_address(i)) for i in range(int(a), int(b) + 1)]
 
 
-def from_burp(raw: str) -> Optional[ParsedTargets]:
+def from_burp(raw: str) -> ParsedTargets | None:
     """Derive scannable targets from a Burp project scope export."""
     try:
         doc = json.loads(raw)
@@ -201,7 +201,7 @@ _WILDCARD_LEADS = (
 )
 
 
-def _hosts_from_regex(pattern: str) -> List[str]:
+def _hosts_from_regex(pattern: str) -> list[str]:
     """Recover hostnames from Burp's advanced-mode regex, where possible:
     [host], [*.domain], or [domain, *.domain] for a form that admits the
     apex too (fnmatch's *.domain does not match the bare domain)."""
@@ -234,7 +234,7 @@ def parse(raw: str) -> ParsedTargets:
 
     out = ParsedTargets()
     excluding = False
-    seen: Set[str] = set()
+    seen: set[str] = set()
 
     for line in raw.splitlines():
         line = line.rstrip()
@@ -303,7 +303,7 @@ def parse(raw: str) -> ParsedTargets:
 
 
 def load(path: str) -> ParsedTargets:
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         return parse(fh.read())
 
 
@@ -326,8 +326,8 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
     import os
 
     merged = ParsedTargets()
-    formats: List[str] = []
-    seen: Set[str] = set()
+    formats: list[str] = []
+    seen: set[str] = set()
 
     def absorb(part: ParsedTargets) -> None:
         for t in part.targets:
@@ -377,7 +377,7 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
     return merged
 
 
-def as_scope(parsed: ParsedTargets) -> "Tuple[List[str], List[str]]":
+def as_scope(parsed: ParsedTargets) -> tuple[list[str], list[str]]:
     """Allow/deny lists implied by what was parsed.
 
     Wildcards belong in the allow list even though they are not scannable:
@@ -390,7 +390,7 @@ def as_scope(parsed: ParsedTargets) -> "Tuple[List[str], List[str]]":
             host = urlsplit(t).hostname
             if host and host not in allow:
                 allow.append(host)
-    deny: List[str] = []
+    deny: list[str] = []
     for e in parsed.excluded:
         host = urlsplit(e).hostname if "://" in e else e
         if host and host not in deny:
