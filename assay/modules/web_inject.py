@@ -12,7 +12,6 @@ into the status line - there is no benign reading of that.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -24,7 +23,7 @@ from assay import params as P
 from assay.net import rand_token
 
 # (engine family, payload template, expected result) - %d pairs substituted.
-SSTI_PAYLOADS: List[Tuple[str, str]] = [
+SSTI_PAYLOADS: list[tuple[str, str]] = [
     ("Jinja2/Twig/Nunjucks", "{{%d*%d}}"),
     ("Freemarker/JSP EL", "${%d*%d}"),
     ("ERB/ASP", "<%%= %d*%d %%>"),
@@ -45,8 +44,8 @@ class SstiModule(Module):
     impact_class = "probe"
     desc = "Server-side template injection, proved by evaluated arithmetic"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        out: List[Finding] = []
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
+        out: list[Finding] = []
         tested: set = set()
         budget = 4 if ctx.cfg.profile == "quick" else (
             12 if ctx.cfg.profile == "standard" else 30)
@@ -67,7 +66,7 @@ class SstiModule(Module):
                     out.append(f)
         return out
 
-    def _probe(self, ctx: Context, url: str, param: str) -> Optional[Finding]:
+    def _probe(self, ctx: Context, url: str, param: str) -> Finding | None:
         for engine, template in SSTI_PAYLOADS:
             marker = "a%s" % rand_token(5)
             a, b = 733, 7                      # 5131 - unlikely to occur by chance
@@ -130,8 +129,8 @@ class CrlfModule(Module):
 
     ENCODINGS = ["%0d%0a", "%0D%0A", "%E5%98%8D%E5%98%8A", "\\r\\n", "%0a", "%0d"]
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        out: List[Finding] = []
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
+        out: list[Finding] = []
         tested: set = set()
         budget = 3 if ctx.cfg.profile == "quick" else (
             10 if ctx.cfg.profile == "standard" else 24)
@@ -151,7 +150,7 @@ class CrlfModule(Module):
                     out.append(f)
         return out
 
-    def _probe(self, ctx: Context, url: str, param: str) -> Optional[Finding]:
+    def _probe(self, ctx: Context, url: str, param: str) -> Finding | None:
         for enc in self.ENCODINGS:
             token = rand_token(6)
             header = "X-Assay-%s" % token

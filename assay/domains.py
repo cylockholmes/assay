@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 from assay import tools
@@ -74,12 +74,12 @@ def registrable(host: str) -> str:
 @dataclass
 class DomainStatus:
     domain: str
-    registered: Optional[bool] = None      # None == could not determine
-    ns: List[str] = field(default_factory=list)
+    registered: bool | None = None      # None == could not determine
+    ns: list[str] = field(default_factory=list)
     rdap_code: int = 0
     reason: str = ""
-    referenced_by: List[str] = field(default_factory=list)
-    how: Set[str] = field(default_factory=set)   # script / css / frame / csp / cors / cert / link
+    referenced_by: list[str] = field(default_factory=list)
+    how: set[str] = field(default_factory=set)   # script / css / frame / csp / cors / cert / link
 
     @property
     def takeoverable(self) -> bool:
@@ -91,7 +91,7 @@ class DomainStatus:
 # --------------------------------------------------------------------------
 
 
-def ns_records(domain: str, timeout: float = 8.0) -> Tuple[List[str], str]:
+def ns_records(domain: str, timeout: float = 8.0) -> tuple[list[str], str]:
     """Returns (nameservers, raw status). Empty list means no delegation."""
     out = tools.dns_lookup("NS", domain, timeout=timeout).strip()
     if not out:
@@ -105,7 +105,7 @@ def ns_records(domain: str, timeout: float = 8.0) -> Tuple[List[str], str]:
         if not line or line.startswith(";"):
             continue
         m = re.search(r"name server\s+(\S+)", line, re.I)
-        cleaned.append((m.group(1).rstrip(".") if m else line))
+        cleaned.append(m.group(1).rstrip(".") if m else line)
     cleaned = [c for c in cleaned if "." in c and " " not in c]
     return cleaned, "ok" if cleaned else "no-ns"
 
@@ -115,7 +115,7 @@ def ns_records(domain: str, timeout: float = 8.0) -> Tuple[List[str], str]:
 # --------------------------------------------------------------------------
 
 
-def rdap_lookup(domain: str, http) -> Tuple[int, str]:
+def rdap_lookup(domain: str, http) -> tuple[int, str]:
     """Query the registry via rdap.org's bootstrap. Returns (status, detail)."""
     r = http.get("https://rdap.org/domain/%s" % domain,
                  timeout=15.0, infra=True)
@@ -144,16 +144,16 @@ def rdap_lookup(domain: str, http) -> Tuple[int, str]:
 
 
 _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
-_TLDS: Optional[Set[str]] = None
+_TLDS: set[str] | None = None
 
 
-def iana_tlds(http) -> Set[str]:
+def iana_tlds(http) -> set[str]:
     """TLDs the RDAP bootstrap knows about. Empty set if it can't be fetched."""
     global _TLDS
     if _TLDS is None:
         r = http.get("https://data.iana.org/rdap/dns.json",
                      timeout=15.0, infra=True)
-        found: Set[str] = set()
+        found: set[str] = set()
         if r.ok and r.status == 200:
             try:
                 for svc in json.loads(r.body).get("services", []):
@@ -216,7 +216,7 @@ def check(domain: str, http) -> DomainStatus:
 # Reference harvesting
 # --------------------------------------------------------------------------
 
-REF_PATTERNS: List[Tuple[str, "re.Pattern"]] = [
+REF_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("script", re.compile(r"""<script[^>]+src\s*=\s*["']?([^"'\s>]+)""", re.I)),
     ("css", re.compile(r"""<link[^>]+href\s*=\s*["']?([^"'\s>]+)""", re.I)),
     ("frame", re.compile(r"""<i?frame[^>]+src\s*=\s*["']?([^"'\s>]+)""", re.I)),
@@ -234,9 +234,9 @@ CSP_HOST_RE = re.compile(
     r"((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,10}[A-Za-z]{2,24})")
 
 
-def refs_from_html(body: str, base_host: str) -> Dict[str, Set[str]]:
+def refs_from_html(body: str, base_host: str) -> dict[str, set[str]]:
     """Map apex domain -> set of reference kinds, for a page's markup."""
-    out: Dict[str, Set[str]] = {}
+    out: dict[str, set[str]] = {}
     for kind, rx in REF_PATTERNS:
         for raw in rx.findall(body[:400000]):
             raw = raw.strip()
@@ -259,8 +259,8 @@ def refs_from_html(body: str, base_host: str) -> Dict[str, Set[str]]:
     return out
 
 
-def refs_from_csp(header_value: str, base_host: str) -> Dict[str, Set[str]]:
-    out: Dict[str, Set[str]] = {}
+def refs_from_csp(header_value: str, base_host: str) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
     # Defence in depth: cap the input as well as fixing the pattern.
     for _, host in CSP_HOST_RE.findall((header_value or "")[:20000]):
         apex = registrable(host)
@@ -271,8 +271,8 @@ def refs_from_csp(header_value: str, base_host: str) -> Dict[str, Set[str]]:
 
 
 def refs_from_hosts(hosts: Iterable[str], base_host: str,
-                    kind: str) -> Dict[str, Set[str]]:
-    out: Dict[str, Set[str]] = {}
+                    kind: str) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
     for h in hosts:
         apex = registrable(h)
         if not apex or apex == registrable(base_host) or apex in IGNORE_APEXES:

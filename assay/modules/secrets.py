@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import List, Optional, Pattern, Tuple
+from re import Pattern
 from urllib.parse import urljoin, urlsplit
 
 from assay import owasp
@@ -19,7 +19,7 @@ from assay.modules import Module, register
 from assay.urls import origin_of
 
 # (label, severity, regex, why it matters)
-SECRET_PATTERNS: List[Tuple[str, str, Pattern, str]] = [
+SECRET_PATTERNS: list[tuple[str, str, Pattern, str]] = [
     ("AWS access key id", "high",
      re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
      "An IAM key shipped to browsers. Confirm it is live with "
@@ -87,10 +87,10 @@ class SecretsModule(Module):
     impact_class = "read"
     desc = "Credentials, internal hosts and source maps in client-side assets"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         base = wt.base_url
         scripts = self._script_urls(ctx, base)
-        out: List[Finding] = []
+        out: list[Finding] = []
         seen_secret: set = set()
 
         budget = 6 if ctx.cfg.profile == "quick" else (
@@ -161,8 +161,8 @@ class SecretsModule(Module):
                     out.append(f)
         return out
 
-    def _script_urls(self, ctx: Context, base: str) -> List[str]:
-        urls: List[str] = []
+    def _script_urls(self, ctx: Context, base: str) -> list[str]:
+        urls: list[str] = []
         r = ctx.http.get(base)
         if r.ok:
             for src in SCRIPT_RE.findall(r.body[:400000]):
@@ -178,7 +178,7 @@ class SecretsModule(Module):
         return urls
 
     def _scan_map_sources(self, ctx: Context, url: str, body: str,
-                          out: List[Finding]) -> None:
+                          out: list[Finding]) -> None:
         """Run the secret patterns over sourcesContent inside a source map."""
         try:
             doc = json.loads(body)
@@ -220,7 +220,7 @@ class SecretsModule(Module):
                 break
 
     def _sourcemap(self, ctx: Context, script_url: str, ref: str,
-                   out_findings: List[Finding]) -> Optional[Finding]:
+                   out_findings: list[Finding]) -> Finding | None:
         if ref.startswith("data:"):
             return None
         url = urljoin(script_url, ref)

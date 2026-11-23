@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 from assay.net import Resp
 
@@ -47,8 +47,8 @@ class Probe:
     url: str                              # contains {key}
     judge: Callable[[Resp], bool]
     cost: str
-    body: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
+    body: str | None = None
+    headers: dict[str, str] | None = None
     key_header: bool = False              # key goes in Authorization, not the URL
     severity_bump: bool = False           # data exposure / takeover, not just billing
 
@@ -68,7 +68,7 @@ _ROUTES_BODY = json.dumps({
     "destination": {"location": {"latLng": {"latitude": 37.4220, "longitude": -122.0841}}},
     "travelMode": "DRIVE"})
 
-PROBES: List[Probe] = [
+PROBES: list[Probe] = [
     Probe("Static Maps", "GET",
           _M + "/staticmap?center=45%2C10&zoom=7&size=400x400&key={key}",
           _image, "$2 per 1000 requests"),
@@ -216,8 +216,8 @@ def run_probe(http, key: str, probe: Probe) -> ProbeResult:
     return ProbeResult(probe, accepted, r.status, "" if accepted else _reason(r))
 
 
-def verify_key(http, key: str, stop: Optional[Callable[[], bool]] = None) -> List[ProbeResult]:
-    out: List[ProbeResult] = []
+def verify_key(http, key: str, stop: Callable[[], bool] | None = None) -> list[ProbeResult]:
+    out: list[ProbeResult] = []
     for probe in PROBES:
         if stop and stop():
             break

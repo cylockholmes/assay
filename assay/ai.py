@@ -37,7 +37,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from assay.models import Finding
 from assay.redact import Redactor
@@ -119,7 +119,7 @@ Calibration rules:
 - If a finding's evidence does not actually support its stated severity, say so \
   in the rationale and lower the verdict."""
 
-RESPONSE_SCHEMA: Dict[str, Any] = {
+RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "summary": {
@@ -195,7 +195,7 @@ class BackendUnset(AIError):
 
 
 class RedactionFailure(AIError):
-    def __init__(self, leaks: List[str]) -> None:
+    def __init__(self, leaks: list[str]) -> None:
         self.leaks = leaks
         super().__init__("redaction verification failed (%d residual item(s))" % len(leaks))
 
@@ -211,7 +211,7 @@ class AIConfig:
     dry_run: bool = False
     effort: str = "high"
     inference_geo: str = "us"
-    api_key: Optional[str] = None
+    api_key: str | None = None
     claude_bin: str = "claude"       # CLI backend: binary name or absolute path
     cli_timeout: int = 1800
 
@@ -221,10 +221,10 @@ class AIConfig:
 # --------------------------------------------------------------------------
 
 
-def build_payload(findings: List[Finding], assets: Dict[str, Any],
+def build_payload(findings: list[Finding], assets: dict[str, Any],
                   cfg: AIConfig, redactor: Redactor,
-                  followups: Optional[List[Dict[str, Any]]] = None
-                  ) -> Tuple[Dict[str, Any], List[str]]:
+                  followups: list[dict[str, Any]] | None = None
+                  ) -> tuple[dict[str, Any], list[str]]:
     """Return (redacted payload, residual leaks). Non-empty leaks == do not send.
 
     `followups` are results of commands the loop ran in earlier rounds, already
@@ -234,9 +234,9 @@ def build_payload(findings: List[Finding], assets: Dict[str, Any],
     tokens they already carry) so the whole-payload verify() below still covers
     them as a backstop.
     """
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     for f in findings[: cfg.max_findings]:
-        item: Dict[str, Any] = {
+        item: dict[str, Any] = {
             "id": f.fingerprint(),
             "title": f.title,
             "scanner_severity": f.severity,
@@ -287,7 +287,7 @@ def estimate_cost(input_tokens: int, output_tokens: int = 4000) -> float:
 # --------------------------------------------------------------------------
 
 
-def credential_status() -> Tuple[bool, str]:
+def credential_status() -> tuple[bool, str]:
     """How would the SDK authenticate right now?
 
     The SDK resolves in a fixed order: ANTHROPIC_API_KEY, then
@@ -309,7 +309,7 @@ def credential_status() -> Tuple[bool, str]:
     return False, "no API key and no stored profile"
 
 
-def resolve_cli(name: str) -> Optional[str]:
+def resolve_cli(name: str) -> str | None:
     """Absolute path to the Claude binary, or None.
 
     Absolute matters: the CLI is launched in a scratch directory, so a relative
@@ -323,7 +323,7 @@ def resolve_cli(name: str) -> Optional[str]:
     return None
 
 
-def cli_status(cfg: Optional["AIConfig"] = None) -> Tuple[bool, str]:
+def cli_status(cfg: AIConfig | None = None) -> tuple[bool, str]:
     """Is there a usable Claude Code CLI to hand the request to?
 
     The CLI is what the Claude desktop app installs and shares a sign-in with,
@@ -347,7 +347,7 @@ def cli_status(cfg: Optional["AIConfig"] = None) -> Tuple[bool, str]:
     return True, "%s (%s)" % (path, (p.stdout or "").strip() or "version unknown")
 
 
-def backend_status(cfg: "AIConfig") -> Tuple[bool, str]:
+def backend_status(cfg: AIConfig) -> tuple[bool, str]:
     """Can the selected backend be used right now?"""
     if cfg.backend == BACKEND_API:
         return credential_status()
@@ -395,7 +395,7 @@ def _client(cfg: AIConfig):
             "    pip install 'anthropic'\n"
             "or run assay without --ai."
         )
-    kwargs: Dict[str, Any] = {"timeout": 600.0}
+    kwargs: dict[str, Any] = {"timeout": 600.0}
     if cfg.api_key:
         kwargs["api_key"] = cfg.api_key
     try:
@@ -407,7 +407,7 @@ def _client(cfg: AIConfig):
         )
 
 
-def count_tokens(cfg: AIConfig, payload: Dict[str, Any]) -> int:
+def count_tokens(cfg: AIConfig, payload: dict[str, Any]) -> int:
     client = _client(cfg)
     try:
         resp = client.messages.count_tokens(
@@ -422,7 +422,7 @@ def count_tokens(cfg: AIConfig, payload: Dict[str, Any]) -> int:
         return len(json.dumps(payload)) // 3
 
 
-def _user_message(payload: Dict[str, Any]) -> str:
+def _user_message(payload: dict[str, Any]) -> str:
     return (
         "Triage the following pseudonymised scan results.\n\n"
         "```json\n%s\n```\n\n"
@@ -432,7 +432,7 @@ def _user_message(payload: Dict[str, Any]) -> str:
     )
 
 
-def _call_api(cfg: AIConfig, payload: Dict[str, Any], say) -> Tuple[str, Dict[str, Any]]:
+def _call_api(cfg: AIConfig, payload: dict[str, Any], say) -> tuple[str, dict[str, Any]]:
     """Transport 1: the Anthropic SDK, billed per token against an API key."""
     client = _client(cfg)
     tokens = count_tokens(cfg, payload)
@@ -477,7 +477,7 @@ def _call_api(cfg: AIConfig, payload: Dict[str, Any], say) -> Tuple[str, Dict[st
     }
 
 
-def _cli_argv(cfg: AIConfig, binary: str) -> List[str]:
+def _cli_argv(cfg: AIConfig, binary: str) -> list[str]:
     """The exact command line. Separate so a test can assert on it."""
     return [
         binary,
@@ -490,8 +490,8 @@ def _cli_argv(cfg: AIConfig, binary: str) -> List[str]:
     ] + list(CLI_ISOLATION_FLAGS)
 
 
-def _call_cli(cfg: AIConfig, payload: Dict[str, Any],
-              say) -> Tuple[str, Dict[str, Any]]:
+def _call_cli(cfg: AIConfig, payload: dict[str, Any],
+              say) -> tuple[str, dict[str, Any]]:
     """Transport 2: hand the request to the Claude Code CLI / desktop app.
 
     Same prompt, same schema, same redacted payload as the API backend - the
@@ -566,7 +566,7 @@ def _call_cli(cfg: AIConfig, payload: Dict[str, Any],
     }
 
 
-def _parse_result(text: str, out_dir: str) -> Dict[str, Any]:
+def _parse_result(text: str, out_dir: str) -> dict[str, Any]:
     """Both backends are asked for the same schema. Both can still miss."""
     try:
         return json.loads(text)
@@ -590,9 +590,9 @@ def _parse_result(text: str, out_dir: str) -> Dict[str, Any]:
                   % raw_path)
 
 
-def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
+def analyze(findings: list[Finding], assets: dict[str, Any], cfg: AIConfig,
             redactor: Redactor, out_dir: str, on_status=None,
-            payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run the triage pass. Raises RedactionFailure rather than leaking.
 
     `payload` is an already-built payload from build_payload(). The CLI builds
@@ -644,7 +644,7 @@ def analyze(findings: List[Finding], assets: Dict[str, Any], cfg: AIConfig,
     return result
 
 
-def rehydrate(result: Dict[str, Any], redactor: Redactor) -> Dict[str, Any]:
+def rehydrate(result: dict[str, Any], redactor: Redactor) -> dict[str, Any]:
     """Put the real hostnames back for local display only."""
     blob = json.dumps(result)
     return json.loads(redactor.map.rehydrate(blob))

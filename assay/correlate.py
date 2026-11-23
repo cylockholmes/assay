@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Set
+from collections.abc import Callable, Sequence
 from urllib.parse import urlsplit
 
 from assay.models import Finding
@@ -52,7 +52,7 @@ def _apex(host: str) -> str:
 @dataclass
 class Prevalence:
     title: str
-    hosts: List[str] = field(default_factory=list)
+    hosts: list[str] = field(default_factory=list)
     share: float = 0.0
 
     @property
@@ -61,7 +61,7 @@ class Prevalence:
 
 
 def environmental(findings: Sequence[Finding], min_hosts: int = 5,
-                  min_share: float = 0.6) -> Dict[str, Prevalence]:
+                  min_share: float = 0.6) -> dict[str, Prevalence]:
     """Findings so widespread they describe the estate rather than a host.
 
     Requires both an absolute count and a share: three hosts out of four is a
@@ -72,12 +72,12 @@ def environmental(findings: Sequence[Finding], min_hosts: int = 5,
     if len(all_hosts) < min_hosts:
         return {}
 
-    by_title: Dict[str, Set[str]] = defaultdict(set)
+    by_title: dict[str, set[str]] = defaultdict(set)
     for f in findings:
         if f.target:
             by_title[f.title].add(_host_of(f.target))
 
-    out: Dict[str, Prevalence] = {}
+    out: dict[str, Prevalence] = {}
     for title, hosts in by_title.items():
         share = len(hosts) / float(len(all_hosts))
         if len(hosts) >= min_hosts and share >= min_share:
@@ -86,7 +86,7 @@ def environmental(findings: Sequence[Finding], min_hosts: int = 5,
 
 
 def apply_prevalence(findings: Sequence[Finding],
-                     prevalent: Dict[str, Prevalence]) -> int:
+                     prevalent: dict[str, Prevalence]) -> int:
     """Downrank the widespread, and say why on the finding itself."""
     touched = 0
     for f in findings:
@@ -117,11 +117,11 @@ def apply_prevalence(findings: Sequence[Finding],
 class Chain:
     name: str
     severity: str
-    finding_ids: List[str]
+    finding_ids: list[str]
     impact: str
-    steps: List[str]
+    steps: list[str]
 
-    def as_dict(self) -> Dict:
+    def as_dict(self) -> dict:
         return {"name": self.name, "combined_severity": self.severity,
                 "finding_ids": self.finding_ids, "combined_impact": self.impact,
                 "steps": self.steps, "source": "assay"}
@@ -132,19 +132,19 @@ class _Index:
 
     def __init__(self, findings: Sequence[Finding]) -> None:
         self.findings = list(findings)
-        self.by_module: Dict[str, List[Finding]] = defaultdict(list)
+        self.by_module: dict[str, list[Finding]] = defaultdict(list)
         for f in self.findings:
             self.by_module[f.module].append(f)
 
-    def module(self, name: str) -> List[Finding]:
+    def module(self, name: str) -> list[Finding]:
         return self.by_module.get(name, [])
 
-    def titled(self, pattern: str) -> List[Finding]:
+    def titled(self, pattern: str) -> list[Finding]:
         rx = re.compile(pattern, re.I)
         return [f for f in self.findings if rx.search(f.title)]
 
 
-def _rule_cors_sibling_takeover(ix: _Index) -> Optional[Chain]:
+def _rule_cors_sibling_takeover(ix: _Index) -> Chain | None:
     cors = ix.titled(r"CORS trusts any subdomain")
     takeover = ix.module("takeover")
     if not (cors and takeover):
@@ -173,7 +173,7 @@ def _rule_cors_sibling_takeover(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_credentials_to_login(ix: _Index) -> Optional[Chain]:
+def _rule_credentials_to_login(ix: _Index) -> Chain | None:
     creds = [f for f in ix.module("exposure")
              if re.search(r"\.env|\.git|appsettings|web\.config|actuator/env|"
                           r"heapdump|\.aws", f.title, re.I)]
@@ -205,7 +205,7 @@ def _rule_credentials_to_login(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_redirect_in_auth_flow(ix: _Index) -> Optional[Chain]:
+def _rule_redirect_in_auth_flow(ix: _Index) -> Chain | None:
     redirects = [f for f in ix.module("openredirect")
                  if re.search(r"/(oauth|authorize|sso|saml|login|signin|auth)",
                               f.target, re.I)]
@@ -230,7 +230,7 @@ def _rule_redirect_in_auth_flow(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_reflection_without_csp(ix: _Index) -> Optional[Chain]:
+def _rule_reflection_without_csp(ix: _Index) -> Chain | None:
     refl = [f for f in ix.module("reflection") if f.severity in ("high", "medium")]
     hdrs = ix.module("headers")
     if not refl:
@@ -260,7 +260,7 @@ def _rule_reflection_without_csp(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_cookie_theft(ix: _Index) -> Optional[Chain]:
+def _rule_cookie_theft(ix: _Index) -> Chain | None:
     refl = [f for f in ix.module("reflection") if f.severity == "high"]
     cookies = [f for f in ix.module("cookies") if "HttpOnly" in (f.detail or "")]
     pairs = [(r, c) for r in refl for c in cookies
@@ -284,7 +284,7 @@ def _rule_cookie_theft(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_ssrf_to_internal(ix: _Index) -> Optional[Chain]:
+def _rule_ssrf_to_internal(ix: _Index) -> Chain | None:
     ssrf = ix.module("ssrf")
     internal = ix.titled(r"Internal hosts referenced")
     if not (ssrf and internal):
@@ -308,7 +308,7 @@ def _rule_ssrf_to_internal(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_ai_data_exposure(ix: _Index) -> Optional[Chain]:
+def _rule_ai_data_exposure(ix: _Index) -> Chain | None:
     ai = ix.module("aisurface") + ix.module("mcp")
     if len(ai) < 2:
         return None
@@ -330,7 +330,7 @@ def _rule_ai_data_exposure(ix: _Index) -> Optional[Chain]:
         ])
 
 
-def _rule_listing_to_source(ix: _Index) -> Optional[Chain]:
+def _rule_listing_to_source(ix: _Index) -> Chain | None:
     listing = ix.module("dirlisting")
     backups = ix.module("backups") + [f for f in ix.module("exposure")
                                       if "backup" in f.title.lower()]
@@ -353,7 +353,7 @@ def _rule_listing_to_source(ix: _Index) -> Optional[Chain]:
                "Extract any credentials and confirm one is live."])
 
 
-RULES: List[Callable[[_Index], Optional[Chain]]] = [
+RULES: list[Callable[[_Index], Chain | None]] = [
     _rule_cors_sibling_takeover,
     _rule_credentials_to_login,
     _rule_ssrf_to_internal,
@@ -365,11 +365,11 @@ RULES: List[Callable[[_Index], Optional[Chain]]] = [
 ]
 
 
-def chains(findings: Sequence[Finding]) -> List[Chain]:
+def chains(findings: Sequence[Finding]) -> list[Chain]:
     """Every chain the finding set supports, strongest first."""
     ix = _Index(findings)
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    out: List[Chain] = []
+    out: list[Chain] = []
     for rule in RULES:
         try:
             chain = rule(ix)

@@ -7,8 +7,6 @@ stage order; modules never call each other directly.
 
 from __future__ import annotations
 
-from typing import Dict, List, Type
-
 from assay.context import Context
 from assay.models import Finding, Target, WebTarget
 
@@ -53,25 +51,25 @@ class Module:
             return False
         return ctx.cfg.module_enabled(self.name)
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         return []
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         return []
 
-    def run_global(self, ctx: Context) -> List[Finding]:
+    def run_global(self, ctx: Context) -> list[Finding]:
         return []
 
 
-_REGISTRY: List[Type[Module]] = []
+_REGISTRY: list[type[Module]] = []
 
 
-def register(cls: Type[Module]) -> Type[Module]:
+def register(cls: type[Module]) -> type[Module]:
     _REGISTRY.append(cls)
     return cls
 
 
-def all_modules() -> List[Module]:
+def all_modules() -> list[Module]:
     # Import for side effects; keep the list explicit so a broken module is loud.
     from assay.modules import (  # noqa: F401
         ai_surface, gmaps_key, host_confirm, host_deep, host_services, inventory, secrets, takeover, tls, web_active, web_bypass, web_archive,
@@ -81,5 +79,5 @@ def all_modules() -> List[Module]:
     return [cls() for cls in _REGISTRY]
 
 
-def modules_for_stage(stage: str) -> List[Module]:
+def modules_for_stage(stage: str) -> list[Module]:
     return [m for m in all_modules() if m.stage == stage]

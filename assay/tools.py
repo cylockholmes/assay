@@ -20,7 +20,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterator, Sequence
 
 from assay import env
 from assay.models import Port
@@ -43,7 +43,7 @@ class ToolSpec:
     optional: bool = True
     apt: str = ""                       # apt package name
     go: str = ""                        # go module path for `go install`
-    post: List[str] = field(default_factory=list)   # commands to run after install
+    post: list[str] = field(default_factory=list)   # commands to run after install
 
     def __post_init__(self) -> None:
         self.binary = self.binary or self.name
@@ -57,7 +57,7 @@ class ToolSpec:
         return "manual"
 
 
-REGISTRY: Dict[str, ToolSpec] = {
+REGISTRY: dict[str, ToolSpec] = {
     "nmap": ToolSpec("nmap", "port + service/version detection on host targets",
                      "sudo apt install -y nmap", apt="nmap", optional=False),
     "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
@@ -104,7 +104,7 @@ class Proc:
     rc: int
     out: str
     err: str
-    cmd: List[str] = field(default_factory=list)
+    cmd: list[str] = field(default_factory=list)
     timed_out: bool = False
     # Cut short by the operator's skip key, not a deadline. A separate flag
     # from timed_out rather than reusing it: a caller that wants to tell "the
@@ -146,7 +146,7 @@ LEDGER = None
 _LEDGER_OUT_CAP = 8192
 
 
-def _ledger(tool: str, argv: List[str], rc: int, state: str,
+def _ledger(tool: str, argv: list[str], rc: int, state: str,
             duration: float, output: str) -> None:
     """Record one tool invocation in the ledger, if one is attached. Never
     raises - the ledger must not be able to take a scan down with it."""
@@ -159,7 +159,7 @@ def _ledger(tool: str, argv: List[str], rc: int, state: str,
         pass
 
 
-def _ledger_proc(p: "Proc", t0: float) -> "Proc":
+def _ledger_proc(p: Proc, t0: float) -> Proc:
     """Ledger a finished run() Proc and return it unchanged, so each return
     site in run() stays a one-liner."""
     state = ("skipped" if p.skipped else "timeout" if p.timed_out
@@ -212,7 +212,7 @@ def wait_while_paused() -> None:
 # Binary -> a parser turning one of its stdout lines into a status phrase.
 # Only for tools whose stdout is progress rather than results; everything else
 # gets the generic count below, which is what its lines actually are.
-_LINE_STATUS: Dict[str, Callable[[str], Optional[str]]] = {}
+_LINE_STATUS: dict[str, Callable[[str], str | None]] = {}
 
 
 def _say(msg: str, tick: bool = True) -> None:
@@ -239,7 +239,7 @@ class _Heartbeat:
     there is one, feeds it the newest detail to report along the way.
     """
 
-    def __init__(self, cmd: Sequence[str], every: Optional[float] = None) -> None:
+    def __init__(self, cmd: Sequence[str], every: float | None = None) -> None:
         self.name = cmd[0] if cmd else "?"
         # Read at construction rather than bound as a default, so the cadence
         # stays a knob and not a value frozen at import.
@@ -255,10 +255,10 @@ class _Heartbeat:
         # finish or a deadline cutoff, which look identical from the
         # caller's side otherwise (both are just "the process ended").
         self.was_skipped = False
-        self._proc: Optional["subprocess.Popen"] = None
+        self._proc: subprocess.Popen | None = None
         self._done = threading.Event()
 
-    def bind(self, proc: "subprocess.Popen") -> "_Heartbeat":
+    def bind(self, proc: subprocess.Popen) -> _Heartbeat:
         """Give this heartbeat the process it is watching.
 
         Without this, only the caller's own read loop - if it has one - can
@@ -272,7 +272,7 @@ class _Heartbeat:
         self._proc = proc
         return self
 
-    def start(self) -> "_Heartbeat":
+    def start(self) -> _Heartbeat:
         if PROGRESS is not None:
             threading.Thread(target=self._loop, daemon=True).start()
         return self
@@ -304,7 +304,7 @@ class _Heartbeat:
                                        " - %s" % text if text else ""))
 
 
-def _stop(proc: "subprocess.Popen", grace: float = 10.0) -> None:
+def _stop(proc: subprocess.Popen, grace: float = 10.0) -> None:
     """Ask a process to stop before insisting.
 
     SIGKILL cannot be caught, so a tool killed outright never gets to finish
@@ -382,7 +382,7 @@ def dns_lookup(record: str, name: str, timeout: float = 8.0) -> str:
     return ""
 
 
-def bridge(cmd: Sequence[str]) -> List[str]:
+def bridge(cmd: Sequence[str]) -> list[str]:
     """Prepend the WSL prefix when assay is hosted on Windows.
 
     Every subprocess call in assay funnels through run() or stream_lines(),
@@ -394,9 +394,9 @@ def bridge(cmd: Sequence[str]) -> List[str]:
     return cmd
 
 
-def available() -> Dict[str, Optional[str]]:
+def available() -> dict[str, str | None]:
     env.augment_path()
-    out: Dict[str, Optional[str]] = {}
+    out: dict[str, str | None] = {}
     binaries = [s.binary for s in REGISTRY.values() if s.binary != "__wordlist__"]
     resolved = env.wsl_which_many(binaries) if env.use_wsl_bridge() else {}
     for name, spec in REGISTRY.items():
@@ -414,8 +414,8 @@ def have(name: str) -> bool:
 
 
 def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
-        cwd: Optional[str] = None,
-        env_extra: Optional[Dict[str, str]] = None) -> Proc:
+        cwd: str | None = None,
+        env_extra: dict[str, str] | None = None) -> Proc:
     """Run an external command. The only spawn primitive besides stream_lines.
 
     `env_extra` sets variables for the child. Under the WSL bridge the host's
@@ -535,7 +535,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     hb = _Heartbeat(cmd).bind(proc)
     status = _LINE_STATUS.get(hb.name)
     n_lines = 0
-    head: List[str] = []
+    head: list[str] = []
     head_len = 0
     completed = False
     try:
@@ -651,7 +651,7 @@ PROXY = ""
 AVOID = None
 
 
-def proxy_args(tool: str) -> List[str]:
+def proxy_args(tool: str) -> list[str]:
     """Render PROXY in each tool's own flag syntax."""
     if not PROXY:
         return []
@@ -660,7 +660,7 @@ def proxy_args(tool: str) -> List[str]:
     return [flag, PROXY] if flag else []
 
 
-def proxy_env() -> Dict[str, str]:
+def proxy_env() -> dict[str, str]:
     """PROXY as environment variables, for tools with no proxy flag (arjun)."""
     if not PROXY:
         return {}
@@ -668,11 +668,11 @@ def proxy_env() -> Dict[str, str]:
             "http_proxy": PROXY, "https_proxy": PROXY}
 
 
-def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str]:
+def header_args(tool: str, headers: dict[str, str] | None = None) -> list[str]:
     """Render extra request headers in each tool's own flag syntax."""
     if not headers:
         return []
-    out: List[str] = []
+    out: list[str] = []
     flag = {"httpx": "-H", "nuclei": "-H", "katana": "-H", "ffuf": "-H"}.get(tool)
     if not flag:
         return []
@@ -686,7 +686,7 @@ def header_args(tool: str, headers: Optional[Dict[str, str]] = None) -> List[str
 # --------------------------------------------------------------------------
 
 
-def nmap_port_args(spec: str) -> List[str]:
+def nmap_port_args(spec: str) -> list[str]:
     """Translate the base of a port spec ('top-N+extra,ports' forms included).
 
     Only ever returns one port-selection method. nmap treats --top-ports and
@@ -704,7 +704,7 @@ def nmap_port_args(spec: str) -> List[str]:
     return ["-p", base]
 
 
-def nmap_extra_port_args(spec: str) -> Optional[List[str]]:
+def nmap_extra_port_args(spec: str) -> list[str] | None:
     """Ports appended after '+' in a 'top-N+extra,ports' spec, as -p args."""
     if "+" not in spec or spec == "all":
         return None
@@ -716,11 +716,11 @@ def nmap_extra_port_args(spec: str) -> Optional[List[str]]:
 class NmapHost:
     """One scanned address's open ports and the hostname(s) nmap's own
     reverse-DNS lookup found for it while scanning."""
-    ports: List[Port] = field(default_factory=list)
-    hostnames: List[str] = field(default_factory=list)
+    ports: list[Port] = field(default_factory=list)
+    hostnames: list[str] = field(default_factory=list)
 
 
-def _merge_nmap_hosts(dest: Dict[str, NmapHost], src: Dict[str, NmapHost]) -> None:
+def _merge_nmap_hosts(dest: dict[str, NmapHost], src: dict[str, NmapHost]) -> None:
     for addr, nh in src.items():
         existing = dest.setdefault(addr, NmapHost())
         seen = {(p.port, p.proto) for p in existing.ports}
@@ -737,7 +737,7 @@ _NMAP_PCT = re.compile(r"About ([\d.]+)% done(?:.*?\(([\d:]+) remaining\))?")
 _NMAP_HOSTS = re.compile(r"(\d+) hosts? completed")
 
 
-def nmap_stat_line(line: str) -> Optional[str]:
+def nmap_stat_line(line: str) -> str | None:
     """Turn one nmap --stats-every line into a status, or None if it is not one.
 
     nmap prints these to stdout on its own timer. They are the only progress
@@ -862,7 +862,7 @@ def nmap_timeout(hosts: Sequence[str], port_spec: str = "") -> float:
                NMAP_BASE_TIMEOUT + per_host * max(1, len(hosts)))
 
 
-def nmap_hostgroup(hosts: Sequence[str]) -> Optional[int]:
+def nmap_hostgroup(hosts: Sequence[str]) -> int | None:
     """Cap nmap's host group so a cut-off scan keeps most of its work.
 
     None when the scan is too small to be worth splitting: the whole thing is
@@ -873,9 +873,9 @@ def nmap_hostgroup(hosts: Sequence[str]) -> Optional[int]:
     return max(NMAP_MIN_HOSTGROUP, -(-len(hosts) // NMAP_CHECKPOINTS))
 
 
-def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
-              timeout: Optional[float] = None,
-              out_dir: str = ".", xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
+def nmap_scan(hosts: list[str], port_spec: str, tune: dict,
+              timeout: float | None = None,
+              out_dir: str = ".", xml_prefix: str = "nmap") -> dict[str, NmapHost]:
     """Service/version scan. Returns scanned address -> NmapHost.
 
     Always keyed by the address nmap actually scanned, never by a
@@ -908,7 +908,7 @@ def nmap_scan(hosts: List[str], port_spec: str, tune: Dict,
     if group:
         base_args += ["--max-hostgroup", str(group)]
 
-    def _run(port_args: List[str], xml_name: str) -> Dict[str, NmapHost]:
+    def _run(port_args: list[str], xml_name: str) -> dict[str, NmapHost]:
         xml_path = os.path.join(out_dir, "raw", xml_name)
         os.makedirs(os.path.dirname(xml_path), exist_ok=True)
         cmd = ([base_args[0], "--stats-every", "10s"] + base_args[1:]
@@ -957,9 +957,9 @@ UDP_PORTS = [19, 53, 69, 111, 123, 137, 138, 161, 162, 177, 500, 520,
              623, 1434, 1900, 4500, 5353, 11211]
 
 
-def nmap_udp_scan(hosts: List[str], tune: Dict, out_dir: str = ".",
+def nmap_udp_scan(hosts: list[str], tune: dict, out_dir: str = ".",
                   xml_prefix: str = "nmap-udp",
-                  timeout: Optional[float] = None) -> Dict[str, NmapHost]:
+                  timeout: float | None = None) -> dict[str, NmapHost]:
     """Curated-port UDP service scan. Returns scanned address -> NmapHost, with
     ports carrying their honest `open` / `open|filtered` state (UDP usually
     cannot tell the two apart).
@@ -1038,7 +1038,7 @@ def fetch_nmapview_xsl(dest_path: str, timeout: float = 15.0) -> str:
     return ""
 
 
-def merge_nmap_xml_files(paths: List[str], out_path: str) -> bool:
+def merge_nmap_xml_files(paths: list[str], out_path: str) -> bool:
     """Combine one or more nmap XML runs into a single <nmaprun> document,
     joining on each <host>'s address.
 
@@ -1062,7 +1062,7 @@ def merge_nmap_xml_files(paths: List[str], out_path: str) -> bool:
         return False
     base_root = base_tree.getroot()
 
-    def _addr(host_el) -> Optional[str]:
+    def _addr(host_el) -> str | None:
         for a in host_el.findall("address"):
             if a.get("addrtype") in ("ipv4", "ipv6"):
                 return a.get("addr")
@@ -1105,7 +1105,7 @@ def nmapview_render(xml_path: str, xsl_path: str, out_path: str,
     return proc.ok and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
 
 
-def build_nmapview_report(xml_paths: List[str], out_dir: str,
+def build_nmapview_report(xml_paths: list[str], out_dir: str,
                           timeout: float = 90.0) -> str:
     """One-shot pipeline: fetch NmapView.xsl, merge the given XML files, and
     render the result. Returns the rendered HTML's path on success, or "".
@@ -1128,9 +1128,9 @@ def build_nmapview_report(xml_paths: List[str], out_dir: str,
                                        timeout=timeout) else ""
 
 
-def nmap_script_scan(host: str, ports: List[int], scripts: List[str],
+def nmap_script_scan(host: str, ports: list[int], scripts: list[str],
                      out_dir: str, udp: bool = False,
-                     timeout: float = 600.0) -> Dict[int, Dict[str, str]]:
+                     timeout: float = 600.0) -> dict[int, dict[str, str]]:
     """Run targeted NSE scripts. Returns {port: {script_id: output}}."""
     if not ports or not scripts:
         return {}
@@ -1147,8 +1147,8 @@ def nmap_script_scan(host: str, ports: List[int], scripts: List[str],
     return parse_nse_xml(xml_path)
 
 
-def parse_nse_xml(path: str) -> Dict[int, Dict[str, str]]:
-    out: Dict[int, Dict[str, str]] = {}
+def parse_nse_xml(path: str) -> dict[int, dict[str, str]]:
+    out: dict[int, dict[str, str]] = {}
     try:
         tree = ET.parse(path)
     except (ET.ParseError, OSError):
@@ -1187,7 +1187,7 @@ def _salvage_nmap_xml(path: str):
     is self-closing, so the result parses.
     """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             data = fh.read()
     except OSError:
         return None
@@ -1200,7 +1200,7 @@ def _salvage_nmap_xml(path: str):
         return None
 
 
-def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> Dict[str, NmapHost]:
+def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> dict[str, NmapHost]:
     """Parse nmap's XML into scanned address -> NmapHost.
 
     Keyed by the numeric address nmap scanned (always present - nmap resolves
@@ -1215,7 +1215,7 @@ def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> Dict[str, 
     being relabelled "open".
     """
     keep_states = {"open", "open|filtered"} if include_open_filtered else {"open"}
-    out: Dict[str, NmapHost] = {}
+    out: dict[str, NmapHost] = {}
     try:
         root = ET.parse(path).getroot()
     except (ET.ParseError, OSError) as exc:
@@ -1238,7 +1238,7 @@ def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> Dict[str, 
         key = addr or (names[0] if names else "")
         if not key:
             continue
-        ports: List[Port] = []
+        ports: list[Port] = []
         for p in host_el.findall("ports/port"):
             state_el = p.find("state")
             pstate = state_el.get("state") if state_el is not None else ""
@@ -1269,14 +1269,14 @@ def nmap_xml_path(out_dir: str, xml_prefix: str = "nmap") -> str:
     return os.path.join(out_dir, "raw", "%s.xml" % xml_prefix)
 
 
-def _nmap_xml_variants() -> List[Tuple[str, str]]:
+def _nmap_xml_variants() -> list[tuple[str, str]]:
     base = [
         ("nmap.xml", "base scan"),
         ("nmap-extra.xml", "AI/ML port scan"),
         ("nmap-discovered.xml", "reverse-DNS-discovered hosts"),
         ("nmap-discovered-extra.xml", "reverse-DNS-discovered hosts, AI/ML ports"),
     ]
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     for name, label in base:
         out.append((name, label))
         out.append((name.replace(".xml", "-previous.xml"), label + ", pre-resume"))
@@ -1288,10 +1288,10 @@ def _nmap_xml_variants() -> List[Tuple[str, str]]:
 # instead of overwriting (see Engine._preserve_previous_xml) - one place to
 # name it, so the report's raw-XML section and NmapView's own render pick it
 # up without either maintaining its own copy of this list.
-NMAP_XML_FILES: List[Tuple[str, str]] = _nmap_xml_variants()
+NMAP_XML_FILES: list[tuple[str, str]] = _nmap_xml_variants()
 
 
-def resumable_nmap_hosts(out_dir: str, xml_prefix: str = "nmap") -> Dict[str, NmapHost]:
+def resumable_nmap_hosts(out_dir: str, xml_prefix: str = "nmap") -> dict[str, NmapHost]:
     """Whatever an earlier nmap_scan() call already wrote under this prefix.
 
     --resume's whole mechanism: parse_nmap_xml already salvages a killed
@@ -1320,7 +1320,7 @@ NAABU_TIMEOUT_CAP = 3 * 3600.0
 NAABU_SLACK = 3.0
 
 
-def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: Dict,
+def naabu_timeout(hosts: Sequence[str], port_spec: str, tune: dict,
                   cap: float = NAABU_TIMEOUT_CAP) -> float:
     """How long hosts x ports probes take at the configured rate, plus slack.
 
@@ -1369,9 +1369,9 @@ def _target_list_file(items: Sequence[str]):
             pass
 
 
-def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
-               timeout: Optional[float] = None,
-               status: Optional[Dict] = None) -> Dict[str, List[int]]:
+def naabu_scan(hosts: list[str], port_spec: str, tune: dict,
+               timeout: float | None = None,
+               status: dict | None = None) -> dict[str, list[int]]:
     """`status`, when given, gets "timed_out"/"skipped" set to True if a pass
     was cut off. naabu only emits lines for open ports, so the result alone
     cannot say whether every host was actually swept."""
@@ -1384,7 +1384,7 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
             "top-1000": ["-top-ports", "1000"],
             "all": ["-p", "-"]}.get(base, ["-p", base])
 
-    def _run(port_args: List[str], ports: str) -> Dict[str, List[int]]:
+    def _run(port_args: list[str], ports: str) -> dict[str, list[int]]:
         # Budgeted per pass, not per call: the extra-ports pass is a handful
         # of ports and has no business inheriting the base sweep's allowance.
         deadline = timeout if timeout is not None else naabu_timeout(hosts, ports, tune)
@@ -1400,7 +1400,7 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
         # _target_list_file.
         cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
                "-c", str(tune.get("concurrency", 10))] + port_args
-        found: Dict[str, List[int]] = {}
+        found: dict[str, list[int]] = {}
         t0 = time.time()
         # naabu only ever emits a line for a port it found open, so there is no
         # honest "N of 384 swept" to report - what stream_lines counts as it
@@ -1421,7 +1421,6 @@ def naabu_scan(hosts: List[str], port_spec: str, tune: Dict,
                 status["skipped"] = True
             elif time.time() - t0 >= deadline - 1.0:
                 status["timed_out"] = True
-        total = sum(len(v) for v in found.values())
         # Candidates only: naabu is a fast SYN sweep with false positives
         # against firewalls and tarpits. nmap -sV decides what is really open
         # (see Engine._reconcile_naabu for what it dropped). Long lists are
@@ -1458,14 +1457,14 @@ NAABU_BATCH_TARGET_SECONDS = 2 * 3600.0
 NAABU_MAX_BATCHES = 10_000
 
 
-def sweep_seconds(n_hosts: int, port_spec: str, tune: Dict) -> float:
+def sweep_seconds(n_hosts: int, port_spec: str, tune: dict) -> float:
     """Raw probing time for a sweep at the configured rate (no slack)."""
     rate = max(1.0, float(tune.get("nmap_min_rate", 300)))
     return n_hosts * port_count(port_spec) / rate
 
 
-def plan_batches(hosts: Sequence[str], port_spec: str, tune: Dict,
-                 requested: int = 0) -> List[List[str]]:
+def plan_batches(hosts: Sequence[str], port_spec: str, tune: dict,
+                 requested: int = 0) -> list[list[str]]:
     """Split hosts into sweep batches. `requested` 0 means size them from the
     estimated probe time; otherwise exactly that many (never more than hosts)."""
     hosts = list(hosts)
@@ -1484,10 +1483,10 @@ def plan_batches(hosts: Sequence[str], port_spec: str, tune: Dict,
     return [hosts[i:i + size] for i in range(0, len(hosts), size)]
 
 
-def naabu_sweep(hosts: List[str], port_spec: str, tune: Dict, batches: int = 0,
+def naabu_sweep(hosts: list[str], port_spec: str, tune: dict, batches: int = 0,
                 max_splits: int = 3, batch_cap: float = NAABU_TIMEOUT_CAP,
-                say=None, progress_path: Optional[str] = None,
-                resume: bool = False, scan=None) -> Tuple[Dict[str, List[int]], List[str]]:
+                say=None, progress_path: str | None = None,
+                resume: bool = False, scan=None) -> tuple[dict[str, list[int]], list[str]]:
     """Sweep in batches so a time limit never silently drops hosts.
 
     A batch that times out is split in half and both halves are queued again,
@@ -1502,12 +1501,12 @@ def naabu_sweep(hosts: List[str], port_spec: str, tune: Dict, batches: int = 0,
     """
     scan = scan or naabu_scan
     say = say or (lambda msg: None)
-    found: Dict[str, List[int]] = {}
+    found: dict[str, list[int]] = {}
     done: set = set()
 
     if resume and progress_path and os.path.isfile(progress_path):
         try:
-            with open(progress_path, "r", encoding="utf-8") as fh:
+            with open(progress_path, encoding="utf-8") as fh:
                 prev = json.load(fh)
             if prev.get("spec") == port_spec:
                 done = set(prev.get("done") or [])
@@ -1530,10 +1529,10 @@ def naabu_sweep(hosts: List[str], port_spec: str, tune: Dict, batches: int = 0,
         except OSError:
             pass
 
-    queue: List[Tuple[List[str], int]] = [
+    queue: list[tuple[list[str], int]] = [
         (b, 0) for b in plan_batches(pending, port_spec, tune, batches)]
     total = len(queue)
-    unscanned: List[str] = []
+    unscanned: list[str] = []
     n = 0
     while queue:
         batch, depth = queue.pop(0)
@@ -1541,7 +1540,7 @@ def naabu_sweep(hosts: List[str], port_spec: str, tune: Dict, batches: int = 0,
         label = "batch %d/%d" % (min(n, total), total) if depth == 0 \
             else "retry (split x%d)" % depth
         say("naabu %s: %d host(s)" % (label, len(batch)))
-        st: Dict = {}
+        st: dict = {}
         deadline = naabu_timeout(batch, port_spec, tune, cap=batch_cap)
         part = scan(batch, port_spec, tune, timeout=deadline, status=st)
         for h, ports in part.items():
@@ -1583,15 +1582,15 @@ HTTPX_TIMEOUT_CAP = 3 * 3600.0
 HTTPX_PER_REQUEST_WORST_CASE = 10.0 * 2
 
 
-def httpx_timeout(candidates: Sequence[str], tune: Dict) -> float:
+def httpx_timeout(candidates: Sequence[str], tune: dict) -> float:
     threads = max(1, int(tune.get("concurrency", 10)))
     worst_case = len(candidates) * HTTPX_PER_REQUEST_WORST_CASE / threads
     return min(HTTPX_TIMEOUT_CAP, HTTPX_BASE_TIMEOUT + worst_case)
 
 
-def httpx_probe(targets: List[str], tune: Dict,
-                timeout: Optional[float] = None,
-                headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+def httpx_probe(targets: list[str], tune: dict,
+                timeout: float | None = None,
+                headers: dict[str, str] | None = None) -> Iterator[dict]:
     # "-list -" doesn't mean stdin here either -- see _target_list_file. The
     # near-silent version of this failure is worse than naabu's: httpx
     # exiting immediately just looks like zero live endpoints, and
@@ -1616,10 +1615,10 @@ def httpx_probe(targets: List[str], tune: Dict,
 # --------------------------------------------------------------------------
 
 
-def nuclei_scan(urls: List[str], severity: str, tune: Dict,
+def nuclei_scan(urls: list[str], severity: str, tune: dict,
                 extra_tags: str = "",
                 timeout: float = 3600.0,
-                headers: Optional[Dict[str, str]] = None) -> Iterator[dict]:
+                headers: dict[str, str] | None = None) -> Iterator[dict]:
     # A real file, not stdin -- nuclei has shipped bugs where stdin piped in
     # via subprocess.Popen specifically was never read at all
     # (projectdiscovery/nuclei#2032), on top of the same "-list -" literal-
@@ -1658,7 +1657,7 @@ KATANA_TIMEOUT_CAP = 3 * 3600.0
 KATANA_PER_REQUEST_WORST_CASE = 10.0
 
 
-def katana_timeout(candidates: Sequence[str], depth: int, tune: Dict) -> float:
+def katana_timeout(candidates: Sequence[str], depth: int, tune: dict) -> float:
     # Must match -c's own cap below, or the budget and the concurrency it is
     # sized for would silently disagree.
     threads = max(1, min(int(tune.get("concurrency", 10)), 10))
@@ -1666,10 +1665,10 @@ def katana_timeout(candidates: Sequence[str], depth: int, tune: Dict) -> float:
     return min(KATANA_TIMEOUT_CAP, KATANA_BASE_TIMEOUT + worst_case)
 
 
-def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
-                 timeout: Optional[float] = None,
-                 headers: Optional[Dict[str, str]] = None,
-                 avoid: Optional[str] = None) -> List[dict]:
+def katana_crawl(urls: list[str], depth: int, tune: dict, max_urls: int,
+                 timeout: float | None = None,
+                 headers: dict[str, str] | None = None,
+                 avoid: str | None = None) -> list[dict]:
     """`avoid` is a regex of URLs the crawler must never follow (-cos)."""
     # Flat 600s was the same bug already fixed for nmap, naabu and httpx
     # today: a crawl of 359 endpoints hit it and cut short at 317 URLs.
@@ -1705,7 +1704,7 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
     ] + header_args("katana", headers) + proxy_args("katana")
     if avoid:
         cmd += ["-cos", avoid]
-    out: List[dict] = []
+    out: list[dict] = []
     with _target_list_file(urls) as path:
         for obj in stream_json(cmd + ["-list", path], timeout=timeout):
             out.append(obj)
@@ -1720,7 +1719,7 @@ def katana_crawl(urls: List[str], depth: int, tune: Dict, max_urls: int,
 
 
 
-def dnsx_resolve(hosts: List[str], timeout: float = 300.0) -> Iterator[dict]:
+def dnsx_resolve(hosts: list[str], timeout: float = 300.0) -> Iterator[dict]:
     # A real file, not stdin -- same "-list -" mistake as naabu/httpx/nuclei/
     # katana above. See _target_list_file.
     cmd = ["dnsx", "-silent", "-json", "-a", "-cname", "-resp"]
@@ -1728,7 +1727,7 @@ def dnsx_resolve(hosts: List[str], timeout: float = 300.0) -> Iterator[dict]:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
-def subfinder_enum(domain: str, timeout: float = 300.0) -> List[str]:
+def subfinder_enum(domain: str, timeout: float = 300.0) -> list[str]:
     cmd = ["subfinder", "-silent", "-all", "-d", domain]
     return [l for l in stream_lines(cmd, timeout=timeout) if l]
 
@@ -1748,7 +1747,7 @@ class FfufRun:
     it was. The caller reports `coverage` so a partial pass is never mistaken
     for an exhaustive one.
     """
-    results: List[dict] = field(default_factory=list)
+    results: list[dict] = field(default_factory=list)
     planned: int = 0          # words x (1 + extensions): a full pass's requests
     attempted: int = 0        # estimate (rate x elapsed), capped at planned
     elapsed: float = 0.0
@@ -1779,7 +1778,7 @@ class FfufRun:
                 % (name, took, scope))
 
 
-_WORDLIST_LINES: Dict[str, int] = {}
+_WORDLIST_LINES: dict[str, int] = {}
 
 
 def _wordlist_len(path: str) -> int:
@@ -1794,9 +1793,9 @@ def _wordlist_len(path: str) -> int:
     return _WORDLIST_LINES[path]
 
 
-def ffuf_discover(url: str, wordlist: str, tune: Dict,
+def ffuf_discover(url: str, wordlist: str, tune: dict,
                   extensions: str = "", timeout: float = 600.0,
-                  headers: Optional[Dict[str, str]] = None) -> "FfufRun":
+                  headers: dict[str, str] | None = None) -> FfufRun:
     """Content discovery with ffuf's own auto-calibration to suppress soft-404s.
 
     A wordlist times the extension list is hundreds of thousands of requests,
@@ -1854,7 +1853,7 @@ def ffuf_discover(url: str, wordlist: str, tune: Dict,
         completed=proc.ok and elapsed < maxtime - 5,
     )
     try:
-        with open(tmp.name, "r", encoding="utf-8") as fh:
+        with open(tmp.name, encoding="utf-8") as fh:
             data = json.load(fh)
         out.results = data.get("results", [])
     except (OSError, ValueError):
@@ -1872,7 +1871,7 @@ class FfufSweep:
     """Outcome of fuzzing a wordlist in ordered shards. `reached` is the exact
     word index to resume from - banked across every shard that finished, so a
     later pass continues from there instead of redoing the front of the list."""
-    results: List[dict] = field(default_factory=list)
+    results: list[dict] = field(default_factory=list)
     reached: int = 0           # word index to resume from next time
     total: int = 0             # words in the wordlist
     elapsed: float = 0.0
@@ -1925,10 +1924,10 @@ _SHARD_SECONDS = 300.0
 _FIRST_SHARD_SECONDS = 60.0
 
 
-def ffuf_sweep(url: str, wordlist: str, tune: Dict,
+def ffuf_sweep(url: str, wordlist: str, tune: dict,
                extensions: str = "", timeout: float = 600.0,
                start: int = 0,
-               headers: Optional[Dict[str, str]] = None) -> "FfufSweep":
+               headers: dict[str, str] | None = None) -> FfufSweep:
     """Fuzz `wordlist` in ordered shards, from word index `start`, until the
     list is exhausted or `timeout` is spent.
 
@@ -1940,7 +1939,7 @@ def ffuf_sweep(url: str, wordlist: str, tune: Dict,
     there rather than from the top.
     """
     try:
-        with open(wordlist, "r", encoding="utf-8", errors="replace") as fh:
+        with open(wordlist, encoding="utf-8", errors="replace") as fh:
             words = [w.rstrip("\n") for w in fh if w.strip()]
     except OSError:
         return FfufSweep(wordlist=wordlist)
@@ -2054,7 +2053,7 @@ _CONTENT_WORDLIST_FALLBACK = (
 )
 
 
-def default_wordlist(profile: str = "standard") -> Optional[str]:
+def default_wordlist(profile: str = "standard") -> str | None:
     tiers = _CONTENT_WORDLIST_TIERS.get(profile, _CONTENT_WORDLIST_TIERS["standard"])
     for path in tiers + _CONTENT_WORDLIST_FALLBACK:
         if os.path.exists(path):
@@ -2078,7 +2077,7 @@ _DNS_WORDLIST_TIERS = {
 }
 
 
-def dns_wordlist(profile: str = "standard") -> Optional[str]:
+def dns_wordlist(profile: str = "standard") -> str | None:
     for path in _DNS_WORDLIST_TIERS.get(profile, ()):
         if os.path.exists(path):
             return path
@@ -2090,9 +2089,9 @@ def dns_wordlist(profile: str = "standard") -> Optional[str]:
 # --------------------------------------------------------------------------
 
 
-def gau_urls(domain: str, limit: int, timeout: float = 300.0) -> List[str]:
+def gau_urls(domain: str, limit: int, timeout: float = 300.0) -> list[str]:
     cmd = ["gau", "--subs", "--threads", "3", "--timeout", "20", domain]
-    out: List[str] = []
+    out: list[str] = []
     for line in stream_lines(cmd, timeout=timeout):
         if line.startswith("http"):
             out.append(line)
@@ -2101,8 +2100,8 @@ def gau_urls(domain: str, limit: int, timeout: float = 300.0) -> List[str]:
     return out
 
 
-def waybackurls_urls(domain: str, limit: int, timeout: float = 300.0) -> List[str]:
-    out: List[str] = []
+def waybackurls_urls(domain: str, limit: int, timeout: float = 300.0) -> list[str]:
+    out: list[str] = []
     for line in stream_lines(["waybackurls", domain], timeout=timeout, stdin=""):
         if line.startswith("http"):
             out.append(line)
@@ -2111,7 +2110,7 @@ def waybackurls_urls(domain: str, limit: int, timeout: float = 300.0) -> List[st
     return out
 
 
-def arjun_params(url: str, tune: Dict, timeout: float = 300.0) -> List[str]:
+def arjun_params(url: str, tune: dict, timeout: float = 300.0) -> list[str]:
     """Discover parameters a crawl cannot see. Returns parameter names."""
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     tmp.close()
@@ -2126,9 +2125,9 @@ def arjun_params(url: str, tune: Dict, timeout: float = 300.0) -> List[str]:
     # variables reach it.
     run(cmd, timeout=timeout, env_extra=proxy_env() or None)
     try:
-        with open(tmp.name, "r", encoding="utf-8") as fh:
+        with open(tmp.name, encoding="utf-8") as fh:
             data = json.load(fh)
-        names: List[str] = []
+        names: list[str] = []
         for entry in (data.values() if isinstance(data, dict) else []):
             if isinstance(entry, dict):
                 names += list(entry.get("params") or [])

@@ -8,8 +8,6 @@ assay's own scale so a nuclei 'high' cannot outrank a locally verified critical.
 
 from __future__ import annotations
 
-import re
-from typing import Dict, List, Optional
 
 from assay import owasp, tools
 from assay.context import Context
@@ -63,14 +61,14 @@ class NucleiModule(Module):
             return False
         return bool(ctx.cfg.opts.get("nuclei")) and ctx.has("nuclei")
 
-    def run_global(self, ctx: Context) -> List[Finding]:
+    def run_global(self, ctx: Context) -> list[Finding]:
         urls = [w.base_url for w in ctx.web]
         if not urls:
             return []
         sev = ctx.cfg.opts.get("nuclei_severity", "critical,high,medium")
         ctx.say("nuclei", "scanning %d endpoint(s) at severity %s" % (len(urls), sev))
 
-        out: List[Finding] = []
+        out: list[Finding] = []
         kept = dropped = 0
         # tool_headers, not just Authorization: nuclei used to drop --cookie
         # and --tag, so an authenticated scan's templates ran logged out.
@@ -91,7 +89,7 @@ class NucleiModule(Module):
         return out
 
     # ------------------------------------------------------------------
-    def _convert(self, obj: Dict) -> Optional[Finding]:
+    def _convert(self, obj: dict) -> Finding | None:
         tid = (obj.get("template-id") or "").lower()
         info = obj.get("info") or {}
         tags = [t.lower() for t in (info.get("tags") or [])]
@@ -141,14 +139,14 @@ class NucleiModule(Module):
         )
 
     @staticmethod
-    def _category(tags: List[str]) -> str:
+    def _category(tags: list[str]) -> str:
         for needles, cat in TAG_CATEGORY:
             if set(tags) & set(needles):
                 return cat
         return owasp.A05
 
     @staticmethod
-    def _cwe(info: Dict) -> str:
+    def _cwe(info: dict) -> str:
         classification = info.get("classification") or {}
         cwes = classification.get("cwe-id") or []
         if isinstance(cwes, str):

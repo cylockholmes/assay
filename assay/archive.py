@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Set
 from urllib.parse import quote
 
 CDX = ("https://web.archive.org/cdx/search/cdx?url=%s%%2F*&output=json"
@@ -54,7 +53,7 @@ class Snapshot:
         return SNAPSHOT % (self.timestamp, self.url)
 
 
-def cdx_index(host: str, http, limit: int = 400) -> List[Snapshot]:
+def cdx_index(host: str, http, limit: int = 400) -> list[Snapshot]:
     """Ask the Wayback CDX index what it holds for this host."""
     url = CDX % (quote(host, safe=""), limit)
     r = http.get(url, timeout=45.0, infra=True)
@@ -67,8 +66,8 @@ def cdx_index(host: str, http, limit: int = 400) -> List[Snapshot]:
     if not isinstance(rows, list) or len(rows) < 2:
         return []
 
-    out: List[Snapshot] = []
-    seen: Set[str] = set()
+    out: list[Snapshot] = []
+    seen: set[str] = set()
     for row in rows[1:]:                       # row 0 is the header
         if len(row) < 3:
             continue
@@ -92,7 +91,7 @@ def fetch(snap: Snapshot, http, limit: int = 400000) -> str:
     return r.body[:limit]
 
 
-def still_live(url: str, http, needle: str) -> Optional[bool]:
+def still_live(url: str, http, needle: str) -> bool | None:
     """Is the secret still in the version served today?
 
     None means we could not tell - the current URL did not answer.

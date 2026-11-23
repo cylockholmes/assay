@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import Dict, List, Optional
 
 from assay import owasp, tools
 from assay.context import Context
@@ -50,7 +49,7 @@ class ContentDiscoveryModule(Module):
             return False
         return bool(tools.default_wordlist(ctx.cfg.profile))
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         wordlist = tools.default_wordlist(ctx.cfg.profile)
         origin = origin_of(wt.base_url)
         extensions = self._extensions(wt)
@@ -81,7 +80,7 @@ class ContentDiscoveryModule(Module):
         return self._ingest(ctx, origin, wordlist, sweep.results, sweep.coverage)
 
     def _ingest(self, ctx: Context, origin: str, wordlist: str,
-                results: List[dict], coverage: str) -> List[Finding]:
+                results: list[dict], coverage: str) -> list[Finding]:
         """Turn one sweep's hits into URL-pool entries and, for the noteworthy
         ones, a finding. Shared by the live run and by a later resume pass so
         both treat results identically."""
@@ -89,8 +88,8 @@ class ContentDiscoveryModule(Module):
             return []
         bl = ctx.baseline_for(origin)
         cap = ctx.cfg.opts.get("max_urls_per_host", 60) * 3
-        discovered: List[str] = []
-        interesting: List[Dict] = []
+        discovered: list[str] = []
+        interesting: list[dict] = []
 
         for row in results:
             url = row.get("url") or ""
@@ -149,8 +148,8 @@ class ContentDiscoveryModule(Module):
             dedupe_key="content|%s" % origin,
         )]
 
-    def finalize(self, ctx: Context, job: Dict,
-                 stop: Optional[threading.Event] = None) -> List[Finding]:
+    def finalize(self, ctx: Context, job: dict,
+                 stop: threading.Event | None = None) -> list[Finding]:
         """Resume a cut-short pass from exactly where it stopped. Budgeted in
         hours, not minutes, because the operator explicitly asked to finish it;
         it still banks partial progress if even this runs out. The finding's
@@ -189,7 +188,7 @@ class ContentDiscoveryModule(Module):
 
 
 def finalize_pending(ctx: Context,
-                     stop: Optional[threading.Event] = None) -> Dict[str, int]:
+                     stop: threading.Event | None = None) -> dict[str, int]:
     """Finish every content-discovery pass that was cut short earlier in the
     run, emitting any new findings directly. Returns how the passes ended:
     finished (swept the list), skipped (operator 's'), stopped (cut by a

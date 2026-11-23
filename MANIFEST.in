@@ -1,0 +1,3 @@
+# Keep the sdist to the package itself.
+prune tests
+global-exclude *.py[cod] __pycache__

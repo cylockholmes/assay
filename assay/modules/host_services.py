@@ -9,9 +9,7 @@ vulnerability from a port number.
 
 from __future__ import annotations
 
-import json
 import socket
-from typing import Dict, List, Optional
 
 from assay import owasp
 from assay.context import Context
@@ -20,7 +18,7 @@ from assay.modules import Module, register
 
 # Services that are noteworthy purely by being reachable, with the manual step
 # that turns each into a demonstrable finding.
-NOTEWORTHY: Dict[str, Dict] = {
+NOTEWORTHY: dict[str, dict] = {
     "mongodb": dict(sev="high", cwe="CWE-306", cat=owasp.HOST,
                     impact="MongoDB reachable. If it accepts an unauthenticated "
                            "connection every database is readable and writable.",
@@ -88,8 +86,8 @@ class ServiceTriageModule(Module):
     impact_class = "probe"
     desc = "Exposed network services worth manual attention"
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
-        out: List[Finding] = []
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
+        out: list[Finding] = []
         host = target.ip or target.host
         for port in target.ports:
             # On a network that proxies these ports for every address, an open
@@ -124,7 +122,7 @@ class ServiceTriageModule(Module):
         return out
 
     # -- active, read-only confirmations ---------------------------------
-    def _probe(self, ctx: Context, host: str, port: Port) -> Optional[Finding]:
+    def _probe(self, ctx: Context, host: str, port: Port) -> Finding | None:
         if port.service in ("redis",) or port.port == 6379:
             return self._redis(ctx, host, port)
         if port.port == 11211 or port.service == "memcached":
@@ -164,7 +162,7 @@ class ServiceTriageModule(Module):
                                    "Python as the service account - remote code execution.")
         return None
 
-    def _redis(self, ctx: Context, host: str, port: Port) -> Optional[Finding]:
+    def _redis(self, ctx: Context, host: str, port: Port) -> Finding | None:
         if not ctx.cfg.scope.allows(host):
             return None
         try:
@@ -201,7 +199,7 @@ class ServiceTriageModule(Module):
             dedupe_key="redis|%s|%d" % (host, port.port),
         )
 
-    def _memcached(self, ctx: Context, host: str, port: Port) -> Optional[Finding]:
+    def _memcached(self, ctx: Context, host: str, port: Port) -> Finding | None:
         if not ctx.cfg.scope.allows(host):
             return None
         try:
@@ -232,8 +230,8 @@ class ServiceTriageModule(Module):
         )
 
     def _http_json(self, ctx: Context, host: str, port: Port, path: str,
-                   needles: List[str], title: str, sev: str,
-                   impact: str) -> Optional[Finding]:
+                   needles: list[str], title: str, sev: str,
+                   impact: str) -> Finding | None:
         for scheme in ("https", "http") if port.is_tls else ("http", "https"):
             url = "%s://%s:%d%s" % (scheme, host, port.port, path)
             r = ctx.http.get(url)

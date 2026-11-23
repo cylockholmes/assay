@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 from assay import env, tools
 
@@ -22,10 +22,10 @@ from assay import env, tools
 @dataclass
 class Step:
     label: str
-    cmd: List[str]
+    cmd: list[str]
     needs_sudo: bool = False
     optional: bool = False          # failure is survivable, keep going
-    env_extra: Dict[str, str] = field(default_factory=dict)
+    env_extra: dict[str, str] = field(default_factory=dict)
 
     def display(self) -> str:
         prefix = "sudo " if self.needs_sudo else ""
@@ -35,11 +35,11 @@ class Step:
 
 @dataclass
 class Plan:
-    steps: List[Step] = field(default_factory=list)
-    missing: List[str] = field(default_factory=list)
-    already: List[str] = field(default_factory=list)
-    unsupported: List[str] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
+    steps: list[Step] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    already: list[str] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
     path_hint: str = ""
 
     @property
@@ -76,7 +76,7 @@ def gopath_bin() -> str:
 # --------------------------------------------------------------------------
 
 
-def build_plan(only: Optional[List[str]] = None,
+def build_plan(only: list[str] | None = None,
                include_optional: bool = True) -> Plan:
     """Work out what is missing and exactly what would be run to fix it."""
     plan = Plan()
@@ -84,7 +84,7 @@ def build_plan(only: Optional[List[str]] = None,
     have = tools.available()
     res = env.resources()
 
-    wanted: List[Tuple[str, tools.ToolSpec]] = []
+    wanted: list[tuple[str, tools.ToolSpec]] = []
     for name, spec in tools.REGISTRY.items():
         if only and name not in only:
             continue
@@ -106,7 +106,7 @@ def build_plan(only: Optional[List[str]] = None,
 
     have_apt = _has("apt-get")
     sudo = _sudo_needed()
-    queued: List[Tuple[str, tools.ToolSpec]] = []
+    queued: list[tuple[str, tools.ToolSpec]] = []
 
     # -- apt ---------------------------------------------------------------
     if apt_pkgs:
@@ -174,8 +174,8 @@ def build_plan(only: Optional[List[str]] = None,
 # --------------------------------------------------------------------------
 
 
-def run_plan(plan: Plan, on_step: Optional[Callable[[str, str], None]] = None,
-             timeout: float = 900.0) -> Tuple[int, int]:
+def run_plan(plan: Plan, on_step: Callable[[str, str], None] | None = None,
+             timeout: float = 900.0) -> tuple[int, int]:
     """Execute the plan. Returns (succeeded, failed)."""
     def say(kind: str, msg: str) -> None:
         if on_step:
@@ -214,16 +214,16 @@ def run_plan(plan: Plan, on_step: Optional[Callable[[str, str], None]] = None,
     return ok, fail
 
 
-def persist_path(bin_dir: str) -> List[str]:
+def persist_path(bin_dir: str) -> list[str]:
     """Add a directory to the user's shell rc files. Returns files changed."""
     line = 'export PATH="$PATH:%s"' % bin_dir
-    changed: List[str] = []
+    changed: list[str] = []
     for rc in ("~/.bashrc", "~/.zshrc"):
         path = os.path.expanduser(rc)
         if not os.path.exists(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 if bin_dir in fh.read():
                     continue
             with open(path, "a", encoding="utf-8") as fh:
@@ -234,7 +234,7 @@ def persist_path(bin_dir: str) -> List[str]:
     return changed
 
 
-def verify(names: Optional[List[str]] = None) -> Dict[str, Optional[str]]:
+def verify(names: list[str] | None = None) -> dict[str, str | None]:
     """Re-resolve tools after an install, ignoring any cached PATH."""
     env.augment_path()
     have = tools.available()

@@ -13,9 +13,7 @@ import re
 import json
 import ipaddress
 import os
-import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 import yaml
@@ -55,10 +53,10 @@ class ScopeError(Exception):
 # Burp scope entries that cannot be expressed host-level, recorded during the
 # most recent parse so the CLI can report them rather than dropping them
 # silently. A path-scoped exclusion is the common case.
-_UNREPRESENTABLE: List[str] = []
+_UNREPRESENTABLE: list[str] = []
 
 
-def unrepresentable_rules() -> List[str]:
+def unrepresentable_rules() -> list[str]:
     return list(_UNREPRESENTABLE)
 
 
@@ -66,14 +64,14 @@ def unrepresentable_rules() -> List[str]:
 class Scope:
     """Allow/deny lists for hosts, wildcards and CIDRs."""
 
-    allow: List[str] = field(default_factory=list)
-    deny: List[str] = field(default_factory=list)
+    allow: list[str] = field(default_factory=list)
+    deny: list[str] = field(default_factory=list)
     # When no allow rules are supplied we run in permissive mode but the CLI
     # shouts about it; deny rules still apply.
     permissive: bool = True
 
-    _allow_nets: List[object] = field(default_factory=list, repr=False)
-    _deny_nets: List[object] = field(default_factory=list, repr=False)
+    _allow_nets: list[object] = field(default_factory=list, repr=False)
+    _deny_nets: list[object] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         self.permissive = not self.allow
@@ -81,7 +79,7 @@ class Scope:
         self._deny_nets = [n for n in (_as_net(x) for x in self.deny) if n]
 
     @classmethod
-    def from_file(cls, path: str) -> "Scope":
+    def from_file(cls, path: str) -> Scope:
         """Load scope from a file. Four formats, detected automatically:
 
           * Burp project scope JSON (exported from Target > Scope, or lifted
@@ -89,7 +87,7 @@ class Scope:
           * YAML with allow:/deny: keys
           * plain newline list, '!' or '-' prefix excludes
         """
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             raw = fh.read()
 
         burp = cls._from_burp(raw)
@@ -114,7 +112,7 @@ class Scope:
         return cls(allow=allow, deny=deny)
 
     @classmethod
-    def _from_burp(cls, raw: str) -> Optional["Scope"]:
+    def _from_burp(cls, raw: str) -> Scope | None:
         """Parse Burp's scope JSON. Returns None when this is not that format."""
         try:
             doc = json.loads(raw)
@@ -129,8 +127,8 @@ class Scope:
         if not isinstance(scope, dict):
             return None
 
-        def convert(entries, is_exclude: bool = False) -> List[str]:
-            out: List[str] = []
+        def convert(entries, is_exclude: bool = False) -> list[str]:
+            out: list[str] = []
             for e in entries or []:
                 if not isinstance(e, dict) or e.get("enabled") is False:
                     continue
@@ -211,7 +209,7 @@ class Scope:
             raise ScopeError("out of scope: %s" % host)
 
     @staticmethod
-    def _matches(host: str, patterns: List[str], nets: List[object]) -> bool:
+    def _matches(host: str, patterns: list[str], nets: list[object]) -> bool:
         ip = None
         try:
             ip = ipaddress.ip_address(host)
@@ -247,7 +245,7 @@ def _as_net(value: str):
 # Profiles
 # --------------------------------------------------------------------------
 
-PROFILES: Dict[str, Dict] = {
+PROFILES: dict[str, dict] = {
     # ~2 min/target. Live-host + obvious wins. Use while triaging a fresh list.
     "quick": {
         "port_spec": "top-100",
@@ -286,7 +284,7 @@ PROFILES: Dict[str, Dict] = {
 
 @dataclass
 class Config:
-    targets: List[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
     profile: str = "standard"
     out_dir: str = "./assay-out"
     # --resume: skip re-running nmap against a host it already finished in a
@@ -338,7 +336,7 @@ class Config:
     # connect proves nothing about whether a service exists. Declaring them
     # is better than inferring: assay can then be strict from the first host
     # instead of waiting for a majority to look alike.
-    proxied_ports: List[int] = field(default_factory=list)
+    proxied_ports: list[int] = field(default_factory=list)
 
     def is_proxied_port(self, port: int) -> bool:
         return port in self.proxied_ports
@@ -346,7 +344,7 @@ class Config:
 
     # http
     user_agent: str = DEFAULT_UA
-    headers: Dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
     cookies: str = ""
     # HTTP Basic credentials as "user:pass". Applied to every in-scope request
     # and handed to the external tools that accept a header.
@@ -373,10 +371,10 @@ class Config:
     # Burp XML or HAR captures of logged-in browsing. Their in-scope GET URLs
     # seed the crawl and the injection pool - pages behind a login are rarely
     # reachable by crawling from /.
-    seeds: List[str] = field(default_factory=list)
+    seeds: list[str] = field(default_factory=list)
     # Extra path/query regexes never to request while authenticated, on top
     # of DEFAULT_AVOID unless avoid_defaults is off.
-    avoid: List[str] = field(default_factory=list)
+    avoid: list[str] = field(default_factory=list)
     avoid_defaults: bool = True
     # NOTE: credentials provisioned for the engagement are simply the test -
     # supplying them implies nothing that needs guarding. The rule worth
@@ -385,17 +383,17 @@ class Config:
     # judgement about what you do with a finding, not about --basic, so it
     # lives in the submission guidance rather than in a flag.
 
-    only_modules: List[str] = field(default_factory=list)
-    skip_modules: List[str] = field(default_factory=list)
+    only_modules: list[str] = field(default_factory=list)
+    skip_modules: list[str] = field(default_factory=list)
 
     quiet: bool = False
 
     @property
-    def opts(self) -> Dict:
+    def opts(self) -> dict:
         return PROFILES.get(self.profile, PROFILES["standard"])
 
     @staticmethod
-    def slug_for(targets: List[str]) -> str:
+    def slug_for(targets: list[str]) -> str:
         """A stable, filesystem-safe directory name for this target set.
 
         One directory per target keeps runs from overwriting each other, which
@@ -440,7 +438,7 @@ class Config:
             return name in self.only_modules
         return name not in self.skip_modules
 
-    def request_headers(self) -> Dict[str, str]:
+    def request_headers(self) -> dict[str, str]:
         h = {
             "User-Agent": self.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -458,16 +456,16 @@ class Config:
             h["Cookie"] = self.cookies
         return h
 
-    def auth_header(self) -> Optional[str]:
+    def auth_header(self) -> str | None:
         """The Authorization header value, for passing to external tools."""
         if not self.basic_auth:
             return None
         token = base64.b64encode(self.basic_auth.encode("utf-8")).decode("ascii")
         return "Basic " + token
 
-    def tool_headers(self) -> Dict[str, str]:
+    def tool_headers(self) -> dict[str, str]:
         """Auth and custom headers to hand to external tools."""
-        h: Dict[str, str] = {}
+        h: dict[str, str] = {}
         if self.traffic_tag:
             h[self.traffic_tag_header] = self.traffic_tag
         auth = self.auth_header()
@@ -489,10 +487,10 @@ class Config:
                     or self.session_check
                     or any(k.lower() in _SESSION_HEADERS for k in self.headers))
 
-    def avoid_patterns(self) -> List[str]:
+    def avoid_patterns(self) -> list[str]:
         return (list(DEFAULT_AVOID) if self.avoid_defaults else []) + list(self.avoid)
 
-    def avoid_regex(self) -> Optional["re.Pattern"]:
+    def avoid_regex(self) -> re.Pattern | None:
         """One compiled regex for the avoid list, or None when it is not in force."""
         pats = self.avoid_patterns() if self.authenticated else []
         if not pats:

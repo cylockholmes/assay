@@ -9,7 +9,6 @@ owner a few requests' worth.
 
 from __future__ import annotations
 
-from typing import List
 
 from assay import gmaps, owasp, tools
 from assay.context import Context
@@ -25,8 +24,8 @@ class GoogleKeyModule(Module):
     impact_class = "probe"
     desc = "Test exposed Google API keys against billable Google APIs"
 
-    def run_global(self, ctx: Context) -> List[Finding]:
-        out: List[Finding] = []
+    def run_global(self, ctx: Context) -> list[Finding]:
+        out: list[Finding] = []
         with ctx._lock:
             keys = dict(ctx.google_keys)
         for key, source in keys.items():

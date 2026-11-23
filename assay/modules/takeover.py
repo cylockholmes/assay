@@ -8,7 +8,6 @@ at a known third-party service, and the service answers with its own
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
 
 from assay import owasp
 from assay.context import Context
@@ -17,7 +16,7 @@ from assay.modules import Module, register
 from assay import tools
 
 # provider -> (cname substring, body fingerprint)
-FINGERPRINTS: List[Tuple[str, str, str]] = [
+FINGERPRINTS: list[tuple[str, str, str]] = [
     ("GitHub Pages", "github.io", "There isn't a GitHub Pages site here"),
     ("Heroku", "herokuapp.com", "No such app"),
     ("AWS S3", "s3.amazonaws.com", "NoSuchBucket"),
@@ -59,7 +58,7 @@ class TakeoverModule(Module):
     impact_class = "read"
     desc = "Dangling CNAME / subdomain takeover"
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         host = target.host
         if target.is_ip:
             return []

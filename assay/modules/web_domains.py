@@ -12,7 +12,6 @@ stored XSS waiting for someone to pay ten dollars.
 
 from __future__ import annotations
 
-from typing import Dict, List, Set
 from urllib.parse import urlsplit
 
 from assay import domains, owasp
@@ -81,9 +80,9 @@ class UnregisteredDomainModule(Module):
     impact_class = "read"
     desc = "References to unregistered domains (script, CSP, CORS, cert SANs)"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         base = wt.base_url
-        refs: Dict[str, Set[str]] = {}
+        refs: dict[str, set[str]] = {}
 
         r = ctx.http.get(base)
         body = r.body if r.ok else (wt.body_sample or "")
@@ -119,7 +118,7 @@ class UnregisteredDomainModule(Module):
             checked = {}
             setattr(ctx, "_domain_cache", checked)
 
-        out: List[Finding] = []
+        out: list[Finding] = []
         for apex in sorted(refs)[:budget]:
             status = checked.get(apex)
             if status is None:
@@ -131,12 +130,12 @@ class UnregisteredDomainModule(Module):
         return out
 
     @staticmethod
-    def _merge(into: Dict[str, Set[str]], new: Dict[str, Set[str]]) -> None:
+    def _merge(into: dict[str, set[str]], new: dict[str, set[str]]) -> None:
         for k, v in new.items():
             into.setdefault(k, set()).update(v)
 
     @staticmethod
-    def _finding(apex: str, kinds: List[str], status, base: str) -> Finding:
+    def _finding(apex: str, kinds: list[str], status, base: str) -> Finding:
         primary = next((k for k in ORDER if k in kinds), kinds[0])
         sev, impact = CONSEQUENCE.get(primary, ("low", "Referenced by the application."))
         return Finding(

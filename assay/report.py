@@ -11,7 +11,7 @@ import html
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from assay.models import Finding
 from assay.store import Store
@@ -67,7 +67,7 @@ def _followup_proof_section(store: Store) -> str:
     ran_rows = [r for r in rows if r["state"] != "queued"]
     queued_rows = [r for r in rows if r["state"] == "queued"]
 
-    by_finding: Dict[str, List] = {}
+    by_finding: dict[str, list] = {}
     for r in ran_rows:
         by_finding.setdefault(r["finding_title"] or r["finding_id"] or "(unattributed)", []).append(r)
 
@@ -173,9 +173,9 @@ def _tool_runs_section(store: Store) -> str:
     ) % (len(rows), "".join(items))
 
 
-def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
-          scan_meta: Optional[Dict] = None, live: bool = False,
-          status: Optional[Dict] = None) -> str:
+def build(store: Store, assets: dict, out_path: str, ai: dict | None = None,
+          scan_meta: dict | None = None, live: bool = False,
+          status: dict | None = None) -> str:
     """Render the report. `live=True` marks the scan as still running.
 
     A live report reloads itself every few seconds so findings appear while the
@@ -193,12 +193,12 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     ai_by_fid = store.ai_map()
     current_run = store.run_id
 
-    buckets: Dict[str, List[Finding]] = {"CHASE": [], "LOOK": [], "NOTE": []}
+    buckets: dict[str, list[Finding]] = {"CHASE": [], "LOOK": [], "NOTE": []}
     for f in findings:
         buckets.setdefault(f.triage, buckets["NOTE"]).append(f)
 
     modules = sorted({f.module for f in findings if f.module})
-    parts: List[str] = [_HEAD, _header(counts, assets, meta, ai),
+    parts: list[str] = [_HEAD, _header(counts, assets, meta, ai),
                         _toolbar(modules, len(findings)),
                         _start_here(findings, ai_by_fid)]
 
@@ -234,8 +234,8 @@ def build(store: Store, assets: Dict, out_path: str, ai: Optional[Dict] = None,
     return out_path
 
 
-def _live_script(status: Optional[Dict] = None,
-                 duration: Optional[float] = None) -> str:
+def _live_script(status: dict | None = None,
+                 duration: float | None = None) -> str:
     """Auto-reload while a scan is in flight, preserving where you were.
 
     `status` carries where the scan currently is - stage and that stage's own
@@ -388,7 +388,7 @@ _CONFIRM_VIA = {
 
 def _render_confirmed(path: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
     except (OSError, ValueError):
         return ""
@@ -509,7 +509,7 @@ def _render_software(path: str) -> str:
     usually does not have.
     """
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
     except (OSError, ValueError):
         return ""
@@ -590,7 +590,7 @@ _NMAP_XML_CAP = 3_000_000   # a scan across many hosts can produce a large XML f
 # re-escaping megabytes of nmap XML on every refresh was the largest single
 # cost of a rebuild once the per-finding queries were gone. Bounded by the
 # number of distinct paths (four XML files, replay.sh, the software JSON).
-_FILE_BLOCKS: Dict[str, Tuple[Tuple[float, int], Any]] = {}
+_FILE_BLOCKS: dict[str, tuple[tuple[float, int], Any]] = {}
 
 
 def _by_file_version(path: str, render):
@@ -612,24 +612,24 @@ def _by_file_version(path: str, render):
     return value
 
 
-def _read_capped(path: str, cap: int) -> Tuple[str, bool]:
+def _read_capped(path: str, cap: int) -> tuple[str, bool]:
     """Returns (content, truncated). An empty, non-truncated result means
     the file does not exist or could not be read."""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             data = fh.read(cap + 1)
     except OSError:
         return "", False
     return (data[:cap], True) if len(data) > cap else (data, False)
 
 
-def _nmap_commands(out_dir: str) -> List[str]:
+def _nmap_commands(out_dir: str) -> list[str]:
     """The exact nmap invocation(s) this run made, pulled from replay.sh."""
     path = os.path.join(out_dir, "replay.sh")
 
-    def read() -> List[str]:
+    def read() -> list[str]:
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
         except OSError:
             return []
@@ -705,7 +705,7 @@ def _nmap_section(out_dir: str) -> str:
     ) % (len(files), beautified_block, cmd_block, "".join(raw_blocks))
 
 
-def _toolbar(modules: List[str], total: int) -> str:
+def _toolbar(modules: list[str], total: int) -> str:
     sev_chips = "".join(
         '<button class="chip sev-chip on" data-filter="sev" data-value="%s">%s</button>'
         % (s, s) for s in ("critical", "high", "medium", "low", "info"))
@@ -726,7 +726,7 @@ def _toolbar(modules: List[str], total: int) -> str:
         '</div>' % (sev_chips, tri_chips, mods, total, total))
 
 
-def _header(counts: Dict, assets: Dict, meta: Dict, ai: Optional[Dict]) -> str:
+def _header(counts: dict, assets: dict, meta: dict, ai: dict | None) -> str:
     tiles = [
         ("Chase", counts.get("CHASE", 0), "#ff4d6d"),
         ("Look", counts.get("LOOK", 0), "#ffd166"),
@@ -760,7 +760,7 @@ def _header(counts: Dict, assets: Dict, meta: Dict, ai: Optional[Dict]) -> str:
     )
 
 
-def _chains_section(chains: List[Dict], findings: List[Finding]) -> str:
+def _chains_section(chains: list[dict], findings: list[Finding]) -> str:
     titles = {f.fingerprint(): f.title for f in findings}
     rows = []
     for c in chains:
@@ -782,7 +782,7 @@ def _chains_section(chains: List[Dict], findings: List[Finding]) -> str:
             % (len(chains), "".join(rows)))
 
 
-def _start_here(findings: List[Finding], ai_by_fid: Dict[str, Dict]) -> str:
+def _start_here(findings: list[Finding], ai_by_fid: dict[str, dict]) -> str:
     """The three things to do first, stated as actions rather than findings."""
     top = [f for f in findings if f.triage == "CHASE"][:3]
     if not top:
@@ -809,7 +809,7 @@ def _start_here(findings: List[Finding], ai_by_fid: Dict[str, Dict]) -> str:
             % "".join(rows))
 
 
-def _finding_card(f: Finding, ai_by_fid: Dict[str, Dict], current_run: int) -> str:
+def _finding_card(f: Finding, ai_by_fid: dict[str, dict], current_run: int) -> str:
     fid = f.fingerprint()
     ai = ai_by_fid.get(fid)
     # Both of these came off the same row the Finding was built from, so

@@ -17,7 +17,7 @@ like on this network, then stop reporting it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from assay.models import WebTarget
 from assay.net import similarity
@@ -31,7 +31,7 @@ NO_BACKEND_STATUSES = (502, 503, 504)
 MIN_BODY_BYTES = 24
 
 
-def looks_live(status: int, body: str) -> Tuple[bool, str]:
+def looks_live(status: int, body: str) -> tuple[bool, str]:
     """Is there actually a service here, or just a proxy answering?
 
     On a network that proxies every address, a completed TCP connect and even
@@ -59,8 +59,8 @@ def looks_live(status: int, body: str) -> Tuple[bool, str]:
 class GatewayVerdict:
     detected: bool = False
     signature: str = ""              # short description for the log
-    members: List[str] = field(default_factory=list)   # origins that matched
-    sample: Optional[WebTarget] = None
+    members: list[str] = field(default_factory=list)   # origins that matched
+    sample: WebTarget | None = None
     share: float = 0.0
 
     @property
@@ -68,7 +68,7 @@ class GatewayVerdict:
         return len(self.members)
 
 
-def _fingerprint(wt: WebTarget) -> Tuple:
+def _fingerprint(wt: WebTarget) -> tuple:
     """Coarse key: identical status, server, type and near-identical size."""
     return (wt.status, (wt.server or "").split("/")[0].strip().lower(),
             wt.content_type or "", wt.title.strip().lower(),
@@ -97,13 +97,13 @@ def detect(web: Sequence[WebTarget], min_hosts: int = 5,
     verdict = GatewayVerdict()
     # Only compare across distinct hosts; several ports on one host are not
     # evidence of anything.
-    by_host: Dict[str, WebTarget] = {}
+    by_host: dict[str, WebTarget] = {}
     for wt in web:
         by_host.setdefault(wt.host, wt)
     if len(by_host) < min_hosts:
         return verdict
 
-    groups: Dict[Tuple, List[WebTarget]] = {}
+    groups: dict[tuple, list[WebTarget]] = {}
     for wt in by_host.values():
         groups.setdefault(_fingerprint(wt), []).append(wt)
 
@@ -132,7 +132,7 @@ def detect(web: Sequence[WebTarget], min_hosts: int = 5,
     return verdict
 
 
-def filter_web(web: List[WebTarget], verdict: GatewayVerdict) -> List[WebTarget]:
+def filter_web(web: list[WebTarget], verdict: GatewayVerdict) -> list[WebTarget]:
     """Drop endpoints that are only the gateway answering."""
     if not verdict.detected:
         return web

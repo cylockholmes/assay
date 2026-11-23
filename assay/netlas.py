@@ -17,7 +17,7 @@ import json
 import os
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Sequence
+from collections.abc import Callable, Sequence
 
 import requests
 
@@ -35,7 +35,7 @@ def available() -> bool:
     return bool(api_key())
 
 
-def parse_host_ports(body: dict) -> List[int]:
+def parse_host_ports(body: dict) -> list[int]:
     """TCP ports from a /host/{host}/ response. Entries look like
     {"protocol": "https", "prot4": "tcp", "port": 443, "prot7": "http"}."""
     out = set()
@@ -58,7 +58,7 @@ class QuotaExhausted(Exception):
 
 
 def _fetch(session: requests.Session, host: str, key: str,
-           timeout: float = 20.0) -> Optional[List[int]]:
+           timeout: float = 20.0) -> list[int] | None:
     """Ports for one host, [] when Netlas knows the host but lists no TCP
     ports, None when it has no data. Retries once on a 429."""
     url = "%s/host/%s/" % (API, host)
@@ -85,10 +85,10 @@ def _fetch(session: requests.Session, host: str, key: str,
 
 
 def lookup(hosts: Sequence[str], say: Callable[[str], None] = lambda m: None,
-           cache_path: Optional[str] = None,
-           stop: Optional[threading.Event] = None,
-           fetch: Optional[Callable[[str], Optional[List[int]]]] = None,
-           ) -> Dict[str, List[int]]:
+           cache_path: str | None = None,
+           stop: threading.Event | None = None,
+           fetch: Callable[[str], list[int] | None] | None = None,
+           ) -> dict[str, list[int]]:
     """Known open TCP ports per host. Hosts Netlas has nothing on are absent.
 
     `cache_path` persists every answer (including "no data") so a resumed or
@@ -102,10 +102,10 @@ def lookup(hosts: Sequence[str], say: Callable[[str], None] = lambda m: None,
         session = requests.Session()
         fetch = lambda h: _fetch(session, h, key)  # noqa: E731
 
-    cache: Dict[str, Optional[List[int]]] = {}
+    cache: dict[str, list[int] | None] = {}
     if cache_path and os.path.isfile(cache_path):
         try:
-            with open(cache_path, "r", encoding="utf-8") as fh:
+            with open(cache_path, encoding="utf-8") as fh:
                 cache = json.load(fh)
         except (OSError, ValueError):
             cache = {}

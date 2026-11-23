@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-from typing import List
 
 from assay import owasp, recon
 from assay.context import Context
@@ -20,7 +19,7 @@ class OriginExposureModule(Module):
     impact_class = "read"
     desc = "CDN/WAF bypass via a directly reachable origin server"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         if wt.host.replace(".", "").isdigit():
             return []          # already an IP; nothing to bypass
         try:
@@ -104,7 +103,7 @@ class VhostModule(Module):
             return False
         return ctx.cfg.profile in ("standard", "deep")
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
         candidates = self._candidates(ctx, wt)
         if not candidates:
             return []
@@ -141,7 +140,7 @@ class VhostModule(Module):
             dedupe_key="vhost|%s" % base,
         )]
 
-    def _candidates(self, ctx: Context, wt: WebTarget) -> List[str]:
+    def _candidates(self, ctx: Context, wt: WebTarget) -> list[str]:
         """Names worth trying: siblings already known, plus permutations."""
         apex = domains.registrable(wt.host)
         if not apex:

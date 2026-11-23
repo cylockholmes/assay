@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, Optional
+from collections.abc import Callable
 
 try:  # POSIX-only; without them the live skip key is simply unavailable
     import termios
@@ -65,15 +65,15 @@ class Dashboard:
         self.quiet = quiet
         self.stage = "starting"
         self.detail = ""
-        self.log: Deque[str] = deque(maxlen=6)
-        self.hits: Deque[Finding] = deque(maxlen=12)
-        self.counts: Dict[str, int] = {"CHASE": 0, "LOOK": 0, "NOTE": 0}
+        self.log: deque[str] = deque(maxlen=6)
+        self.hits: deque[Finding] = deque(maxlen=12)
+        self.counts: dict[str, int] = {"CHASE": 0, "LOOK": 0, "NOTE": 0}
         self.started = time.time()
         # A stage that reports nothing while it works is indistinguishable from
         # one that has hung, so the header carries how long THIS stage has run
         # as well as the whole scan.
         self.stage_started = time.time()
-        self._live: Optional[Live] = None
+        self._live: Live | None = None
         self._last_render = 0.0
         # The live skip key. `skip_available` is set by cmd_scan only when a
         # KeyListener actually armed, so the header never advertises [s] when
@@ -88,7 +88,7 @@ class Dashboard:
         self.paused = False
 
     # -- lifecycle ---------------------------------------------------------
-    def __enter__(self) -> "Dashboard":
+    def __enter__(self) -> Dashboard:
         if not self.quiet:
             console.print(Text(BANNER, style="bold cyan"))
             # get_renderable, not a pre-built snapshot: Live's auto-refresh
@@ -133,7 +133,7 @@ class Dashboard:
             self.hits.append(f)
         self._maybe_render()
 
-    def status(self) -> Dict[str, str]:
+    def status(self) -> dict[str, str]:
         """Where the scan is right now, for the live HTML report to show too.
 
         No whole-scan clock: the report already gets one via assets["duration"],
@@ -234,11 +234,11 @@ class KeyListener:
     """
 
     def __init__(self) -> None:
-        self._thread: Optional[threading.Thread] = None
-        self._stop_evt: Optional[threading.Event] = None
-        self.on_key: Optional[Callable[[str], None]] = None
+        self._thread: threading.Thread | None = None
+        self._stop_evt: threading.Event | None = None
+        self.on_key: Callable[[str], None] | None = None
         self._fd: int = -1
-        self._old_attrs: Optional[list] = None
+        self._old_attrs: list | None = None
 
     def start(self) -> bool:
         """Arm the listener. Returns whether it actually did - False when
@@ -394,7 +394,7 @@ def inventory(store: Store, limit_hosts: int = 60) -> None:
                           % (len(web) - limit_hosts))
 
 
-def summary(store: Store, assets: Dict, limit: int = 25) -> None:
+def summary(store: Store, assets: dict, limit: int = 25) -> None:
     counts = store.counts()
     findings = store.findings(limit=limit)
 
@@ -453,7 +453,7 @@ def summary(store: Store, assets: Dict, limit: int = 25) -> None:
     )
 
 
-def detail(f: Finding, ai: Optional[Dict] = None) -> None:
+def detail(f: Finding, ai: dict | None = None) -> None:
     body = Table.grid(padding=(0, 2))
     body.add_column(style="dim", width=10)
     body.add_column(overflow="fold")
@@ -476,7 +476,7 @@ def detail(f: Finding, ai: Optional[Dict] = None) -> None:
     console.print(Panel(body, title=Text(f.title, style="bold"), border_style="cyan"))
 
 
-def tool_table(available: Dict[str, Optional[str]], registry: Dict) -> Table:
+def tool_table(available: dict[str, str | None], registry: dict) -> Table:
     t = Table(box=ROUNDED, title="External tools", title_style="bold", expand=True)
     t.add_column("tool", width=12)
     t.add_column("", width=3)

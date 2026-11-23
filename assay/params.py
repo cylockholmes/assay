@@ -16,11 +16,10 @@ of the way when it is not.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
 # Parameter classes, and the checks each is worth spending requests on.
-CHECKS_FOR: Dict[str, Set[str]] = {
+CHECKS_FOR: dict[str, set[str]] = {
     "numeric":  {"sqli", "idor"},
     "url":      {"ssrf", "openredirect", "crlf"},
     "path":     {"traversal", "sqli"},
@@ -32,7 +31,7 @@ CHECKS_FOR: Dict[str, Set[str]] = {
                  "openredirect", "crlf"},
 }
 
-NAME_HINTS: List[Tuple[str, re.Pattern]] = [
+NAME_HINTS: list[tuple[str, re.Pattern]] = [
     ("url", re.compile(
         r"^(?:url|uri|link|src|source|dest|destination|redirect(?:_?uri|_?url)?|"
         r"next|return(?:_?url|_?to)?|continue|callback|webhook|endpoint|feed|"
@@ -58,7 +57,7 @@ NAME_HINTS: List[Tuple[str, re.Pattern]] = [
         r"^(?:template|tpl|layout|theme|render|format|view_?name|pattern)$", re.I)),
 ]
 
-VALUE_HINTS: List[Tuple[str, re.Pattern]] = [
+VALUE_HINTS: list[tuple[str, re.Pattern]] = [
     ("url", re.compile(r"^(?:https?|ftp|file|gopher)://|^//[\w.-]+\.", re.I)),
     ("path", re.compile(r"^[./\\]|/.*\.[A-Za-z0-9]{1,5}$|^[A-Za-z]:\\")),
     ("token", re.compile(
@@ -116,12 +115,12 @@ def wants(check: str, name: str, value: str = "") -> bool:
     return check in CHECKS_FOR.get(classify(name, value), CHECKS_FOR["unknown"])
 
 
-def parameters(url: str) -> List[Tuple[str, str]]:
+def parameters(url: str) -> list[tuple[str, str]]:
     return parse_qsl(urlsplit(url).query, keep_blank_values=True)
 
 
-def targets_for(check: str, url: str, fallback: Optional[List[str]] = None
-                ) -> List[str]:
+def targets_for(check: str, url: str, fallback: list[str] | None = None
+                ) -> list[str]:
     """Parameter names on `url` worth testing with `check`.
 
     When the URL carries no parameters the caller's fallback list is used, so a
@@ -140,14 +139,14 @@ PAGINATION = re.compile(
     r"index|idx|from|to|year|month|day|width|height|zoom|version|v)$", re.I)
 
 
-def idor_candidates(url: str) -> List[Tuple[str, str, str]]:
+def idor_candidates(url: str) -> list[tuple[str, str, str]]:
     """Parameters that look like they address someone else's object.
 
     Returns (name, value, kind). These are not tested automatically - deciding
     whether object 41 belongs to you needs a second account - but collecting
     them turns "test for IDOR" into a specific list of places to look.
     """
-    out: List[Tuple[str, str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for name, value in parameters(url):
         if name.startswith("assay_"):
             continue

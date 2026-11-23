@@ -15,8 +15,8 @@ and any term in `.githooks/forbidden-terms.txt`).
 ## Before opening a pull request
 
 ```bash
-ruff check --select E9,F63,F7,F82 assay
-python -m pytest tests/        # suite is in a private repo; present only for maintainers
+ruff check assay
+python -m pytest tests/
 assay --version && assay modules
 ```
 

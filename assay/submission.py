@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 import yaml
@@ -23,7 +22,7 @@ from assay.models import Finding
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
-_TEMPLATES: Optional[Dict[str, dict]] = None
+_TEMPLATES: dict[str, dict] | None = None
 
 # CVSS 3.1 base score lookup for the vectors used in the templates, so the
 # draft can state a severity without pulling in a scoring library.
@@ -39,10 +38,10 @@ _SCORES = {
 }
 
 
-def load_templates() -> Dict[str, dict]:
+def load_templates() -> dict[str, dict]:
     global _TEMPLATES
     if _TEMPLATES is None:
-        with open(os.path.join(DATA, "submissions.yaml"), "r", encoding="utf-8") as fh:
+        with open(os.path.join(DATA, "submissions.yaml"), encoding="utf-8") as fh:
             _TEMPLATES = yaml.safe_load(fh) or {}
     return _TEMPLATES
 
@@ -51,7 +50,7 @@ def _clean(text: str) -> str:
     return " ".join((text or "").split())
 
 
-def _fields(f: Finding) -> Dict[str, str]:
+def _fields(f: Finding) -> dict[str, str]:
     url = f.target if f.target.startswith("http") else ""
     parts = urlsplit(url) if url else None
     param = ""
@@ -77,7 +76,7 @@ def _fields(f: Finding) -> Dict[str, str]:
     }
 
 
-def _fill(text: str, fields: Dict[str, str]) -> str:
+def _fill(text: str, fields: dict[str, str]) -> str:
     out = text
     for k, v in fields.items():
         out = out.replace("{%s}" % k, v)
@@ -90,14 +89,14 @@ def template_for(f: Finding) -> dict:
     return tpl.get(f.module) or tpl.get("default", {})
 
 
-def draft(f: Finding, ai: Optional[Dict] = None) -> str:
+def draft(f: Finding, ai: dict | None = None) -> str:
     """Render a submission draft as markdown."""
     t = template_for(f)
     fields = _fields(f)
     cvss = t.get("cvss", "")
     score, rating = _SCORES.get(cvss, (0.0, f.severity.title()))
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# %s" % _fill(t.get("title_override", f.title), fields))
     lines.append("")
     lines.append("**Category:** %s  " % t.get("category", "Security Misconfiguration"))
@@ -171,9 +170,9 @@ def draft(f: Finding, ai: Optional[Dict] = None) -> str:
     return "\n".join(lines)
 
 
-def bundle(findings: List[Finding], store=None, limit: int = 20) -> str:
+def bundle(findings: list[Finding], store=None, limit: int = 20) -> str:
     """One markdown document containing a draft per finding."""
-    out: List[str] = []
+    out: list[str] = []
     for f in findings[:limit]:
         ai = store.ai_for(f.fingerprint()) if store else None
         out.append(draft(f, ai))

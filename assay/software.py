@@ -14,7 +14,6 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
 
 from assay.models import Target, WebTarget
 
@@ -29,7 +28,7 @@ class Software:
     proof: str = ""           # the literal text the version was read from
     repro: str = ""           # shell command that shows the same text again
 
-    def key(self) -> Tuple[str, str]:
+    def key(self) -> tuple[str, str]:
         return (self.name.lower(), self.version)
 
 
@@ -37,7 +36,7 @@ class Software:
 # blob of script/link src attributes and inline body text, so the pattern
 # matches both a filename ("jquery-3.4.1.min.js") and an embedded version
 # string ("Bootstrap v5.1.3").
-_JS_LIB_PATTERNS: List[Tuple[str, str]] = [
+_JS_LIB_PATTERNS: list[tuple[str, str]] = [
     ("jQuery", r"jquery[/-]?(\d+\.\d+\.\d+)"),
     ("jQuery UI", r"jquery-ui[/-]?(\d+\.\d+\.\d+)"),
     ("Bootstrap", r"bootstrap(?:\.bundle)?[/-]?v?(\d+\.\d+\.\d+)"),
@@ -62,7 +61,7 @@ _JS_LIB_PATTERNS: List[Tuple[str, str]] = [
 _JS_LIB_RE = [(name, re.compile(pat, re.I)) for name, pat in _JS_LIB_PATTERNS]
 
 # CMS/platform generator meta tags and their own version schemes.
-_GENERATOR_PATTERNS: List[Tuple[str, str]] = [
+_GENERATOR_PATTERNS: list[tuple[str, str]] = [
     ("WordPress", r"generator[\"']\s+content=[\"']WordPress\s+(\d+\.\d+(?:\.\d+)?)"),
     ("Drupal", r"generator[\"']\s+content=[\"']Drupal\s+(\d+(?:\.\d+)?)"),
     ("Joomla!", r"generator[\"']\s+content=[\"']Joomla!?\s*-?\s*(\d+\.\d+(?:\.\d+)?)"),
@@ -77,13 +76,13 @@ _GENERATOR_RE = [(name, re.compile(pat, re.I)) for name, pat in _GENERATOR_PATTE
 _HEADER_VERSION_RE = re.compile(r"^([A-Za-z][\w.+-]*?)/(\d[\w.+-]*)$")
 
 
-def _from_header(value: str) -> List[Tuple[str, str]]:
+def _from_header(value: str) -> list[tuple[str, str]]:
     """Split a `Server`/`X-Powered-By`-style header into (product, version)
     pairs. These headers can list more than one token, e.g.
     "Apache/2.4.41 (Ubuntu) OpenSSL/1.1.1f PHP/7.4.3" - each space-separated
     token with a name/version shape is its own piece of software.
     """
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     for tok in value.split():
         m = _HEADER_VERSION_RE.match(tok)
         if m:
@@ -91,7 +90,7 @@ def _from_header(value: str) -> List[Tuple[str, str]]:
     return out
 
 
-def _snippet(blob: str, m: "re.Match", pad: int = 70) -> str:
+def _snippet(blob: str, m: re.Match, pad: int = 70) -> str:
     """The match with surrounding text, whitespace collapsed, so the reader
     can see the tag or filename the version came out of."""
     lo, hi = max(0, m.start() - pad), min(len(blob), m.end() + pad)
@@ -103,11 +102,11 @@ def _grep_repro(url: str, pattern: str) -> str:
     return "curl -sk %s | grep -oiE %s" % (shlex.quote(url), shlex.quote(pattern))
 
 
-def collect_from_web(wt: WebTarget) -> List[Software]:
+def collect_from_web(wt: WebTarget) -> list[Software]:
     """Server/X-Powered-By headers, generator meta tags, and bundled JS/CSS
     libraries - the components a web application actually ships.
     """
-    found: List[Software] = []
+    found: list[Software] = []
     where = wt.base_url
 
     if wt.server:
@@ -155,9 +154,9 @@ def collect_from_web(wt: WebTarget) -> List[Software]:
     return found
 
 
-def collect_from_host(target: Target) -> List[Software]:
+def collect_from_host(target: Target) -> list[Software]:
     """nmap's own product/version service detection."""
-    found: List[Software] = []
+    found: list[Software] = []
     for port in target.ports:
         if not port.product or not port.version:
             continue
@@ -171,9 +170,9 @@ def collect_from_host(target: Target) -> List[Software]:
     return found
 
 
-def merge(items: List[Software]) -> List[Dict]:
+def merge(items: list[Software]) -> list[dict]:
     """Collapse to one row per (name, version), collecting every place seen."""
-    rows: Dict[Tuple[str, str], Dict] = {}
+    rows: dict[tuple[str, str], dict] = {}
     for it in items:
         row = rows.setdefault(it.key(), {
             "name": it.name, "version": it.version, "category": it.category,

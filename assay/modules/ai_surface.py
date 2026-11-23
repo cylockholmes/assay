@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import List, Optional
 
 import yaml
 
@@ -28,13 +27,13 @@ from assay.modules import Module, register
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
-_SERVICES: Optional[List[dict]] = None
+_SERVICES: list[dict] | None = None
 
 
-def load_services() -> List[dict]:
+def load_services() -> list[dict]:
     global _SERVICES
     if _SERVICES is None:
-        with open(os.path.join(DATA, "ai_surface.yaml"), "r", encoding="utf-8") as fh:
+        with open(os.path.join(DATA, "ai_surface.yaml"), encoding="utf-8") as fh:
             doc = yaml.safe_load(fh) or {}
         svcs = doc.get("services", [])
         for s in svcs:
@@ -49,7 +48,7 @@ def load_services() -> List[dict]:
 
 def version_below(found: str, floor: str) -> bool:
     """Compare dotted versions without assuming equal length."""
-    def parts(v: str) -> List[int]:
+    def parts(v: str) -> list[int]:
         return [int(x) for x in re.findall(r"\d+", v)] or [0]
     a, b = parts(found), parts(floor)
     a += [0] * (len(b) - len(a))
@@ -68,7 +67,7 @@ class AiSurfaceModule(Module):
     # Tried directly in deeper profiles even when a port scan did not run.
     WELL_KNOWN = [11434, 8265, 6333, 7860, 5000, 8081, 9091]
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         host = target.ip or target.host
         open_ports = {p.port for p in target.ports if p.proto == "tcp"}
         if not open_ports and ctx.cfg.profile == "deep":
@@ -76,7 +75,7 @@ class AiSurfaceModule(Module):
         if not open_ports:
             return []
 
-        out: List[Finding] = []
+        out: list[Finding] = []
         seen: set = set()
         for svc in load_services():
             for port in svc["ports"]:
@@ -91,7 +90,7 @@ class AiSurfaceModule(Module):
 
     # ------------------------------------------------------------------
     def _probe(self, ctx: Context, host: str, port: int,
-               svc: dict) -> Optional[Finding]:
+               svc: dict) -> Finding | None:
         for scheme in ("http", "https"):
             base = "%s://%s:%d" % (scheme, host, port)
             r = ctx.http.get(base + svc["path"])
@@ -178,7 +177,7 @@ class McpModule(Module):
                    "clientInfo": {"name": "assay", "version": "1.0"}},
     })
 
-    def run_host(self, ctx: Context, target: Target) -> List[Finding]:
+    def run_host(self, ctx: Context, target: Target) -> list[Finding]:
         host = target.ip or target.host
         open_ports = {p.port for p in target.ports if p.proto == "tcp"}
         ports = [p for p in self.PORTS if p in open_ports]

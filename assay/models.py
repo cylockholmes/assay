@@ -7,7 +7,7 @@ import ipaddress
 import re
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 # --------------------------------------------------------------------------
@@ -53,15 +53,15 @@ class Target:
     raw: str
     host: str
     kind: str = "host"                      # host | url
-    ip: Optional[str] = None
-    resolved: List[str] = field(default_factory=list)
-    ports: List["Port"] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
+    ip: str | None = None
+    resolved: list[str] = field(default_factory=list)
+    ports: list[Port] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     # Hostnames nmap's reverse DNS resolved for this target while scanning
     # it. Only meaningful for an IP-specified target -- a name discovered
     # this way is itself given a full scan and added to scope; see
     # Engine._stage_discover_hostnames().
-    discovered_hostnames: List[str] = field(default_factory=list)
+    discovered_hostnames: list[str] = field(default_factory=list)
 
     @property
     def is_ip(self) -> bool:
@@ -81,7 +81,7 @@ class Port:
     product: str = ""
     version: str = ""
     tunnel: str = ""                        # "ssl" when nmap sees TLS
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_tls(self) -> bool:
@@ -102,15 +102,15 @@ class WebTarget:
     content_type: str = ""
     length: int = 0
     words: int = 0
-    tech: List[str] = field(default_factory=list)
-    headers: Dict[str, str] = field(default_factory=dict)
+    tech: list[str] = field(default_factory=list)
+    headers: dict[str, str] = field(default_factory=dict)
     body_sample: str = ""
-    cert: Dict[str, Any] = field(default_factory=dict)
-    redirect_chain: List[str] = field(default_factory=list)
+    cert: dict[str, Any] = field(default_factory=dict)
+    redirect_chain: list[str] = field(default_factory=list)
     final_url: str = ""
     # Soft-404 / wildcard fingerprint, filled by net.Baseline.
-    baseline: Dict[str, Any] = field(default_factory=dict)
-    favicon_hash: Optional[int] = None
+    baseline: dict[str, Any] = field(default_factory=dict)
+    favicon_hash: int | None = None
 
     @property
     def origin(self) -> str:
@@ -173,13 +173,13 @@ class Finding:
     impact: str = ""
     detail: str = ""
     repro: str = ""                         # copy-pasteable curl / command
-    refs: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    evidence: List[Evidence] = field(default_factory=list)
+    refs: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    evidence: list[Evidence] = field(default_factory=list)
     # Extra multipliers applied by scoring(); set by modules when they know more.
     unauth: bool = True                     # reachable with no credentials
     chainable: bool = False                 # useful as a step in a larger chain
-    dedupe_key: Optional[str] = None
+    dedupe_key: str | None = None
     # The identity this finding was stored under. Empty on a freshly built
     # one; set by Store._row_to_finding on the way back out. dedupe_key has no
     # column, so without this a round-tripped finding recomputes a DIFFERENT
@@ -234,7 +234,7 @@ class Finding:
         )
         return self.score
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["id"] = self.fingerprint()
         return d
@@ -255,7 +255,7 @@ def normalize_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
 
-def host_port_from_url(url: str) -> "tuple":
+def host_port_from_url(url: str) -> tuple:
     parts = urlsplit(url if _SCHEME_RE.match(url) else "https://" + url)
     scheme = parts.scheme or "https"
     port = parts.port or (443 if scheme == "https" else 80)

@@ -16,7 +16,6 @@ characters, never by reflection alone.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -57,9 +56,9 @@ class Context_:
     URL_ATTR = "URL-bearing attribute (href/src/action)"
 
 
-def classify(body: str, canary: str) -> List[str]:
+def classify(body: str, canary: str) -> list[str]:
     """Where in the document did the canary land? Can be several places."""
-    contexts: List[str] = []
+    contexts: list[str] = []
     for m in re.finditer(re.escape(canary), body):
         pos = m.start()
         before = body[max(0, pos - 800):pos]
@@ -86,7 +85,7 @@ def classify(body: str, canary: str) -> List[str]:
 
         contexts.append(Context_.HTML)
 
-    out: List[str] = []
+    out: list[str] = []
     for c in contexts:
         if c not in out:
             out.append(c)
@@ -134,8 +133,8 @@ class ReflectionModule(Module):
 
     PROBE_CHARS = "<>\"'`(){};"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        out: List[Finding] = []
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
+        out: list[Finding] = []
         tested: set = set()
         budget = 6 if ctx.cfg.profile == "quick" else (
             18 if ctx.cfg.profile == "standard" else 45)
@@ -156,7 +155,7 @@ class ReflectionModule(Module):
                     out.append(f)
         return out
 
-    def _probe(self, ctx: Context, url: str, param: str) -> Optional[Finding]:
+    def _probe(self, ctx: Context, url: str, param: str) -> Finding | None:
         # Step 1: is a plain alphanumeric canary reflected at all?
         canary = "sf%s" % rand_token(7)
         r1 = ctx.http.get(with_param(url, param, canary))
@@ -212,7 +211,7 @@ class ReflectionModule(Module):
         )
 
     @staticmethod
-    def _assess(contexts: List[str], survived: str) -> Tuple[Optional[str], str, str]:
+    def _assess(contexts: list[str], survived: str) -> tuple[str | None, str, str]:
         """Severity comes from context plus surviving characters, not reflection."""
         has_tag = "<" in survived and ">" in survived
         has_quote = '"' in survived or "'" in survived

@@ -18,7 +18,6 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Optional
 from urllib.parse import quote
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -38,12 +37,12 @@ class CveMatch:
     cve_id: str
     summary: str
     severity: str            # critical | high | medium | low | info (unscored)
-    score: Optional[float]
+    score: float | None
     published: str
     url: str
 
 
-def _severity_for(score: Optional[float]) -> str:
+def _severity_for(score: float | None) -> str:
     if score is None:
         return "info"
     for floor, label in _SEVERITY_FLOORS:
@@ -52,7 +51,7 @@ def _severity_for(score: Optional[float]) -> str:
     return "info"
 
 
-def _best_score(cve: dict) -> Optional[float]:
+def _best_score(cve: dict) -> float | None:
     metrics = cve.get("metrics", {})
     for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
         entries = metrics.get(key)
@@ -78,13 +77,13 @@ def _throttle(has_key: bool) -> None:
     _last_call[0] = time.monotonic()
 
 
-def parse(body: str, limit: int = 5) -> List[CveMatch]:
+def parse(body: str, limit: int = 5) -> list[CveMatch]:
     """Turn an NVD CVE 2.0 API response body into matches, worst-first."""
     try:
         doc = json.loads(body)
     except ValueError:
         return []
-    out: List[CveMatch] = []
+    out: list[CveMatch] = []
     for item in doc.get("vulnerabilities", []):
         cve = item.get("cve", {})
         cve_id = cve.get("id", "")
@@ -103,7 +102,7 @@ def parse(body: str, limit: int = 5) -> List[CveMatch]:
     return out[:limit]
 
 
-def lookup(name: str, version: str, http, limit: int = 5) -> List[CveMatch]:
+def lookup(name: str, version: str, http, limit: int = 5) -> list[CveMatch]:
     """Ask NVD for CVEs matching `name version`. Empty list on any failure -
     a lookup that cannot reach NVD must never break the scan.
     """

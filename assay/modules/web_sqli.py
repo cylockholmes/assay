@@ -17,7 +17,6 @@ or a manual payload.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from assay import owasp
@@ -28,7 +27,7 @@ from assay.modules.web_active import candidate_urls, existing_params, with_param
 from assay.net import similarity
 
 # Errors that only a database driver emits. Deliberately narrow.
-DB_ERRORS: List[Tuple[str, re.Pattern]] = [
+DB_ERRORS: list[tuple[str, re.Pattern]] = [
     ("MySQL", re.compile(
         r"SQL syntax.*?MySQL|Warning.*?\bmysqli?_|MySqlException|"
         r"valid MySQL result|check the manual that (?:corresponds|fits) to your "
@@ -50,7 +49,7 @@ DB_ERRORS: List[Tuple[str, re.Pattern]] = [
 ]
 
 
-def db_error(body: str) -> Tuple[str, str]:
+def db_error(body: str) -> tuple[str, str]:
     """Return (engine, matched text) for the first database error found."""
     for engine, rx in DB_ERRORS:
         m = rx.search(body[:60000])
@@ -67,8 +66,8 @@ class SqliModule(Module):
     impact_class = "probe"
     desc = "SQL injection via error differential and boolean inference"
 
-    def run_web(self, ctx: Context, wt: WebTarget) -> List[Finding]:
-        out: List[Finding] = []
+    def run_web(self, ctx: Context, wt: WebTarget) -> list[Finding]:
+        out: list[Finding] = []
         tested: set = set()
         budget = 4 if ctx.cfg.profile == "quick" else (
             14 if ctx.cfg.profile == "standard" else 40)
@@ -87,7 +86,7 @@ class SqliModule(Module):
         return out
 
     # -- error differential ------------------------------------------------
-    def _error_based(self, ctx: Context, url: str, param: str) -> Optional[Finding]:
+    def _error_based(self, ctx: Context, url: str, param: str) -> Finding | None:
         base = ctx.http.get(with_param(url, param, "1"))
         if not base.ok:
             return None
@@ -137,7 +136,7 @@ class SqliModule(Module):
         )
 
     # -- boolean inference --------------------------------------------------
-    def _boolean(self, ctx: Context, url: str, param: str) -> Optional[Finding]:
+    def _boolean(self, ctx: Context, url: str, param: str) -> Finding | None:
         """True condition should match the original; false should not."""
         if ctx.cfg.profile == "quick":
             return None

@@ -14,7 +14,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -102,14 +101,14 @@ class Resp:
 
     url: str
     status: int
-    headers: Dict[str, str]
+    headers: dict[str, str]
     body: str
     elapsed: float
     method: str = "GET"
     request_line: str = ""
-    request_headers: Dict[str, str] = field(default_factory=dict)
+    request_headers: dict[str, str] = field(default_factory=dict)
     request_body: str = ""
-    history: List[str] = field(default_factory=list)
+    history: list[str] = field(default_factory=list)
     error: str = ""
     raw_len: int = 0
 
@@ -188,7 +187,7 @@ class HttpClient:
         self.limiter = RateLimiter(cfg.rate)
         # A global ceiling still allows every worker to pile onto one host.
         # The per-host limiter is what actually protects an individual service.
-        self._host_limiters: Dict[str, RateLimiter] = {}
+        self._host_limiters: dict[str, RateLimiter] = {}
         self._local = threading.local()
         self._blocked: set = set()
         self._lock = threading.Lock()
@@ -204,7 +203,7 @@ class HttpClient:
         self._proxies = ({"http": cfg.proxy, "https": cfg.proxy}
                          if cfg.proxy else {})
 
-    def _host_limiter(self, host: str) -> Optional[RateLimiter]:
+    def _host_limiter(self, host: str) -> RateLimiter | None:
         if self.cfg.rate_per_host <= 0:
             return None
         with self._lock:
@@ -214,7 +213,7 @@ class HttpClient:
                 self._host_limiters[host] = lim
             return lim
 
-    def _note_throttle(self, host: str, resp: "Resp") -> float:
+    def _note_throttle(self, host: str, resp: Resp) -> float:
         """Target pushed back. Slow down and honour Retry-After if given."""
         with self._lock:
             self.throttle_events += 1
@@ -251,10 +250,10 @@ class HttpClient:
         self,
         method: str,
         url: str,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
         data=None,
         allow_redirects: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         stream_limit: int = MAX_BODY,
         infra: bool = False,
         canary: bool = False,
@@ -400,7 +399,7 @@ class HttpClient:
                 pass
             self._local.session = None
 
-    def blocked_hosts(self) -> List[str]:
+    def blocked_hosts(self) -> list[str]:
         with self._lock:
             return sorted(self._blocked)
 
@@ -449,10 +448,10 @@ class Baseline:
     """Fingerprint of how an origin answers requests for things that do not exist."""
 
     origin: str
-    statuses: List[int] = field(default_factory=list)
-    lengths: List[int] = field(default_factory=list)
-    bodies: List[str] = field(default_factory=list)
-    titles: List[str] = field(default_factory=list)
+    statuses: list[int] = field(default_factory=list)
+    lengths: list[int] = field(default_factory=list)
+    bodies: list[str] = field(default_factory=list)
+    titles: list[str] = field(default_factory=list)
     soft404: bool = False                  # returns 200 for nonsense paths
     dynamic: bool = False                  # two nonsense paths differ -> length checks unreliable
 

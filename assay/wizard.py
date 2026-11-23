@@ -13,7 +13,7 @@ itself, which keeps it testable with a scripted `ask`.
 from __future__ import annotations
 
 import sys
-from typing import Callable, List, Sequence
+from collections.abc import Callable, Sequence
 
 Ask = Callable[[str], str]
 
@@ -58,10 +58,10 @@ def _number(ask: Ask, text: str, default: int, lo: int, hi: int) -> int:
             return int(raw)
 
 
-def ask_options(args, ask: Ask, say: Callable[[str], None] = print) -> List[str]:
+def ask_options(args, ask: Ask, say: Callable[[str], None] = print) -> list[str]:
     """Ask the scan questions, write the answers onto `args`, and return a
     short list of what was chosen for the run summary."""
-    chosen: List[str] = []
+    chosen: list[str] = []
     safe = bool(getattr(args, "safe", False))
     say("\n  [bold]scan options[/bold] [dim](Enter accepts the default)[/dim]")
 
