@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.11-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-0A7E07?logo=linux&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-black)
-![Tests](https://img.shields.io/badge/tests-550%2B%20offline-2f7a4d)
+![Tests](https://img.shields.io/badge/tests-600%2B%20offline-2f7a4d)
 ![Use](https://img.shields.io/badge/use-authorized%20testing%20only-ff4d6d)
 
 Recon and triage for authorized offensive testing. Points at hosts and web
@@ -574,7 +574,7 @@ assay modules           list detection modules
 .venv/bin/python -m pytest tests/        # whole suite
 ```
 
-**550+ tests**, all offline — the suite never opens a listening socket or
+**600+ tests**, all offline — the suite never opens a listening socket or
 stands up a vulnerable service. Every detection test asserts **both**
 directions: the check fires on the real condition and stays silent on the
 benign lookalike. Roughly half are detection tests (one class per module); the

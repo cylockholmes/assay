@@ -1,4 +1,3 @@
-# Keep the sdist to the package itself. tests/ is a local clone of the private
-# suite on maintainer machines, so it must never be swept into an upload.
+# Keep the sdist to the package itself.
 prune tests
 global-exclude *.py[cod] __pycache__

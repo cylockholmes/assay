@@ -16,7 +16,7 @@ and any term in `.githooks/forbidden-terms.txt`).
 
 ```bash
 ruff check assay
-python -m pytest tests/        # suite is in a private repo; present only for maintainers
+python -m pytest tests/
 assay --version && assay modules
 ```
 
