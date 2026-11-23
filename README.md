@@ -1,6 +1,6 @@
 <img src="assets/logo.svg" alt="assay" width="268">
 
-![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/python-%E2%89%A53.11-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-0A7E07?logo=linux&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-black)
 ![Tests](https://img.shields.io/badge/tests-550%2B%20offline-2f7a4d)
