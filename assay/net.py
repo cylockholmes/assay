@@ -179,6 +179,12 @@ def _shq(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def _infra_headers(cfg: Config) -> dict[str, str]:
+    """Headers for a request to recon infrastructure: identification only."""
+    return {"User-Agent": cfg.user_agent, "Accept": "*/*",
+            "Connection": "close"}
+
+
 class HttpClient:
     """Thread-safe-ish HTTP client. One requests.Session per worker thread."""
 
@@ -286,7 +292,12 @@ class HttpClient:
         if not direct and not canary:
             tools.wait_while_paused()
 
-        hdrs = self.cfg.request_headers()
+        # A direct request goes to public recon infrastructure (NVD, RDAP,
+        # the Wayback Machine, Google's key check), not the target, so it
+        # carries none of the engagement's session: no cookies, no basic
+        # auth, no custom headers, no traffic tag. Only what the caller
+        # passed for that service (an NVD API key, say) goes with it.
+        hdrs = _infra_headers(self.cfg) if direct else self.cfg.request_headers()
         if headers:
             hdrs.update(headers)
 
@@ -315,7 +326,10 @@ class HttpClient:
                     data=data,
                     allow_redirects=allow_redirects,
                     timeout=tmo,
-                    verify=not self.cfg.insecure,
+                    # --insecure exists for targets' broken certificates.
+                    # Third-party services have real ones, and a request to
+                    # them may carry an API key, so they are always verified.
+                    verify=True if direct else not self.cfg.insecure,
                     stream=True,
                     proxies={} if direct else self._proxies,
                 )
