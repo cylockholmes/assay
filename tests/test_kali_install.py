@@ -82,37 +82,6 @@ class ToolResolutionTests(unittest.TestCase):
         self.assertEqual(proc.out.strip(), "projectdiscovery")
 
 
-class InstallerPlanTests(unittest.TestCase):
-    def _plan(self, only, have_go=True):
-        missing = {n: None for n in tools.REGISTRY}
-        res = mock.Mock(constrained=False, mem_avail_mb=8000)
-        with mock.patch.object(tools, "available", return_value=missing), \
-             mock.patch.object(env, "resources", return_value=res), \
-             mock.patch.object(installer, "_has",
-                               side_effect=lambda b: b == "apt-get" or (have_go and b == "go")), \
-             mock.patch.object(installer, "gopath_bin", return_value="/home/k/go/bin"):
-            return installer.build_plan(only=only)
-
-    def test_naabu_build_pulls_in_libpcap_headers_and_a_compiler(self):
-        plan = self._plan(["naabu"])
-        cmds = [" ".join(s.cmd) for s in plan.steps]
-        self.assertTrue(any("libpcap-dev" in c and "gcc" in c for c in cmds), cmds)
-        dep = next(i for i, c in enumerate(cmds) if "libpcap-dev" in c)
-        build = next(i for i, c in enumerate(cmds) if "naabu" in c and "go install" in c)
-        self.assertLess(dep, build)
-        self.assertIn("apt-get update -qq", cmds[0])
-
-    def test_go_toolchain_and_deps_share_one_apt_step(self):
-        plan = self._plan(["naabu"], have_go=False)
-        cmds = [" ".join(s.cmd) for s in plan.steps]
-        self.assertEqual(sum("apt-get install" in c for c in cmds), 1, cmds)
-        self.assertTrue(any("golang-go" in c and "libpcap-dev" in c for c in cmds))
-
-    def test_pure_go_tool_needs_no_extra_packages(self):
-        plan = self._plan(["katana"])
-        self.assertFalse(any("apt-get" in " ".join(s.cmd) for s in plan.steps))
-
-
 class InstallScriptTests(unittest.TestCase):
     def test_flags_parse_and_help_lists_them(self):
         out = subprocess.run(["bash", os.path.join(ROOT, "install.sh"), "--help"],
@@ -189,3 +158,77 @@ class ExplicitScopeNeverWidensTests(unittest.TestCase):
         self.assertFalse(wide.allows("localhost"))
         self.assertFalse(wide.allows("127.0.0.1"))
         self.assertFalse(wide.allows("::1"))
+
+
+_FAKE_NMAP = r'''#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+out = args[args.index("-oX") + 1]
+ok = "--unprivileged" in args or MODE == "ok"
+host = '<host><address addr="172.17.0.2" addrtype="ipv4"/><ports>' \
+       '<port protocol="tcp" portid="3000"><state state="open"/>' \
+       '<service name="http"/></port></ports></host>'
+fin = '<finished exit="success"/>' if ok else \
+      '<finished exit="error" errormsg="Couldn\'t open a raw socket or eth handle."/>'
+with open(out, "w") as fh:
+    fh.write('<?xml version="1.0"?><nmaprun>%s<runstats>%s</runstats></nmaprun>'
+             % (host if ok else "", fin))
+'''
+
+
+class NmapFailureIsNotACleanScanTests(unittest.TestCase):
+    """On minimal Kali, nmap's --privileged wrapper fails without file
+    capabilities and writes exit="error"; that used to read as 'no open
+    ports' and the host was reported clean."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bin)
+        self.p = mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep
+                                              + os.environ.get("PATH", "")})
+        self.p.start()
+        tools.NMAP_UNPRIVILEGED.clear()
+
+    def tearDown(self):
+        self.p.stop()
+        tools.NMAP_UNPRIVILEGED.clear()
+        self.tmp.cleanup()
+
+    def _nmap(self, mode):
+        _exe(os.path.join(self.bin, "nmap"),
+             _FAKE_NMAP.replace("MODE", repr(mode), 1))
+
+    def test_raw_socket_error_retries_unprivileged(self):
+        self._nmap("needs-unprivileged")
+        res = tools.nmap_scan(["172.17.0.2"], "3000", {}, out_dir=self.tmp.name)
+        self.assertEqual([p.port for p in res["172.17.0.2"].ports], [3000])
+        self.assertTrue(tools.NMAP_UNPRIVILEGED.is_set())
+
+    def test_persistent_error_raises_instead_of_reporting_clean(self):
+        _exe(os.path.join(self.bin, "nmap"), _FAKE_NMAP.replace(
+            'ok = "--unprivileged" in args or MODE == "ok"', "ok = False"))
+        with self.assertRaises(tools.NmapFailed):
+            tools.nmap_scan(["172.17.0.2"], "3000", {}, out_dir=self.tmp.name)
+
+    def test_successful_run_is_unchanged(self):
+        self._nmap("ok")
+        res = tools.nmap_scan(["172.17.0.2"], "3000", {}, out_dir=self.tmp.name)
+        self.assertIn("172.17.0.2", res)
+        self.assertFalse(tools.NMAP_UNPRIVILEGED.is_set())
+
+
+class PersistPathTests(unittest.TestCase):
+    def test_go_bin_goes_first_and_reaches_login_shells(self):
+        with tempfile.TemporaryDirectory() as home:
+            for rc in (".profile", ".bashrc", ".zshrc"):
+                open(os.path.join(home, rc), "w").write("# stock\n")
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                changed = installer.persist_path("/home/kali/go/bin")
+                again = installer.persist_path("/home/kali/go/bin")
+            names = sorted(os.path.basename(c) for c in changed)
+            self.assertEqual(names, [".bashrc", ".profile", ".zshrc"])
+            self.assertEqual(again, [])
+            body = open(os.path.join(home, ".profile")).read()
+            self.assertIn('export PATH="/home/kali/go/bin:$PATH"', body)
+            self.assertFalse(os.path.exists(os.path.join(home, ".zprofile")))

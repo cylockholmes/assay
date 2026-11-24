@@ -126,39 +126,26 @@ def build_plan(only: list[str] | None = None,
 
     # -- go toolchain ------------------------------------------------------
     if go_mods:
-        # cgo tools (naabu links libpcap) fail to build without their headers
-        # and a C compiler, and a fresh Kali or Debian image has neither.
-        build_deps: list[str] = []
-        for _, spec in go_mods:
-            build_deps += [d for d in spec.build_deps if d not in build_deps]
         if not _has("go"):
-            build_deps.insert(0, "golang-go")
-        if build_deps:
             if have_apt:
-                if not apt_pkgs:
-                    plan.steps.append(Step("refresh package lists",
-                                           ["apt-get", "update", "-qq"], needs_sudo=sudo))
-                label = ("install the Go toolchain" if build_deps == ["golang-go"]
-                         else "install Go build dependencies")
-                plan.steps.append(Step(label,
-                                       ["apt-get", "install", "-y", "-qq"] + build_deps,
+                plan.steps.append(Step("install the Go toolchain",
+                                       ["apt-get", "install", "-y", "-qq", "golang-go"],
                                        needs_sudo=sudo))
-            elif not _has("go"):
+            else:
                 plan.unsupported += [n for n, _ in go_mods]
                 plan.notes.append(
                     "Go is not installed and apt is unavailable; install Go from "
                     "https://go.dev/dl/ and re-run 'assay install'."
                 )
                 go_mods = []
-            else:
-                plan.notes.append(
-                    "apt is unavailable; install these build dependencies with your "
-                    "package manager first: " + ", ".join(build_deps))
 
     if go_mods:
         # One compiler process at a time: parallel Go builds OOM a small VM.
-        build_env = {"GOFLAGS": "-p=1"} if res.constrained else {}
-        if res.constrained:
+        # Memory, not core count: a 2-vCPU VM with 8 GB builds fine in
+        # parallel, and -p=1 there nearly doubled the install time.
+        low_mem = res.mem_avail_mb < 3000
+        build_env = {"GOFLAGS": "-p=1"} if low_mem else {}
+        if low_mem:
             plan.notes.append(
                 "Only %d MB RAM available - Go builds are pinned to a single "
                 "compiler process. Expect this to be slow but not to swap."
@@ -205,7 +192,7 @@ def run_plan(plan: Plan, on_step: Callable[[str, str], None] | None = None,
         if not env.use_wsl_bridge():
             extra["PATH"] = os.environ.get("PATH", "") + os.pathsep + gopath_bin()
         # else: inside the distribution its own PATH already carries
-        # $GOPATH/bin (persist_path appends it to the shell rc). Pushing a
+        # $GOPATH/bin (persist_path adds it to the shell startup files). Pushing a
         # Windows PATH across the bridge would replace it with directories
         # the distribution cannot see.
         proc = tools.run(cmd, timeout=timeout, env_extra=extra)
@@ -231,10 +218,17 @@ def run_plan(plan: Plan, on_step: Callable[[str, str], None] | None = None,
 
 
 def persist_path(bin_dir: str) -> list[str]:
-    """Add a directory to the user's shell rc files. Returns files changed."""
-    line = 'export PATH="$PATH:%s"' % bin_dir
+    """Add a directory to the user's shell startup files. Returns files changed.
+
+    ~/.profile and ~/.zprofile cover login shells, including non-interactive
+    ones (ssh host cmd, cron, scripts): Debian's ~/.bashrc returns early for
+    those, so a line appended there never runs. The directory goes first, so
+    the Go tools win over same-named system binaries (Kali's /usr/bin/httpx
+    is the Python client).
+    """
+    line = 'export PATH="%s:$PATH"' % bin_dir
     changed: list[str] = []
-    for rc in ("~/.bashrc", "~/.zshrc"):
+    for rc in ("~/.profile", "~/.zprofile", "~/.bashrc", "~/.zshrc"):
         path = os.path.expanduser(rc)
         if not os.path.exists(path):
             continue

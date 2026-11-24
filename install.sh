@@ -118,7 +118,7 @@ if [ "$MINIMAL" -eq 1 ]; then
     warn "some tools failed; 'assay doctor' shows what is missing"
 elif [ "$NO_GO" -eq 1 ]; then
   say "External tools (apt only)"
-  "$HERE/.venv/bin/assay" install -y --only nmap,ffuf,seclists,testssl.sh || true
+  "$HERE/.venv/bin/assay" install -y --only nmap,ffuf,seclists,arjun,xsltproc,dig || true
 else
   say "External tools"
   "$HERE/.venv/bin/assay" install -y || \

@@ -46,8 +46,6 @@ class ToolSpec:
     # Other names the same tool ships under. Kali packages ProjectDiscovery's
     # httpx as `httpx-toolkit`, because /usr/bin/httpx is the Python client.
     alt_binaries: list[str] = field(default_factory=list)
-    # apt packages a `go install` of this tool needs to compile (cgo).
-    build_deps: list[str] = field(default_factory=list)
     post: list[str] = field(default_factory=list)   # commands to run after install
 
     def __post_init__(self) -> None:
@@ -73,8 +71,7 @@ REGISTRY: dict[str, ToolSpec] = {
                      "sudo apt install -y nmap", apt="nmap", optional=False),
     "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
                       "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
-                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
-                      build_deps=["libpcap-dev", "gcc"]),
+                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0"),
     "httpx": ToolSpec("httpx", "HTTP probing, titles, tech detection, favicon hashes",
                       "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
                       go="github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
@@ -106,6 +103,9 @@ REGISTRY: dict[str, ToolSpec] = {
                             go="github.com/tomnomnom/waybackurls@v0.1.0"),
     "arjun": ToolSpec("arjun", "discovers hidden GET/POST parameters the crawl never sees",
                       "sudo apt install -y arjun", apt="arjun"),
+    "dig": ToolSpec("dig", "DNS lookups for takeover and dead-domain checks "
+                    "(minimal Kali, WSL and containers lack it)",
+                    "sudo apt install -y bind9-dnsutils", apt="bind9-dnsutils"),
     "xsltproc": ToolSpec("xsltproc",
                          "renders nmap XML into NmapView's standalone HTML dashboard",
                          "sudo apt install -y xsltproc", apt="xsltproc"),
@@ -391,6 +391,10 @@ def dns_lookup(record: str, name: str, timeout: float = 8.0) -> str:
     """
     for cmd in (["dig", "+short", "+time=3", "+tries=1", record, name],
                 ["host", "-t", record, name]):
+        # Skip a resolver tool that is not installed rather than spawning it:
+        # every lookup would otherwise log a "broke" run in the report.
+        if not env.use_wsl_bridge() and env.which(cmd[0]) is None:
+            continue
         p = run(cmd, timeout=timeout)
         if (p.out or "").strip():
             return p.out
@@ -473,7 +477,26 @@ def shadowed() -> dict[str, str]:
     return dict(_SHADOWED)
 
 
+# Set once nmap has failed for want of raw sockets. Kali's /usr/bin/nmap
+# wrapper adds --privileged for non-root users, which only works when the
+# package's file capabilities were applied; on minimal/container/WSL Kali
+# they often were not, and every scan errors out. --unprivileged (given after
+# the wrapper's flag, so it wins) falls back to connect scans.
+NMAP_UNPRIVILEGED = threading.Event()
+
+_RAW_SOCKET_ERRORS = ("raw socket", "eth handle", "requires root", "operation not permitted",
+                      "dnet: failed to open")
+
+
+def nmap_needs_unprivileged(errormsg: str) -> bool:
+    low = (errormsg or "").lower()
+    return any(s in low for s in _RAW_SOCKET_ERRORS)
+
+
 def _real_argv(argv: list[str]) -> list[str]:
+    if argv and argv[0] == "nmap" and NMAP_UNPRIVILEGED.is_set() \
+            and "--unprivileged" not in argv and "-sU" not in argv:
+        argv = [argv[0], "--unprivileged"] + argv[1:]
     if argv and argv[0] in _RESOLVED:
         return [_RESOLVED[argv[0]]] + argv[1:]
     return argv
@@ -1010,7 +1033,23 @@ def nmap_scan(hosts: list[str], port_spec: str, tune: dict,
         t0 = time.time()
         for _ in stream_lines(cmd, timeout=timeout, ledger=False):
             pass
+        err = nmap_run_error(xml_path)
+        if err and nmap_needs_unprivileged(err) and not NMAP_UNPRIVILEGED.is_set():
+            NMAP_UNPRIVILEGED.set()
+            _note("nmap cannot open raw sockets here (%s) - retrying with "
+                  "--unprivileged connect scans. To restore SYN scans on Kali: "
+                  "sudo apt-get install -y libcap2-bin && sudo dpkg-reconfigure nmap"
+                  % err)
+            for _ in stream_lines(cmd, timeout=timeout, ledger=False):
+                pass
+            err = nmap_run_error(xml_path)
         parsed = parse_nmap_xml(xml_path) if os.path.exists(xml_path) else {}
+        if err:
+            # An errored run is not "no open ports": say so, so the host is not
+            # reported clean and naabu's candidates are not silently dropped.
+            _record_failure(cmd, "nmap failed: %s" % err)
+            _ledger("nmap", cmd, 1, "broke", time.time() - t0, "nmap failed: %s" % err)
+            raise NmapFailed(err)
         # Ledger the sweep's outcome. The full XML is on disk; this is the
         # at-a-glance "nmap ran, found N open port(s) across M host(s)" (or
         # none, or no XML at all) that makes the port scan verifiable.
@@ -1096,34 +1135,26 @@ def nmap_udp_scan(hosts: list[str], tune: dict, out_dir: str = ".",
 # nmap's own XML into a standalone HTML dashboard via xsltproc.
 # --------------------------------------------------------------------------
 
-NMAPVIEW_XSL_URL = "https://github.com/dreizehnutters/NmapView/releases/latest/download/NmapView.xsl"
+# Upstream: https://github.com/dreizehnutters/NmapView. Only the copy vendored
+# with assay is used. Fetching the "latest" release on every host scan ran
+# unpinned third-party code through xsltproc on the tester's machine and made
+# an undeclared connection to GitHub mid-engagement. Update it by hand.
 _VENDORED_NMAPVIEW_XSL = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "NmapView.xsl")
 
 
 def fetch_nmapview_xsl(dest_path: str, timeout: float = 15.0) -> str:
-    """Get a working copy of NmapView.xsl at dest_path.
+    """Copy the vendored NmapView.xsl to dest_path.
 
-    Tries a fresh download from the NmapView release first, so a fix or
-    feature upstream is picked up without waiting for assay's own vendored
-    copy to be updated by hand. Falls back to the copy vendored with assay
-    (for an engagement with no network path to GitHub) when the download
-    fails, times out, or the download tool is not installed.
-
-    Returns dest_path on success from either source, or "" if neither
-    produced a usable file.
+    Returns dest_path, or "" if the vendored copy is missing. `timeout` is
+    unused and kept for callers.
     """
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    proc = run(["curl", "-fsSL", "-o", dest_path, NMAPVIEW_XSL_URL], timeout=timeout)
-    if proc.ok and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1000:
+    try:
+        shutil.copyfile(_VENDORED_NMAPVIEW_XSL, dest_path)
         return dest_path
-    if os.path.exists(_VENDORED_NMAPVIEW_XSL):
-        try:
-            shutil.copyfile(_VENDORED_NMAPVIEW_XSL, dest_path)
-            return dest_path
-        except OSError:
-            pass
-    return ""
+    except OSError:
+        return ""
 
 
 def merge_nmap_xml_files(paths: list[str], out_path: str) -> bool:
@@ -1286,6 +1317,29 @@ def _salvage_nmap_xml(path: str):
         return ET.fromstring(data[:end + len("</host>")] + "\n</nmaprun>")
     except ET.ParseError:
         return None
+
+
+class NmapFailed(RuntimeError):
+    """nmap exited with an error (its XML says exit="error")."""
+
+
+def nmap_run_error(path: str) -> str:
+    """nmap's own error message for a failed run, or "" if it finished.
+
+    nmap still writes well-formed XML when it aborts, with
+    <finished exit="error" errormsg="..."/>; parsing hosts alone reads that as
+    a clean scan with nothing open.
+    """
+    if not os.path.exists(path):
+        return ""
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return ""
+    fin = root.find("runstats/finished")
+    if fin is not None and fin.get("exit") == "error":
+        return fin.get("errormsg") or "nmap exited with an error"
+    return ""
 
 
 def parse_nmap_xml(path: str, include_open_filtered: bool = False) -> dict[str, NmapHost]:
@@ -1486,7 +1540,7 @@ def naabu_scan(hosts: list[str], port_spec: str, tune: dict,
         # "-list" sidesteps the whole question of whether stdin auto-detects
         # correctly when piped in via subprocess rather than a shell |; see
         # _target_list_file.
-        cmd = ["naabu", "-silent", "-json", "-rate", str(tune.get("nmap_min_rate", 300)),
+        cmd = ["naabu", "-silent", "-json", "-duc", "-rate", str(tune.get("nmap_min_rate", 300)),
                "-c", str(tune.get("concurrency", 10))] + port_args
         found: dict[str, list[int]] = {}
         t0 = time.time()
@@ -1687,7 +1741,7 @@ def httpx_probe(targets: list[str], tune: dict,
     if timeout is None:
         timeout = httpx_timeout(targets, tune)
     cmd = [
-        "httpx", "-silent", "-json", "-no-color",
+        "httpx", "-silent", "-json", "-no-color", "-duc",
         "-status-code", "-title", "-tech-detect", "-web-server",
         "-content-length", "-favicon", "-tls-grab", "-location", "-word-count",
         "-timeout", "10", "-retries", "1",
@@ -1713,6 +1767,10 @@ def nuclei_scan(urls: list[str], severity: str, tune: dict,
     # file mistake naabu and httpx had. See _target_list_file.
     cmd = [
         "nuclei", "-silent", "-jsonl", "-no-color", "-disable-update-check",
+        # No interactsh: nuclei otherwise registers with the public oast.fun
+        # servers and sends them callbacks carrying target data. assay runs no
+        # listener of its own; blind checks use --oob-domain instead.
+        "-no-interactsh",
         "-severity", severity,
         "-c", str(tune.get("nuclei_concurrency", 10)),
         "-bulk-size", str(tune.get("nuclei_bulk", 8)),
@@ -1777,7 +1835,7 @@ def katana_crawl(urls: list[str], depth: int, tune: dict, max_urls: int,
     # request.endpoint/response by default, which is the field this
     # function reads.
     cmd = [
-        "katana", "-silent", "-jsonl", "-no-color",
+        "katana", "-silent", "-jsonl", "-no-color", "-duc",
         "-d", str(depth), "-c", str(min(tune.get("concurrency", 10), 10)),
         "-rate-limit", str(int(tune.get("rate", 30))),
         # -kf is a single choice, not a comma-list like -ef below: reproduced
@@ -1815,13 +1873,13 @@ def katana_crawl(urls: list[str], depth: int, tune: dict, max_urls: int,
 def dnsx_resolve(hosts: list[str], timeout: float = 300.0) -> Iterator[dict]:
     # A real file, not stdin -- same "-list -" mistake as naabu/httpx/nuclei/
     # katana above. See _target_list_file.
-    cmd = ["dnsx", "-silent", "-json", "-a", "-cname", "-resp"]
+    cmd = ["dnsx", "-silent", "-duc", "-json", "-a", "-cname", "-resp"]
     with _target_list_file(hosts) as path:
         yield from stream_json(cmd + ["-list", path], timeout=timeout)
 
 
 def subfinder_enum(domain: str, timeout: float = 300.0) -> list[str]:
-    cmd = ["subfinder", "-silent", "-all", "-d", domain]
+    cmd = ["subfinder", "-silent", "-duc", "-all", "-d", domain]
     return [l for l in stream_lines(cmd, timeout=timeout) if l]
 
 
