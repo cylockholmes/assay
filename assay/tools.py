@@ -46,6 +46,9 @@ class ToolSpec:
     # Other names the same tool ships under. Kali packages ProjectDiscovery's
     # httpx as `httpx-toolkit`, because /usr/bin/httpx is the Python client.
     alt_binaries: list[str] = field(default_factory=list)
+    # Kali package of the same tool. Used instead of `go install` only when
+    # its version is exactly the pin (see installer.build_plan).
+    kali_apt: str = ""
     post: list[str] = field(default_factory=list)   # commands to run after install
 
     def __post_init__(self) -> None:
@@ -71,24 +74,24 @@ REGISTRY: dict[str, ToolSpec] = {
                      "sudo apt install -y nmap", apt="nmap", optional=False),
     "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
                       "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
-                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0"),
+                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0", kali_apt="naabu"),
     "httpx": ToolSpec("httpx", "HTTP probing, titles, tech detection, favicon hashes",
                       "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
                       go="github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
                       alt_binaries=["httpx-toolkit"]),
     "nuclei": ToolSpec("nuclei", "community CVE/misconfig templates - the volume driver",
                        "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
-                       go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
+                       go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1", kali_apt="nuclei",
                        post=["nuclei -update-templates -silent"]),
     "katana": ToolSpec("katana", "crawler that feeds URLs/params to the active checks",
                        "go install github.com/projectdiscovery/katana/cmd/katana@v1.8.0",
-                       go="github.com/projectdiscovery/katana/cmd/katana@v1.8.0"),
+                       go="github.com/projectdiscovery/katana/cmd/katana@v1.8.0", kali_apt="katana"),
     "subfinder": ToolSpec("subfinder", "passive subdomain enumeration (opt-in, third-party APIs)",
                           "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0",
-                          go="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0"),
+                          go="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0", kali_apt="subfinder"),
     "dnsx": ToolSpec("dnsx", "DNS resolution and CNAME chains for takeover checks",
                      "go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1",
-                     go="github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1"),
+                     go="github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1", kali_apt="dnsx"),
     "ffuf": ToolSpec("ffuf", "content discovery with automatic soft-404 calibration",
                      "sudo apt install -y ffuf", apt="ffuf"),
     "seclists": ToolSpec("seclists", "wordlists ffuf and dnsx need for content "

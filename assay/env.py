@@ -403,6 +403,20 @@ def which(name: str) -> str | None:
     return None
 
 
+def is_kali(os_release: str = "/etc/os-release") -> bool:
+    """Is this Kali Linux (or a WSL Kali distribution under the bridge)?"""
+    if use_wsl_bridge():
+        return "kali" in (wsl_distro() or "").lower()
+    try:
+        with open(os_release, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("ID="):
+                    return line.split("=", 1)[1].strip().strip('"').lower() == "kali"
+    except OSError:
+        pass
+    return False
+
+
 def augment_path() -> None:
     """Make Go-installed tools visible to subprocesses."""
     parts = os.environ.get("PATH", "").split(os.pathsep)

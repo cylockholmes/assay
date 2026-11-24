@@ -82,6 +82,64 @@ class ToolResolutionTests(unittest.TestCase):
         self.assertEqual(proc.out.strip(), "projectdiscovery")
 
 
+class KaliAptWhenPinnedTests(unittest.TestCase):
+    """Owner's call (2026-11-24): on Kali take a Go tool from apt only when
+    the package is exactly the pinned release; otherwise go install."""
+
+    POLICY = {"nuclei": "3.11.1-0kali1", "naabu": "2.7.0-0kali1",
+              "katana": "1.7.9-0kali1", "subfinder": "1:2.17.0-0kali1"}
+
+    def _plan(self, only, kali=True):
+        missing = {n: None for n in tools.REGISTRY}
+        res = mock.Mock(constrained=False, mem_avail_mb=8000)
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["apt-cache", "policy"]:
+                ver = self.POLICY.get(cmd[2])
+                out = ("%s:\n  Installed: (none)\n  Candidate: %s\n"
+                       % (cmd[2], ver or "(none)"))
+                return tools.Proc(rc=0, out=out, err="", cmd=list(cmd))
+            return tools.Proc(rc=0, out="/home/k/go\n", err="", cmd=list(cmd))
+
+        with mock.patch.object(tools, "available", return_value=missing), \
+             mock.patch.object(env, "resources", return_value=res), \
+             mock.patch.object(env, "is_kali", return_value=kali), \
+             mock.patch.object(tools, "run", side_effect=fake_run), \
+             mock.patch.object(installer, "_has", side_effect=lambda b: b in ("apt-get", "go")):
+            return installer.build_plan(only=only)
+
+    def _cmds(self, plan):
+        return [" ".join(st.cmd) for st in plan.steps]
+
+    def test_exact_pin_comes_from_apt(self):
+        cmds = self._cmds(self._plan(["nuclei", "naabu", "subfinder"]))
+        apt = next(c for c in cmds if c.startswith("apt-get install"))
+        for pkg in ("nuclei", "naabu", "subfinder"):
+            self.assertIn(pkg, apt.split())
+        self.assertFalse(any(c.startswith("go install") for c in cmds), cmds)
+        self.assertTrue(any("update-templates" in c for c in cmds))
+
+    def test_version_mismatch_or_no_package_keeps_go_install(self):
+        cmds = self._cmds(self._plan(["katana", "dnsx"]))
+        self.assertTrue(any("go install" in c and "katana@v1.8.0" in c for c in cmds))
+        self.assertTrue(any("go install" in c and "dnsx@v1.3.1" in c for c in cmds))
+        self.assertFalse(any(c.startswith("apt-get install") for c in cmds), cmds)
+
+    def test_not_kali_never_uses_apt_for_go_tools(self):
+        cmds = self._cmds(self._plan(["nuclei"], kali=False))
+        self.assertTrue(any("go install" in c and "nuclei" in c for c in cmds))
+
+    def test_is_kali_reads_os_release(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write('PRETTY_NAME="Kali GNU/Linux Rolling"\nID=kali\nID_LIKE=debian\n')
+        try:
+            with mock.patch.object(env, "use_wsl_bridge", return_value=False):
+                self.assertTrue(env.is_kali(fh.name))
+                self.assertFalse(env.is_kali("/nonexistent"))
+        finally:
+            os.unlink(fh.name)
+
+
 class InstallScriptTests(unittest.TestCase):
     def test_flags_parse_and_help_lists_them(self):
         out = subprocess.run(["bash", os.path.join(ROOT, "install.sh"), "--help"],

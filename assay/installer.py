@@ -61,6 +61,23 @@ def _sudo_needed() -> bool:
     return getuid() != 0
 
 
+def apt_candidate(pkg: str) -> str:
+    """Upstream version apt would install for `pkg` ("" if none).
+
+    "1:3.11.1-0kali1" -> "3.11.1": epoch and Debian revision stripped.
+    """
+    out = tools.run(["apt-cache", "policy", pkg], timeout=20).out or ""
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Candidate:"):
+            ver = line.split(":", 1)[1].strip()
+            if not ver or ver == "(none)":
+                return ""
+            ver = ver.split(":", 1)[-1]
+            return ver.rsplit("-", 1)[0] if "-" in ver else ver
+    return ""
+
+
 def gopath_bin() -> str:
     # Through tools.run so that under the bridge this asks the distribution's
     # go, not a Windows one - the binaries go install produces live where the
@@ -99,7 +116,7 @@ def build_plan(only: list[str] | None = None,
     if not wanted:
         return plan
 
-    apt_pkgs = [s.apt for _, s in wanted if s.method == "apt"]
+    apt_named = [(n, s) for n, s in wanted if s.method == "apt"]
     go_mods = [(n, s) for n, s in wanted if s.method == "go"]
     manual = [n for n, s in wanted if s.method == "manual"]
     plan.unsupported = manual
@@ -108,10 +125,26 @@ def build_plan(only: list[str] | None = None,
     sudo = _sudo_needed()
     queued: list[tuple[str, tools.ToolSpec]] = []
 
+    # On Kali, a Go tool whose package is the exact pinned release comes from
+    # apt: seconds instead of a ~15 minute build, and the same tagged code.
+    # Any other version keeps the pinned go install, so flags cannot drift.
+    if have_apt and go_mods and env.is_kali():
+        still_go = []
+        for name, spec in go_mods:
+            pin = spec.go.rsplit("@", 1)[-1].lstrip("v")
+            if spec.kali_apt and apt_candidate(spec.kali_apt) == pin:
+                apt_named.append((name, spec))
+                plan.notes.append("%s: Kali's %s package is the pinned %s, so it "
+                                  "comes from apt" % (name, spec.kali_apt, pin))
+            else:
+                still_go.append((name, spec))
+        go_mods = still_go
+    apt_pkgs = [s.kali_apt if s.method == "go" else s.apt for _, s in apt_named]
+
     # -- apt ---------------------------------------------------------------
     if apt_pkgs:
         if not have_apt:
-            plan.unsupported += [n for n, s in wanted if s.method == "apt"]
+            plan.unsupported += [n for n, _ in apt_named]
             plan.notes.append(
                 "apt-get not found - this looks like a non-Debian system. "
                 "Install these with your own package manager: " + ", ".join(apt_pkgs)
@@ -122,7 +155,7 @@ def build_plan(only: list[str] | None = None,
             plan.steps.append(Step("install %d package(s)" % len(apt_pkgs),
                                    ["apt-get", "install", "-y", "-qq"] + apt_pkgs,
                                    needs_sudo=sudo))
-            queued += [(n, sp) for n, sp in wanted if sp.method == "apt"]
+            queued += apt_named
 
     # -- go toolchain ------------------------------------------------------
     if go_mods:
