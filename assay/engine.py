@@ -501,6 +501,12 @@ class Engine:
             return
         if self.cfg.opts.get("port_spec") == "all":
             return  # the initial sweep already covered every port
+        if self.cfg.profile == "quick":
+            # quick promises minutes per target; a 65,535-port sweep took 11
+            # of 14 minutes on a single lab host. standard/deep still do it.
+            self.ctx.say("ports", "quick profile: full-range sweep skipped "
+                                  "(use -p standard or deep for all ports)")
+            return
         targets = [t for t in self.ctx.targets if t.kind != "url"]
         hosts = [t.host for t in targets]
         if not hosts:

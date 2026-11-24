@@ -269,6 +269,13 @@ class NmapFailureIsNotACleanScanTests(unittest.TestCase):
         with self.assertRaises(tools.NmapFailed):
             tools.nmap_scan(["172.17.0.2"], "3000", {}, out_dir=self.tmp.name)
 
+    def test_udp_is_skipped_not_failed_without_raw_sockets(self):
+        tools.NMAP_UNPRIVILEGED.set()
+        with mock.patch.object(tools, "stream_lines") as spawn:
+            self.assertEqual(tools.nmap_udp_scan(["172.17.0.2"], {},
+                                                 out_dir=self.tmp.name), {})
+        spawn.assert_not_called()
+
     def test_successful_run_is_unchanged(self):
         self._nmap("ok")
         res = tools.nmap_scan(["172.17.0.2"], "3000", {}, out_dir=self.tmp.name)

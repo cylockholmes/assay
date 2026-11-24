@@ -1113,9 +1113,21 @@ def nmap_udp_scan(hosts: list[str], tune: dict, out_dir: str = ".",
     cmd = base + ["-oX", env.to_wsl_path(xml_path)] + hosts
     deadline = timeout if timeout is not None else max(300.0, 180.0 * len(hosts))
     t0 = time.time()
+    if NMAP_UNPRIVILEGED.is_set():
+        # UDP scans need raw sockets; there is no connect-scan equivalent.
+        _note("UDP scan skipped: nmap has no raw-socket access here (run as root, "
+              "or on Kali: sudo apt-get install -y libcap2-bin && "
+              "sudo dpkg-reconfigure nmap)")
+        _ledger("nmap", cmd, -1, "skipped", 0.0, "UDP skipped: no raw-socket access")
+        return {}
     for _ in stream_lines(["nmap", "--stats-every", "10s"] + cmd[1:], timeout=deadline,
                           ledger=False):
         pass
+    err = nmap_run_error(xml_path)
+    if err:
+        state = "skipped" if nmap_needs_unprivileged(err) else "broke"
+        _ledger("nmap", cmd, 1, state, time.time() - t0, "UDP scan: nmap failed: %s" % err)
+        return {}
     parsed = parse_nmap_xml(xml_path, include_open_filtered=True) if os.path.exists(xml_path) else {}
     n = sum(len(h.ports) for h in parsed.values())
     if not os.path.exists(xml_path):
@@ -1774,6 +1786,11 @@ def nuclei_scan(urls: list[str], severity: str, tune: dict,
         # servers and sends them callbacks carrying target data. assay runs no
         # listener of its own; blind checks use --oob-domain instead.
         "-no-interactsh",
+        # HTTP templates only: this is the web module and its input is URLs.
+        # dns/network/ssl templates fed a URL resolve the literal
+        # "http://host" as a name - ~14,500 bogus lookups per lab scan - and
+        # assay's own tls/host stages cover that ground.
+        "-pt", "http",
         "-severity", severity,
         "-c", str(tune.get("nuclei_concurrency", 10)),
         "-bulk-size", str(tune.get("nuclei_bulk", 8)),
