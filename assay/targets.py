@@ -51,6 +51,10 @@ LOOKS_LIKE_PATH = re.compile(
 
 # Never scannable, and almost always a paste accident.
 DANGEROUS = {"0.0.0.0/0", "::/0", "*", "*.*", ".", "localhost", "127.0.0.1"}
+# Loopback is skipped when it turns up in a file or pasted programme page,
+# where it is prose ("do not test localhost"), but an operator who types it on
+# the command line means it: a lab app on 127.0.0.1 is the usual first scan.
+LOOPBACK = {"localhost", "127.0.0.1"}
 
 
 @dataclass
@@ -226,8 +230,11 @@ def _hosts_from_regex(pattern: str) -> list[str]:
     return ([p] if with_apex else []) + ["*." + p]
 
 
-def parse(raw: str) -> ParsedTargets:
-    """Read targets from any of the shapes scope actually arrives in."""
+def parse(raw: str, allow_loopback: bool = False) -> ParsedTargets:
+    """Read targets from any of the shapes scope actually arrives in.
+
+    `allow_loopback` accepts localhost/127.0.0.1, for values typed inline.
+    """
     burp = from_burp(raw)
     if burp is not None:
         return burp
@@ -270,7 +277,8 @@ def parse(raw: str) -> ParsedTargets:
             tok = _clean(token)
             if not tok:
                 continue
-            if tok.lower() in DANGEROUS:
+            if tok.lower() in DANGEROUS and not (allow_loopback
+                                                 and tok.lower() in LOOPBACK):
                 out.skipped.append("%s (too broad to be a target)" % tok)
                 continue
             kind = classify(tok)
@@ -365,7 +373,7 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
             merged.skipped.append("%s (no such file)" % value)
             continue
         # Inline: commas or whitespace, so both shell styles work.
-        absorb(parse(value.replace(",", "\n")))
+        absorb(parse(value.replace(",", "\n"), allow_loopback=True))
 
     merged.warnings = [w for w in merged.warnings
                        if w != "no targets recognised in this file"]
