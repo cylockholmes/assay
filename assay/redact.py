@@ -295,6 +295,53 @@ class Redactor:
         return [x for x in leaks if not (x in seen or seen.add(x))]
 
 
+# Second-level labels under which a country code registers names, so that
+# acme.co.uk registers as acme.co.uk, not as "co.uk" (which would redact
+# every British domain in the payload).
+_SLD = {"co", "com", "org", "net", "gov", "ac", "edu", "ltd", "plc", "ne",
+        "or", "go", "gob", "nic", "mil", "sch", "nhs", "asn", "id"}
+
+# Labels too generic to stand for a client on their own. A domain like
+# shop.com still redacts in full; its bare label just isn't a term.
+_GENERIC_LABELS = {
+    "admin", "about", "account", "accounts", "api", "app", "apps", "auth",
+    "bank", "blog", "cloud", "corp", "data", "demo", "digital", "global",
+    "group", "health", "home", "info", "login", "mail", "media", "mobile",
+    "news", "online", "portal", "secure", "service", "services", "shop",
+    "staging", "static", "store", "support", "systems", "tech", "test",
+    "web", "world", "www",
+}
+
+
+def _registrable(host: str) -> str:
+    """The registrable domain of `host`, by the common suffix shapes."""
+    parts = host.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SLD:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _label_terms(registrable: str) -> set:
+    """The client's name as it appears outside a hostname.
+
+    acme-corp.com leaks as "acme-corp" in bucket names, ARNs, page titles and
+    JS identifiers, and as "acme_corp" or "AcmeCorp". Matching is
+    case-insensitive, so the joined form covers the camel case too.
+    """
+    if registrable in ALLOWED_DOMAINS:
+        return set()
+    label = registrable.split(".")[0]
+    if len(label) < 5 or label in _GENERIC_LABELS or label.isdigit():
+        return set()
+    out = {label}
+    if "-" in label:
+        out.add(label.replace("-", "_"))
+        joined = label.replace("-", "")
+        if len(joined) >= 5:
+            out.add(joined)
+    return out
+
+
 def terms_from_context(targets: Iterable[str], scope_allow: Iterable[str],
                        hosts: Iterable[str]) -> list[str]:
     """Build the known-client-term list used for redaction and verification."""
@@ -306,10 +353,11 @@ def terms_from_context(targets: Iterable[str], scope_allow: Iterable[str],
             item = item.lstrip("*.").lstrip("!-")
             if len(item) > 3 and not item.replace(".", "").isdigit():
                 terms.add(item)
-                # also register the registrable domain
-                parts = item.split(".")
-                if len(parts) >= 2:
-                    terms.add(".".join(parts[-2:]))
+                # also register the registrable domain, and the bare name
+                if len(item.split(".")) >= 2:
+                    reg = _registrable(item)
+                    terms.add(reg)
+                    terms |= _label_terms(reg)
             elif len(item) > 3:
                 terms.add(item)
     return sorted(terms, key=len, reverse=True)

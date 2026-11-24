@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 import urllib3
@@ -26,6 +26,8 @@ from assay.models import Evidence
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 MAX_BODY = 512 * 1024
+MAX_REDIRECTS = 10
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 # Public recon infrastructure. These are not the target, so the scope guard
 # must not block them - but they are also the ONLY hosts allowed to bypass it,
@@ -273,6 +275,10 @@ class HttpClient:
         `canary=True` is the session canary's own probe: it must get through
         while the scan is paused, since it is what decides to resume it.
         """
+        if allow_redirects:
+            return self._follow(method, url, headers=headers, data=data,
+                                timeout=timeout, stream_limit=stream_limit,
+                                infra=infra, canary=canary)
         host = urlsplit(url).hostname or ""
         in_scope = self.cfg.scope.allows(host)
         direct = not in_scope and infra and is_infra(host)
@@ -324,7 +330,7 @@ class HttpClient:
                     url,
                     headers=hdrs,
                     data=data,
-                    allow_redirects=allow_redirects,
+                    allow_redirects=False,      # hops go through _follow()
                     timeout=tmo,
                     # --insecure exists for targets' broken certificates.
                     # Third-party services have real ones, and a request to
@@ -393,6 +399,45 @@ class HttpClient:
                     method=method.upper(), error=last_err,
                     request_headers=dict(hdrs),
                     request_line="%s %s HTTP/1.1" % (method.upper(), url))
+
+    def _follow(self, method: str, url: str, **kw) -> Resp:
+        """Follow redirects one hop at a time, each through request().
+
+        requests' own redirect handling sends every hop wherever Location
+        points, with the engagement's custom headers, and the scope guard
+        only ever saw the first URL. Here each hop is a fresh request(), so
+        it is scope-checked, rate-limited and journaled like any other. A
+        hop that would leave scope is not taken: the redirect itself is the
+        answer, which is still a live endpoint.
+        """
+        hops: list[str] = []
+        current, data = url, kw.pop("data", None)
+        r = self.request(method, current, data=data, **kw)
+        for _ in range(MAX_REDIRECTS):
+            location = r.header("Location") if r.ok else ""
+            if r.status not in _REDIRECT_CODES or not location:
+                break
+            nxt = urljoin(current, location)
+            if urlsplit(nxt).scheme not in ("http", "https"):
+                break
+            nxt_host = urlsplit(nxt).hostname or ""
+            if not self.cfg.scope.allows(nxt_host) and not (
+                    kw.get("infra") and is_infra(nxt_host)):
+                with self._lock:
+                    self._blocked.add(nxt_host)
+                if self.journal is not None:
+                    self.journal.note("redirect not followed, out of scope: %s -> %s"
+                                      % (current, nxt))
+                break
+            hops.append(location)
+            # 303, and 301/302 after a POST, become a GET without a body,
+            # which is what browsers and requests both do.
+            if r.status == 303 or (r.status in (301, 302) and method.upper() == "POST"):
+                method, data = "GET", None
+            current = nxt
+            r = self.request(method, current, data=data, **kw)
+        r.history = hops + list(r.history)
+        return r
 
     def get(self, url: str, **kw) -> Resp:
         return self.request("GET", url, **kw)
