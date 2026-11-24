@@ -245,5 +245,127 @@ class CredentialMaskingTests(unittest.TestCase):
         self.assertEqual(credmask.mask("rc 1"), "rc 1")
 
 
+class _RedirectSession:
+    """Answers from a {url: (status, location)} table; 200 for anything else."""
+
+    def __init__(self, table):
+        self.table = table
+        self.calls = []
+
+    def request(self, method, url, **kw):
+        self.calls.append((method, url, kw))
+        status, location = self.table.get(url, (200, None))
+        resp = _FakeResp()
+        resp.url = url
+        resp.status_code = status
+        resp.headers = {"Location": location} if location else {}
+        return resp
+
+
+class RedirectScopeTests(unittest.TestCase):
+    """Every hop of a followed redirect goes through the scope guard."""
+
+    def _http(self, table):
+        http = HttpClient(_cfg(headers={"X-Api-Key": "TARGETTOKEN"}))
+        http._local.session = _RedirectSession(table)
+        return http
+
+    def test_out_of_scope_hop_is_not_taken(self):
+        http = self._http({"https://example.com/": (302, "https://sso.evil.test/login")})
+        r = http.get("https://example.com/", allow_redirects=True)
+        urls = [c[1] for c in http._local.session.calls]
+        self.assertEqual(urls, ["https://example.com/"])
+        self.assertEqual(r.status, 302)
+        self.assertTrue(r.ok)          # the redirect itself is a live endpoint
+
+    def test_in_scope_hops_are_followed_one_request_each(self):
+        http = self._http({
+            "https://example.com/": (301, "/home"),
+            "https://example.com/home": (302, "https://www.example.com/start"),
+        })
+        r = http.get("https://example.com/", allow_redirects=True)
+        urls = [c[1] for c in http._local.session.calls]
+        self.assertEqual(urls, ["https://example.com/", "https://example.com/home",
+                                "https://www.example.com/start"])
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.url, "https://www.example.com/start")
+        self.assertEqual(r.history, ["/home", "https://www.example.com/start"])
+        for _, _, kw in http._local.session.calls:
+            self.assertIs(kw["allow_redirects"], False)
+
+    def test_redirect_loop_stops(self):
+        http = self._http({"https://example.com/a": (302, "/a")})
+        r = http.get("https://example.com/a", allow_redirects=True)
+        self.assertLessEqual(len(http._local.session.calls), 11)
+        self.assertEqual(r.status, 302)
+
+    def test_post_becomes_get_after_303(self):
+        http = self._http({"https://example.com/form": (303, "/done")})
+        http.post("https://example.com/form", data="a=1", allow_redirects=True)
+        method, url, kw = http._local.session.calls[-1]
+        self.assertEqual((method, url, kw["data"]), ("GET", "https://example.com/done", None))
+
+
+class KatanaCrawlScopeTests(unittest.TestCase):
+    def test_crawl_stays_on_each_start_host(self):
+        from unittest import mock
+        seen = []
+
+        def fake(cmd, **kw):
+            seen.append(list(cmd))
+            return iter(())
+
+        with mock.patch.object(tools, "stream_json", fake):
+            tools.katana_crawl(["https://app.example.com"], 2, {}, 10)
+        argv = seen[0]
+        self.assertEqual(argv[argv.index("-fs") + 1], "fqdn")
+
+
+class RedactionLabelTests(unittest.TestCase):
+    """The client's bare name leaks outside hostnames."""
+
+    def _redactor(self, *domains):
+        from assay.redact import Redactor, terms_from_context
+        return Redactor(extra_terms=terms_from_context(list(domains), list(domains), []))
+
+    def test_bare_label_and_its_variants_are_redacted(self):
+        r = self._redactor("acme-corp.test")
+        for text in ("arn:aws:s3:::acme-corp-backups", "Welcome to AcmeCorp",
+                     "var acme_corp_key", "ACME-CORP admin"):
+            with self.subTest(text=text):
+                out = r.text(text)
+                self.assertNotIn("acme", out.lower())
+                self.assertEqual(r.verify(out), [])
+
+    def test_verify_flags_a_label_that_slipped_through(self):
+        r = self._redactor("acme-corp.test")
+        self.assertTrue(r.verify("bucket acme-corp-backups"))
+
+    def test_country_code_suffix_is_not_a_term(self):
+        from assay.redact import terms_from_context
+        terms = terms_from_context(["shop.acmewidgets.co.uk"], [], [])
+        self.assertIn("acmewidgets.co.uk", terms)
+        self.assertIn("acmewidgets", terms)
+        self.assertNotIn("co.uk", terms)
+
+    def test_generic_and_short_labels_are_not_terms(self):
+        from assay.redact import terms_from_context
+        terms = terms_from_context(["portal.com", "abc.io", "example.com"], [], [])
+        self.assertNotIn("portal", terms)
+        self.assertNotIn("abc", terms)
+        self.assertNotIn("example", terms)
+
+
+class GoToolPinTests(unittest.TestCase):
+    def test_every_go_tool_is_pinned_to_a_release(self):
+        import re
+        for name, spec in tools.REGISTRY.items():
+            if not spec.go:
+                continue
+            with self.subTest(tool=name):
+                self.assertRegex(spec.go, re.compile(r"@v\d+\.\d+\.\d+$"))
+                self.assertNotIn("@latest", spec.install)
+
+
 if __name__ == "__main__":
     unittest.main()

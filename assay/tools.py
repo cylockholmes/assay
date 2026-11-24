@@ -57,28 +57,34 @@ class ToolSpec:
         return "manual"
 
 
+# Go tools are pinned to a release, not @latest. Their flags drift between
+# versions, and assay's command lines are written against these: the ffuf
+# -acc and katana -kf breakages both came from a tool changing under an
+# unpinned install. `go install` checks each module against the Go checksum
+# database, so a pinned version is also the exact code that was reviewed.
+# Bump a pin deliberately, after running assay against the new release.
 REGISTRY: dict[str, ToolSpec] = {
     "nmap": ToolSpec("nmap", "port + service/version detection on host targets",
                      "sudo apt install -y nmap", apt="nmap", optional=False),
     "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
-                      "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
-                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"),
+                      "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
+                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0"),
     "httpx": ToolSpec("httpx", "HTTP probing, titles, tech detection, favicon hashes",
-                      "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
-                      go="github.com/projectdiscovery/httpx/cmd/httpx@latest"),
+                      "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
+                      go="github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0"),
     "nuclei": ToolSpec("nuclei", "community CVE/misconfig templates - the volume driver",
-                       "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
-                       go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+                       "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
+                       go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
                        post=["nuclei -update-templates -silent"]),
     "katana": ToolSpec("katana", "crawler that feeds URLs/params to the active checks",
-                       "go install github.com/projectdiscovery/katana/cmd/katana@latest",
-                       go="github.com/projectdiscovery/katana/cmd/katana@latest"),
+                       "go install github.com/projectdiscovery/katana/cmd/katana@v1.8.0",
+                       go="github.com/projectdiscovery/katana/cmd/katana@v1.8.0"),
     "subfinder": ToolSpec("subfinder", "passive subdomain enumeration (opt-in, third-party APIs)",
-                          "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
-                          go="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"),
+                          "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0",
+                          go="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0"),
     "dnsx": ToolSpec("dnsx", "DNS resolution and CNAME chains for takeover checks",
-                     "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
-                     go="github.com/projectdiscovery/dnsx/cmd/dnsx@latest"),
+                     "go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1",
+                     go="github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1"),
     "ffuf": ToolSpec("ffuf", "content discovery with automatic soft-404 calibration",
                      "sudo apt install -y ffuf", apt="ffuf"),
     "seclists": ToolSpec("seclists", "wordlists ffuf and dnsx need for content "
@@ -86,11 +92,11 @@ REGISTRY: dict[str, ToolSpec] = {
                          "sudo apt install -y seclists", apt="seclists",
                          binary="__wordlist__"),
     "gau": ToolSpec("gau", "historical URLs from Wayback/CommonCrawl/OTX (passive)",
-                    "go install github.com/lc/gau/v2/cmd/gau@latest",
-                    go="github.com/lc/gau/v2/cmd/gau@latest"),
+                    "go install github.com/lc/gau/v2/cmd/gau@v2.2.4",
+                    go="github.com/lc/gau/v2/cmd/gau@v2.2.4"),
     "waybackurls": ToolSpec("waybackurls", "historical URLs from the Wayback Machine (passive)",
-                            "go install github.com/tomnomnom/waybackurls@latest",
-                            go="github.com/tomnomnom/waybackurls@latest"),
+                            "go install github.com/tomnomnom/waybackurls@v0.1.0",
+                            go="github.com/tomnomnom/waybackurls@v0.1.0"),
     "arjun": ToolSpec("arjun", "discovers hidden GET/POST parameters the crawl never sees",
                       "sudo apt install -y arjun", apt="arjun"),
     "xsltproc": ToolSpec("xsltproc",
@@ -1703,6 +1709,11 @@ def katana_crawl(urls: list[str], depth: int, tune: dict, max_urls: int,
         # 155 live endpoints - not an empty crawl, a crawl that never ran.
         # "all" is the choice that covers both robots.txt and sitemap.xml.
         "-timeout", "10", "-kf", "all",
+        # Stay on each start URL's own host. katana's default field scope is
+        # "rdn", the whole root domain, which crawls sibling subdomains the
+        # scope file excludes or never listed. Every start URL is already in
+        # scope, so its exact host is the widest crawl that provably is too.
+        "-fs", "fqdn",
         "-ef", "png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico,mp4,pdf",
     ] + header_args("katana", headers) + proxy_args("katana")
     if avoid:
