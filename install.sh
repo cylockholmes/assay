@@ -4,14 +4,21 @@
 #   ./install.sh            # everything
 #   ./install.sh --minimal  # assay + nmap only (small VMs)
 #   ./install.sh --no-go    # skip the Go toolchain and ProjectDiscovery suite
+#   ./install.sh --ai       # also install the anthropic SDK (no prompt)
+#   ./install.sh --no-ai    # skip the anthropic SDK (no prompt)
+#
+# Without --ai/--no-ai it asks once, and skips the SDK when not run from a
+# terminal, so `./install.sh` never hangs in a script or cloud-init.
 set -euo pipefail
 
-MINIMAL=0; NO_GO=0
+MINIMAL=0; NO_GO=0; AI=ask
 for arg in "$@"; do
   case "$arg" in
     --minimal) MINIMAL=1 ;;
     --no-go)   NO_GO=1 ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    --ai)      AI=yes ;;
+    --no-ai)   AI=no ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -73,10 +80,15 @@ if [ ! -x "$HERE/.venv/bin/assay" ]; then
 fi
 ok "installed into $HERE/.venv  ($("$HERE/.venv/bin/assay" --version))"
 
-read -r -p "Install the optional 'anthropic' SDK for AI triage? [y/N] " ans || ans=n
+ans=n
+if [ "$AI" = yes ]; then
+  ans=y
+elif [ "$AI" = ask ] && [ -t 0 ]; then
+  read -r -p "Install the optional 'anthropic' SDK for AI triage? [y/N] " ans || ans=n
+fi
 case "$ans" in
   [yY]*) "$HERE/.venv/bin/pip" install -q anthropic && ok "anthropic SDK installed" ;;
-  *) ok "skipped (AI triage stays unavailable until you install it)" ;;
+  *) ok "skipped the anthropic SDK (add it later: $HERE/.venv/bin/pip install anthropic)" ;;
 esac
 
 mkdir -p "$HOME/.local/bin"
@@ -144,4 +156,13 @@ say "Done"
 echo "  assay doctor                 # verify tools, Burp and resources"
 echo "  assay scan <target> --scope scope.txt"
 echo
-warn "Open a new shell (or 'source ~/.bashrc') so PATH changes take effect."
+case "${SHELL:-}" in
+  */zsh) RC="~/.zshrc" ;;
+  *)     RC="~/.bashrc" ;;
+esac
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) warn "~/.local/bin is not on your PATH yet. Open a new shell (or 'source $RC'),"
+     warn "or run assay directly as: $HERE/.venv/bin/assay" ;;
+esac
+warn "Open a new shell (or 'source $RC') so the Go tools' PATH change takes effect."

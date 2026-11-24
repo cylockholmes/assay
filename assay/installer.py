@@ -126,18 +126,34 @@ def build_plan(only: list[str] | None = None,
 
     # -- go toolchain ------------------------------------------------------
     if go_mods:
+        # cgo tools (naabu links libpcap) fail to build without their headers
+        # and a C compiler, and a fresh Kali or Debian image has neither.
+        build_deps: list[str] = []
+        for _, spec in go_mods:
+            build_deps += [d for d in spec.build_deps if d not in build_deps]
         if not _has("go"):
+            build_deps.insert(0, "golang-go")
+        if build_deps:
             if have_apt:
-                plan.steps.append(Step("install the Go toolchain",
-                                       ["apt-get", "install", "-y", "-qq", "golang-go"],
+                if not apt_pkgs:
+                    plan.steps.append(Step("refresh package lists",
+                                           ["apt-get", "update", "-qq"], needs_sudo=sudo))
+                label = ("install the Go toolchain" if build_deps == ["golang-go"]
+                         else "install Go build dependencies")
+                plan.steps.append(Step(label,
+                                       ["apt-get", "install", "-y", "-qq"] + build_deps,
                                        needs_sudo=sudo))
-            else:
+            elif not _has("go"):
                 plan.unsupported += [n for n, _ in go_mods]
                 plan.notes.append(
                     "Go is not installed and apt is unavailable; install Go from "
                     "https://go.dev/dl/ and re-run 'assay install'."
                 )
                 go_mods = []
+            else:
+                plan.notes.append(
+                    "apt is unavailable; install these build dependencies with your "
+                    "package manager first: " + ", ".join(build_deps))
 
     if go_mods:
         # One compiler process at a time: parallel Go builds OOM a small VM.

@@ -43,6 +43,11 @@ class ToolSpec:
     optional: bool = True
     apt: str = ""                       # apt package name
     go: str = ""                        # go module path for `go install`
+    # Other names the same tool ships under. Kali packages ProjectDiscovery's
+    # httpx as `httpx-toolkit`, because /usr/bin/httpx is the Python client.
+    alt_binaries: list[str] = field(default_factory=list)
+    # apt packages a `go install` of this tool needs to compile (cgo).
+    build_deps: list[str] = field(default_factory=list)
     post: list[str] = field(default_factory=list)   # commands to run after install
 
     def __post_init__(self) -> None:
@@ -68,10 +73,12 @@ REGISTRY: dict[str, ToolSpec] = {
                      "sudo apt install -y nmap", apt="nmap", optional=False),
     "naabu": ToolSpec("naabu", "fast SYN/CONNECT port sweep (faster than nmap for discovery)",
                       "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
-                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0"),
+                      go="github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0",
+                      build_deps=["libpcap-dev", "gcc"]),
     "httpx": ToolSpec("httpx", "HTTP probing, titles, tech detection, favicon hashes",
                       "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
-                      go="github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0"),
+                      go="github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0",
+                      alt_binaries=["httpx-toolkit"]),
     "nuclei": ToolSpec("nuclei", "community CVE/misconfig templates - the volume driver",
                        "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
                        go="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1",
@@ -402,6 +409,76 @@ def bridge(cmd: Sequence[str]) -> list[str]:
     return cmd
 
 
+def _is_script_for(path: str, interpreter: str) -> bool:
+    """Is `path` a script run by `interpreter` (from its #! line)?"""
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline(200)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and interpreter.encode() in first
+
+
+# Shadowed lookalikes: a binary with the right name that is a different
+# program. The Go tools are static binaries, never scripts, so a Python
+# script answering to `httpx` is the encode/httpx client, which rejects every
+# ProjectDiscovery flag.
+_IMPOSTORS: dict[str, str] = {"httpx": "python"}
+
+# Tool name -> absolute path, for tools whose real binary is not what a plain
+# PATH lookup of their name finds. run()/stream_lines() rewrite argv[0] with it.
+_RESOLVED: dict[str, str] = {}
+_SHADOWED: dict[str, str] = {}
+
+
+def _genuine(name: str, path: str | None) -> bool:
+    if not path:
+        return False
+    interp = _IMPOSTORS.get(name)
+    return not (interp and _is_script_for(path, interp))
+
+
+def resolve(name: str) -> str | None:
+    """Path of the real `name` tool, skipping lookalikes and trying alt names.
+
+    Order: a genuine hit on PATH, then the Go bin directories (go install's
+    output, which a Kali /usr/bin entry can shadow), then any alternative
+    binary names the tool is packaged under.
+    """
+    spec = REGISTRY.get(name)
+    binary = spec.binary if spec else name
+    _RESOLVED.pop(binary, None)
+    _SHADOWED.pop(name, None)
+    first = env.which(binary)
+    if _genuine(name, first):
+        return first
+    if first:
+        _SHADOWED[name] = first
+    for d in env.EXTRA_BIN_DIRS:
+        cand = os.path.join(d, binary)
+        if (os.path.isfile(cand) and os.access(cand, os.X_OK)
+                and _genuine(name, cand)):
+            _RESOLVED[binary] = cand
+            return cand
+    for alt in (spec.alt_binaries if spec else []):
+        path = env.which(alt)
+        if path:
+            _RESOLVED[binary] = path
+            return path
+    return None
+
+
+def shadowed() -> dict[str, str]:
+    """Tools whose name on PATH belongs to a different program (for doctor)."""
+    return dict(_SHADOWED)
+
+
+def _real_argv(argv: list[str]) -> list[str]:
+    if argv and argv[0] in _RESOLVED:
+        return [_RESOLVED[argv[0]]] + argv[1:]
+    return argv
+
+
 def available() -> dict[str, str | None]:
     env.augment_path()
     out: dict[str, str | None] = {}
@@ -413,12 +490,14 @@ def available() -> dict[str, str | None]:
         elif resolved:
             out[name] = resolved.get(spec.binary)
         else:
-            out[name] = env.which(spec.binary)
+            out[name] = resolve(name)
     return out
 
 
 def have(name: str) -> bool:
-    return env.which(REGISTRY[name].binary if name in REGISTRY else name) is not None
+    if env.use_wsl_bridge():
+        return env.which(REGISTRY[name].binary if name in REGISTRY else name) is not None
+    return resolve(name) is not None
 
 
 def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
@@ -443,7 +522,7 @@ def run(cmd: Sequence[str], timeout: float = 300.0, stdin: str = "",
         else:
             proc_env = dict(os.environ)
             proc_env.update(env_extra)
-    argv = bridge(argv)
+    argv = bridge(_real_argv(argv))
     wait_while_paused()
     if SKIP.is_set():
         # The operator already asked to move past this stage before this
@@ -521,7 +600,7 @@ def stream_lines(cmd: Sequence[str], timeout: float = 900.0,
     timed_out = False
     try:
         proc = subprocess.Popen(
-            bridge(cmd), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            bridge(_real_argv(list(cmd))), stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=stderr_buf, text=True, bufsize=1,
         )
     except OSError as exc:

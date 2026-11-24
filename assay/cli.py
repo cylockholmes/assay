@@ -1423,6 +1423,14 @@ def cmd_doctor(args) -> int:
     console.print()
     avail = tools.available()
     console.print(tool_table(avail, tools.REGISTRY))
+    for name, impostor in sorted(tools.shadowed().items()):
+        if avail.get(name):
+            console.print("  [yellow]note[/yellow]  %s on PATH (%s) is a different program; "
+                          "assay uses %s instead" % (name, impostor, avail[name]))
+        else:
+            console.print("  [yellow]note[/yellow]  %s on PATH (%s) is a different program, "
+                          "not the one assay needs. [bold]assay install --only %s[/bold] "
+                          "adds the right one." % (name, impostor, name))
     missing = [n for n, path in avail.items() if not path]
     if missing:
         console.print("  [dim]%d tool(s) missing.[/dim] Install them with "
