@@ -539,26 +539,33 @@ def make_config(args) -> Config:
                               "[dim](path-scoped; assay's scope is host-level)[/dim]"
                               % rule)
         else:
-            override = tload.parse(args.scope.replace(",", "\n"), allow_loopback=True)
+            override = tload.parse(args.scope.replace(",", "\n"))
             a, d = tload.as_scope(override)
             scope = Scope(allow=a, deny=d)
             for why in override.skipped[:5]:
                 console.print("  [yellow]scope entry ignored[/yellow] %s" % why)
         scope_source = args.scope
-        # An explicit scope that allows nothing must never fall through to
-        # permissive mode: that turns "only this" into "anything at all", and
-        # the scan follows links to third-party hosts with active payloads.
-        if scope.permissive:
-            console.print("[red]--scope %s has no allow rules[/red], so it would "
-                          "permit every host. Refusing to scan." % args.scope)
-            console.print("  [dim]give hosts, IPs, CIDRs or *.wildcards to allow, e.g. "
-                          "--scope 127.0.0.1 or --scope scope.txt[/dim]")
-            raise SystemExit(2)
 
     if not targets:
         console.print("[red]nothing scannable in that input.[/red]")
         for w in parsed.warnings:
             console.print("  [yellow]%s[/yellow]" % w)
+        for why in parsed.skipped[:5]:
+            console.print("  [yellow]skipped[/yellow] %s" % why)
+        raise SystemExit(2)
+
+    for lo in scope.dropped_loopback[:3]:
+        console.print("  [yellow]scope entry ignored[/yellow] %s [dim](loopback is "
+                      "never in scope)[/dim]" % lo)
+    # A scope that allows nothing must never fall through to permissive mode:
+    # that turns "only this" into "anything at all", and the scan follows
+    # links to third-party hosts with active payloads.
+    if scope.permissive:
+        console.print("[red]scope from %s has no allow rules[/red], so it would "
+                      "permit every host. Refusing to scan." % scope_source)
+        console.print("  [dim]give hosts, IPs, CIDRs or *.wildcards to allow, e.g. "
+                      "--scope 10.10.0.5 or --scope scope.txt. Loopback is never "
+                      "allowed: for a local lab, scan the container's own IP.[/dim]")
         raise SystemExit(2)
 
     console.print("  [dim]%d target(s) from %s; scope from %s[/dim]"
@@ -653,12 +660,6 @@ def make_config(args) -> Config:
 
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
 
-    if scope.permissive:
-        console.print(
-            "[yellow]warning:[/yellow] no --scope file given. assay will scan whatever "
-            "you named and nothing else, but a scope file is the safety net that stops "
-            "a typo or a redirect from touching an out-of-scope host."
-        )
     return cfg
 
 

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
+from assay.config import is_loopback
+
 # A line that is a section heading rather than a target. Anything under an
 # out-of-scope heading is treated as an exclusion.
 OUT_OF_SCOPE_HEADING = re.compile(
@@ -51,10 +53,6 @@ LOOKS_LIKE_PATH = re.compile(
 
 # Never scannable, and almost always a paste accident.
 DANGEROUS = {"0.0.0.0/0", "::/0", "*", "*.*", ".", "localhost", "127.0.0.1"}
-# Loopback is skipped when it turns up in a file or pasted programme page,
-# where it is prose ("do not test localhost"), but an operator who types it on
-# the command line means it: a lab app on 127.0.0.1 is the usual first scan.
-LOOPBACK = {"localhost", "127.0.0.1"}
 
 
 @dataclass
@@ -230,11 +228,8 @@ def _hosts_from_regex(pattern: str) -> list[str]:
     return ([p] if with_apex else []) + ["*." + p]
 
 
-def parse(raw: str, allow_loopback: bool = False) -> ParsedTargets:
-    """Read targets from any of the shapes scope actually arrives in.
-
-    `allow_loopback` accepts localhost/127.0.0.1, for values typed inline.
-    """
+def parse(raw: str) -> ParsedTargets:
+    """Read targets from any of the shapes scope actually arrives in."""
     burp = from_burp(raw)
     if burp is not None:
         return burp
@@ -277,9 +272,11 @@ def parse(raw: str, allow_loopback: bool = False) -> ParsedTargets:
             tok = _clean(token)
             if not tok:
                 continue
-            if tok.lower() in DANGEROUS and not (allow_loopback
-                                                 and tok.lower() in LOOPBACK):
+            if tok.lower() in DANGEROUS:
                 out.skipped.append("%s (too broad to be a target)" % tok)
+                continue
+            if is_loopback(tok):
+                out.skipped.append("%s (loopback is never a target)" % tok)
                 continue
             kind = classify(tok)
             if not kind:
@@ -373,7 +370,7 @@ def resolve_inputs(values: Iterable[str]) -> ParsedTargets:
             merged.skipped.append("%s (no such file)" % value)
             continue
         # Inline: commas or whitespace, so both shell styles work.
-        absorb(parse(value.replace(",", "\n"), allow_loopback=True))
+        absorb(parse(value.replace(",", "\n")))
 
     merged.warnings = [w for w in merged.warnings
                        if w != "no targets recognised in this file"]
