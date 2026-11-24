@@ -16,6 +16,7 @@ from typing import Any
 from collections.abc import Iterator
 from urllib.parse import urlsplit
 
+from assay import credmask
 from assay.models import Evidence, Finding, WebTarget
 
 SCHEMA = """
@@ -119,11 +120,41 @@ TOOL_OUTPUT_CAP = 8192
 # drops anything); it is simply never touched again.
 
 
+def _mask_finding(f: Finding) -> None:
+    """Replace registered credentials (session cookies, auth headers) in a
+    finding's text before it is stored. The store feeds the report and the
+    submission exports, which are written to be shared."""
+    for name in ("title", "target", "impact", "detail", "repro", "notes"):
+        setattr(f, name, credmask.mask(getattr(f, name)))
+    for e in f.evidence:
+        for name in ("label", "request", "response", "output", "matched"):
+            setattr(e, name, credmask.mask(getattr(e, name)))
+
+
+def _owner_only(path: str) -> None:
+    """Create `path` (or tighten it) as 0600 before SQLite opens it.
+
+    The database holds evidence and the target's responses, so it is the
+    operator's alone. SQLite gives its -wal and -shm files the database's
+    own mode, so they follow. Best effort: a filesystem that cannot hold the
+    mode (a Windows mount) must not stop the scan.
+    """
+    if path == ":memory:":
+        return
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 class Store:
     def __init__(self, path: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         self.path = path
         self._lock = threading.Lock()
+        _owner_only(path)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
@@ -329,6 +360,7 @@ class Store:
 
         Returns True when this is a genuinely new finding.
         """
+        _mask_finding(f)
         f.compute_score()
         fid = f.fingerprint()
         with self._lock:

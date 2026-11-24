@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
 from assay import correlate, domains, env, netlas, recon, tools, urls as urlsrc
-from assay import gateway, notify
+from assay import credmask, gateway, notify
 from assay.burpimport import seed_urls
 from assay.session import SessionCanary
 from assay.journal import Journal
@@ -119,6 +119,10 @@ class Engine:
         # ledger, stamped with the stage it ran under (Context.stage tracks
         # whatever stage is currently talking).
         tools.LEDGER = _Ledger(self.store, self.ctx)
+        # Register the engagement's credentials before anything is recorded,
+        # so the ledger, the store and the report mask them from the start.
+        credmask.register_headers(self.cfg.tool_headers())
+        credmask.register_headers(self.cfg.request_headers())
         # Every external command now reports through the run's progress
         # hook, so a tool that works quietly still shows it is alive.
         tools.PROGRESS = self.ctx.tool_progress

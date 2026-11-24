@@ -531,10 +531,14 @@ runs confirm before sending. `--ai-dry-run` never reaches a backend.
 **Running the verification commands during the scan.** Triage returns commands
 that would verify or escalate each finding. `assay followup --run` walks them
 one at a time; `--ai-followup` runs them as a scan stage. Execution is gated
-four ways, per command: an allow-list (read-oriented security tools only),
-no-shell (`shlex`-parsed, metacharacters refuse), scope (one out-of-scope
-argument refuses the command), and a human approving each one — for which
-`--ai-followup` is the up-front approval. `--safe` or a permissive scope stops
+four ways, per command: an allow-list (read-oriented network tools only, by
+bare name; flags that write or load a local file, and arguments that name one,
+refuse), no-shell (`shlex`-parsed, metacharacters refuse), scope (one
+out-of-scope host, a non-http(s) URL, or a target on this machine refuses the
+command), and a human approving each one — for which `--ai-followup` is the
+up-front approval. `--ai-loop` is the exception: it runs the passive tier
+(DNS lookups, plain `curl` GETs, TLS handshakes) without asking each round;
+`--ai-loop-auto none` queues those for approval too. `--safe` or a permissive scope stops
 the stage regardless. `--ai-followup-limit` (25) and `--ai-followup-timeout`
 (120s) bound it; output attaches to each finding (`assay show <n>`).
 

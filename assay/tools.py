@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from collections.abc import Callable, Iterator, Sequence
 
-from assay import env
+from assay import credmask, env
 from assay.models import Port
 
 
@@ -153,8 +153,10 @@ def _ledger(tool: str, argv: list[str], rc: int, state: str,
     if LEDGER is None:
         return
     try:
-        LEDGER.record(tool=tool, argv=" ".join(shlex.quote(a) for a in argv),
-                      rc=rc, state=state, duration=duration, output=output)
+        LEDGER.record(tool=tool,
+                      argv=credmask.mask(" ".join(shlex.quote(a) for a in argv)),
+                      rc=rc, state=state, duration=duration,
+                      output=credmask.mask(output))
     except Exception:
         pass
 
@@ -672,6 +674,7 @@ def header_args(tool: str, headers: dict[str, str] | None = None) -> list[str]:
     """Render extra request headers in each tool's own flag syntax."""
     if not headers:
         return []
+    credmask.register_headers(headers)
     out: list[str] = []
     flag = {"httpx": "-H", "nuclei": "-H", "katana": "-H", "ffuf": "-H"}.get(tool)
     if not flag:

@@ -15,7 +15,7 @@ from typing import Any
 
 from assay.models import Finding
 from assay.store import Store
-from assay import version_string
+from assay import credmask, version_string
 from assay.tools import human_duration, NMAP_XML_FILES
 
 SEV_COLOR = {
@@ -228,9 +228,18 @@ def build(store: Store, assets: dict, out_path: str, ai: dict | None = None,
 
     parts.append(_live_script(status, assets.get("duration")) if live else "")
     parts.append(_FOOT % _e(version_string()))
-    doc = "\n".join(parts)
-    with open(out_path, "w", encoding="utf-8") as fh:
+    # Last line of defence for anything stored before its credential was
+    # registered: the report is written to be shared, the session is not.
+    doc = credmask.mask("\n".join(parts))
+    # Owner-only, like the store it is built from. Opened with the mode so
+    # there is no window in which a fresh report is world-readable.
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(doc)
+    try:
+        os.chmod(out_path, 0o600)      # an existing report keeps its old mode
+    except OSError:
+        pass
     return out_path
 
 
