@@ -30,15 +30,29 @@ cd assay && ./install.sh
 `install.sh` creates a virtualenv, links `assay` into `~/.local/bin`, and
 installs the external scanners it orchestrates (apt packages, the Go toolchain,
 the ProjectDiscovery suite) — printing every command before it runs.
-`--minimal` installs assay + nmap only; `--no-go` skips the Go tools.
+`--minimal` installs assay + nmap only; `--no-go` skips the Go tools;
+`--ai`/`--no-ai` answer the optional AI SDK question up front. It never waits
+for input when run from a script.
 
-Open a new shell (or `source ~/.bashrc`) so `~/.local/bin` and `$GOPATH/bin`
-are on PATH, then:
+On Kali, any ProjectDiscovery tool whose Kali package is exactly the version
+assay pins comes from apt (seconds); the rest are built with `go install`
+(10–20 minutes on a small VM). Kali's own `/usr/bin/httpx` is a different
+program (the Python HTTP client); assay ignores it and `assay doctor` says so.
+
+Open a new shell (or `source ~/.zshrc` on Kali's default zsh, `~/.bashrc` on
+bash) so `~/.local/bin` and `$GOPATH/bin` are on PATH, then:
 
 ```bash
 assay doctor                 # what's installed, WSL networking, resources
 assay scan 10.20.0.0/24      # the target is also the scope
 ```
+
+Loopback (`localhost`, `127.0.0.0/8`, `::1`) is never a target or in scope.
+To try assay on a local lab app, run it in Docker and scan the container's
+address, e.g. `docker run -d --name juice bkimminich/juice-shop`, then
+`assay scan http://$(docker inspect -f '{{.NetworkSettings.IPAddress}}' juice):3000`.
+A `--scope` that ends up allowing nothing is refused rather than treated as
+"allow everything".
 
 assay asks for an engagement codename if you did not pass `-n`; press Enter to
 name the run after the target. The report opens as it starts filling and keeps

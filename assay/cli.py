@@ -484,6 +484,24 @@ def _ask_scan_options(args) -> None:
         netlas.prompt_for_key(console)
 
 
+def _scope_file_or_none(path: str) -> Scope | None:
+    """Load a --scope file, refusing one with no allow rules.
+
+    An empty allow list means "permit everything", which is the opposite of
+    what passing a scope file asks for.
+    """
+    try:
+        scope = Scope.from_file(path)
+    except OSError as exc:
+        console.print("[red]cannot read scope file:[/red] %s" % exc)
+        return None
+    if scope.permissive:
+        console.print("[red]scope file %s has no allow rules[/red], so it would "
+                      "permit every host. Refusing." % path)
+        return None
+    return scope
+
+
 def make_config(args) -> Config:
     from assay import targets as tload
 
@@ -524,12 +542,30 @@ def make_config(args) -> Config:
             override = tload.parse(args.scope.replace(",", "\n"))
             a, d = tload.as_scope(override)
             scope = Scope(allow=a, deny=d)
+            for why in override.skipped[:5]:
+                console.print("  [yellow]scope entry ignored[/yellow] %s" % why)
         scope_source = args.scope
 
     if not targets:
         console.print("[red]nothing scannable in that input.[/red]")
         for w in parsed.warnings:
             console.print("  [yellow]%s[/yellow]" % w)
+        for why in parsed.skipped[:5]:
+            console.print("  [yellow]skipped[/yellow] %s" % why)
+        raise SystemExit(2)
+
+    for lo in scope.dropped_loopback[:3]:
+        console.print("  [yellow]scope entry ignored[/yellow] %s [dim](loopback is "
+                      "never in scope)[/dim]" % lo)
+    # A scope that allows nothing must never fall through to permissive mode:
+    # that turns "only this" into "anything at all", and the scan follows
+    # links to third-party hosts with active payloads.
+    if scope.permissive:
+        console.print("[red]scope from %s has no allow rules[/red], so it would "
+                      "permit every host. Refusing to scan." % scope_source)
+        console.print("  [dim]give hosts, IPs, CIDRs or *.wildcards to allow, e.g. "
+                      "--scope 10.10.0.5 or --scope scope.txt. Loopback is never "
+                      "allowed: for a local lab, scan the container's own IP.[/dim]")
         raise SystemExit(2)
 
     console.print("  [dim]%d target(s) from %s; scope from %s[/dim]"
@@ -624,12 +660,6 @@ def make_config(args) -> Config:
 
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
 
-    if scope.permissive:
-        console.print(
-            "[yellow]warning:[/yellow] no --scope file given. assay will scan whatever "
-            "you named and nothing else, but a scope file is the safety net that stops "
-            "a typo or a redirect from touching an out-of-scope host."
-        )
     return cfg
 
 
@@ -1423,6 +1453,14 @@ def cmd_doctor(args) -> int:
     console.print()
     avail = tools.available()
     console.print(tool_table(avail, tools.REGISTRY))
+    for name, impostor in sorted(tools.shadowed().items()):
+        if avail.get(name):
+            console.print("  [yellow]note[/yellow]  %s on PATH (%s) is a different program; "
+                          "assay uses %s instead" % (name, impostor, avail[name]))
+        else:
+            console.print("  [yellow]note[/yellow]  %s on PATH (%s) is a different program, "
+                          "not the one assay needs. [bold]assay install --only %s[/bold] "
+                          "adds the right one." % (name, impostor, name))
     missing = [n for n, path in avail.items() if not path]
     if missing:
         console.print("  [dim]%d tool(s) missing.[/dim] Install them with "
@@ -1562,10 +1600,8 @@ def cmd_replay(args) -> int:
 
     cfg = Config(out_dir=args.out, rate=args.rate)
     if getattr(args, "scope", None):
-        try:
-            cfg.scope = Scope.from_file(args.scope)
-        except OSError as exc:
-            console.print("[red]cannot read scope file:[/red] %s" % exc)
+        cfg.scope = _scope_file_or_none(args.scope)
+        if cfg.scope is None:
             return 2
     cfg.aggressive = args.aggressive
     cfg.apply_run_dir(args.out, flat=getattr(args, "flat", False))
@@ -1658,10 +1694,8 @@ def cmd_followup(args) -> int:
         return 1
     cfg = Config(out_dir=run_dir)
     if getattr(args, "scope", None):
-        try:
-            cfg.scope = Scope.from_file(args.scope)
-        except OSError as exc:
-            console.print("[red]cannot read scope file:[/red] %s" % exc)
+        cfg.scope = _scope_file_or_none(args.scope)
+        if cfg.scope is None:
             return 2
 
     if not store.findings():

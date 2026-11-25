@@ -61,6 +61,23 @@ def _sudo_needed() -> bool:
     return getuid() != 0
 
 
+def apt_candidate(pkg: str) -> str:
+    """Upstream version apt would install for `pkg` ("" if none).
+
+    "1:3.11.1-0kali1" -> "3.11.1": epoch and Debian revision stripped.
+    """
+    out = tools.run(["apt-cache", "policy", pkg], timeout=20).out or ""
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Candidate:"):
+            ver = line.split(":", 1)[1].strip()
+            if not ver or ver == "(none)":
+                return ""
+            ver = ver.split(":", 1)[-1]
+            return ver.rsplit("-", 1)[0] if "-" in ver else ver
+    return ""
+
+
 def gopath_bin() -> str:
     # Through tools.run so that under the bridge this asks the distribution's
     # go, not a Windows one - the binaries go install produces live where the
@@ -99,7 +116,7 @@ def build_plan(only: list[str] | None = None,
     if not wanted:
         return plan
 
-    apt_pkgs = [s.apt for _, s in wanted if s.method == "apt"]
+    apt_named = [(n, s) for n, s in wanted if s.method == "apt"]
     go_mods = [(n, s) for n, s in wanted if s.method == "go"]
     manual = [n for n, s in wanted if s.method == "manual"]
     plan.unsupported = manual
@@ -108,10 +125,26 @@ def build_plan(only: list[str] | None = None,
     sudo = _sudo_needed()
     queued: list[tuple[str, tools.ToolSpec]] = []
 
+    # On Kali, a Go tool whose package is the exact pinned release comes from
+    # apt: seconds instead of a ~15 minute build, and the same tagged code.
+    # Any other version keeps the pinned go install, so flags cannot drift.
+    if have_apt and go_mods and env.is_kali():
+        still_go = []
+        for name, spec in go_mods:
+            pin = spec.go.rsplit("@", 1)[-1].lstrip("v")
+            if spec.kali_apt and apt_candidate(spec.kali_apt) == pin:
+                apt_named.append((name, spec))
+                plan.notes.append("%s: Kali's %s package is the pinned %s, so it "
+                                  "comes from apt" % (name, spec.kali_apt, pin))
+            else:
+                still_go.append((name, spec))
+        go_mods = still_go
+    apt_pkgs = [s.kali_apt if s.method == "go" else s.apt for _, s in apt_named]
+
     # -- apt ---------------------------------------------------------------
     if apt_pkgs:
         if not have_apt:
-            plan.unsupported += [n for n, s in wanted if s.method == "apt"]
+            plan.unsupported += [n for n, _ in apt_named]
             plan.notes.append(
                 "apt-get not found - this looks like a non-Debian system. "
                 "Install these with your own package manager: " + ", ".join(apt_pkgs)
@@ -122,7 +155,7 @@ def build_plan(only: list[str] | None = None,
             plan.steps.append(Step("install %d package(s)" % len(apt_pkgs),
                                    ["apt-get", "install", "-y", "-qq"] + apt_pkgs,
                                    needs_sudo=sudo))
-            queued += [(n, sp) for n, sp in wanted if sp.method == "apt"]
+            queued += apt_named
 
     # -- go toolchain ------------------------------------------------------
     if go_mods:
@@ -141,8 +174,11 @@ def build_plan(only: list[str] | None = None,
 
     if go_mods:
         # One compiler process at a time: parallel Go builds OOM a small VM.
-        build_env = {"GOFLAGS": "-p=1"} if res.constrained else {}
-        if res.constrained:
+        # Memory, not core count: a 2-vCPU VM with 8 GB builds fine in
+        # parallel, and -p=1 there nearly doubled the install time.
+        low_mem = res.mem_avail_mb < 3000
+        build_env = {"GOFLAGS": "-p=1"} if low_mem else {}
+        if low_mem:
             plan.notes.append(
                 "Only %d MB RAM available - Go builds are pinned to a single "
                 "compiler process. Expect this to be slow but not to swap."
@@ -189,7 +225,7 @@ def run_plan(plan: Plan, on_step: Callable[[str, str], None] | None = None,
         if not env.use_wsl_bridge():
             extra["PATH"] = os.environ.get("PATH", "") + os.pathsep + gopath_bin()
         # else: inside the distribution its own PATH already carries
-        # $GOPATH/bin (persist_path appends it to the shell rc). Pushing a
+        # $GOPATH/bin (persist_path adds it to the shell startup files). Pushing a
         # Windows PATH across the bridge would replace it with directories
         # the distribution cannot see.
         proc = tools.run(cmd, timeout=timeout, env_extra=extra)
@@ -215,10 +251,17 @@ def run_plan(plan: Plan, on_step: Callable[[str, str], None] | None = None,
 
 
 def persist_path(bin_dir: str) -> list[str]:
-    """Add a directory to the user's shell rc files. Returns files changed."""
-    line = 'export PATH="$PATH:%s"' % bin_dir
+    """Add a directory to the user's shell startup files. Returns files changed.
+
+    ~/.profile and ~/.zprofile cover login shells, including non-interactive
+    ones (ssh host cmd, cron, scripts): Debian's ~/.bashrc returns early for
+    those, so a line appended there never runs. The directory goes first, so
+    the Go tools win over same-named system binaries (Kali's /usr/bin/httpx
+    is the Python client).
+    """
+    line = 'export PATH="%s:$PATH"' % bin_dir
     changed: list[str] = []
-    for rc in ("~/.bashrc", "~/.zshrc"):
+    for rc in ("~/.profile", "~/.zprofile", "~/.bashrc", "~/.zshrc"):
         path = os.path.expanduser(rc)
         if not os.path.exists(path):
             continue

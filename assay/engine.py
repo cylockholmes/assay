@@ -501,6 +501,12 @@ class Engine:
             return
         if self.cfg.opts.get("port_spec") == "all":
             return  # the initial sweep already covered every port
+        if self.cfg.profile == "quick":
+            # quick promises minutes per target; a 65,535-port sweep took 11
+            # of 14 minutes on a single lab host. standard/deep still do it.
+            self.ctx.say("ports", "quick profile: full-range sweep skipped "
+                                  "(use -p standard or deep for all ports)")
+            return
         targets = [t for t in self.ctx.targets if t.kind != "url"]
         hosts = [t.host for t in targets]
         if not hosts:
@@ -529,8 +535,13 @@ class Engine:
                      % len(new_ports))
         spec = ",".join(str(p) for p in new_ports)
         shosts = self._resolve_swept_hosts(targets, swept.keys()) or hosts
-        results = tools.nmap_scan(shosts, spec, self.tune,
-                                  out_dir=self.cfg.out_dir, xml_prefix="nmap-deep")
+        try:
+            results = tools.nmap_scan(shosts, spec, self.tune,
+                                      out_dir=self.cfg.out_dir, xml_prefix="nmap-deep")
+        except tools.NmapFailed as exc:
+            self.ctx.say("ports", "nmap failed on the deep-sweep ports (%s); %d naabu "
+                                  "candidate(s) left unverified" % (exc, len(new_ports)))
+            return
         self._reconcile_naabu({h: [p for p in ps if p in set(new_ports)]
                                for h, ps in swept.items()}, results, "nmap-deep")
         by_host = {t.host: t for t in targets}
@@ -765,8 +776,17 @@ class Engine:
         self.ctx.say("ports", "nmap -sV %s across %d host(s)" % (spec, len(hosts)))
         if self.cfg.resume:
             self._preserve_previous_xml(xml_prefix)
-        results = tools.nmap_scan(hosts, spec, self.tune,
-                                  out_dir=self.cfg.out_dir, xml_prefix=xml_prefix)
+        try:
+            results = tools.nmap_scan(hosts, spec, self.tune,
+                                      out_dir=self.cfg.out_dir, xml_prefix=xml_prefix)
+        except tools.NmapFailed as exc:
+            # Never read a failed nmap as "nothing open": that reports the
+            # hosts clean. Fall back to the native sweep so the web checks
+            # still get their ports.
+            self.ctx.say("ports", "nmap failed (%s) - falling back to a %d-port native "
+                                  "sweep; see 'assay doctor'" % (exc, len(WEB_PORTS)))
+            self._native_portscan(hosts)
+            return
         if swept:
             self._reconcile_naabu(swept, results, xml_prefix)
         by_host = {t.host: t for t in targets}

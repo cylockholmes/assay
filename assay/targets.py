@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
+from assay.config import is_loopback
+
 # A line that is a section heading rather than a target. Anything under an
 # out-of-scope heading is treated as an exclusion.
 OUT_OF_SCOPE_HEADING = re.compile(
@@ -272,6 +274,9 @@ def parse(raw: str) -> ParsedTargets:
                 continue
             if tok.lower() in DANGEROUS:
                 out.skipped.append("%s (too broad to be a target)" % tok)
+                continue
+            if is_loopback(tok):
+                out.skipped.append("%s (loopback is never a target)" % tok)
                 continue
             kind = classify(tok)
             if not kind:

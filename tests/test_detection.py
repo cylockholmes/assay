@@ -417,9 +417,12 @@ class InstallerTests(unittest.TestCase):
         from assay.env import Resources
 
         binaries = {"apt-get": have_apt, "go": have_go}
-        orig_has, orig_avail, orig_res, orig_gopath = (
+        orig_has, orig_avail, orig_res, orig_gopath, orig_kali = (
             installer._has, installer.tools.available,
-            installer.env.resources, installer.gopath_bin)
+            installer.env.resources, installer.gopath_bin, installer.env.is_kali)
+        # The host's distro must not decide the plan: on a real Kali box the
+        # apt-when-pinned path would replace these go installs.
+        installer.env.is_kali = lambda: False
         installer._has = lambda b: binaries.get(b, b in present)
         installer.tools.available = lambda: {
             n: ("/usr/bin/" + n if n in present else None)
@@ -434,8 +437,8 @@ class InstallerTests(unittest.TestCase):
             return installer.build_plan(only=only)
         finally:
             (installer._has, installer.tools.available,
-             installer.env.resources, installer.gopath_bin) = (
-                orig_has, orig_avail, orig_res, orig_gopath)
+             installer.env.resources, installer.gopath_bin, installer.env.is_kali) = (
+                orig_has, orig_avail, orig_res, orig_gopath, orig_kali)
 
     def test_kali_plan_covers_apt_and_go(self):
         plan = self._plan()
@@ -1417,10 +1420,13 @@ class BridgeCoverageTests(unittest.TestCase):
         tools.run = lambda cmd, **k: (seen.append(list(cmd)),
                                       tools.Proc(rc=0, out="", err="",
                                                  cmd=list(cmd)))[1]
+        which = tools.env.which
+        tools.env.which = lambda name: "/usr/bin/" + name
         try:
             tools.dns_lookup("NS", "example.com")
         finally:
             tools.run = original
+            tools.env.which = which
         self.assertEqual(seen[0][0], "dig")
         self.assertEqual(seen[1][0], "host", "host is the fallback")
 
@@ -1432,10 +1438,28 @@ class BridgeCoverageTests(unittest.TestCase):
             rc=0 if cmd[0] == "dig" else 1,
             out="" if cmd[0] == "dig" else "Host x not found: 3(NXDOMAIN)",
             err="", cmd=list(cmd))
+        which = tools.env.which
+        tools.env.which = lambda name: "/usr/bin/" + name
         try:
             self.assertIn("NXDOMAIN", tools.dns_lookup("NS", "x.invalid"))
         finally:
             tools.run = original
+            tools.env.which = which
+
+    def test_dns_lookup_skips_resolvers_that_are_not_installed(self):
+        """Minimal Kali has neither dig nor host; spawning them logged a
+        'broke' run per lookup."""
+        from assay import tools
+        seen = []
+        original, which = tools.run, tools.env.which
+        tools.run = lambda cmd, **k: (seen.append(cmd[0]),
+                                      tools.Proc(rc=0, out="", err="", cmd=list(cmd)))[1]
+        tools.env.which = lambda name: None
+        try:
+            self.assertEqual(tools.dns_lookup("NS", "example.com"), "")
+        finally:
+            tools.run, tools.env.which = original, which
+        self.assertEqual(seen, [])
 
     def test_followup_executes_through_tools_run(self):
         from assay import followup, tools

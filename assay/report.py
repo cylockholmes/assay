@@ -662,7 +662,7 @@ def _nmap_section(out_dir: str) -> str:
     NmapView-beautified render (https://nmapview.github.io) of the same data.
 
     The beautified version is pre-rendered once by Engine._stage_nmapview()
-    (fetch NmapView.xsl, merge every nmap XML file this run produced, run
+    (copy the vendored NmapView.xsl, merge every nmap XML file this run produced, run
     xsltproc) into raw/nmapview.html - a real standalone file, opened in its
     own tab, rather than embedded here. That sidesteps trying to run an XSLT
     transform inside the viewer's browser (NmapView.xsl's own CSS/JS load

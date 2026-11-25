@@ -146,8 +146,25 @@ def extract_from_js(body: str, base_url: str, host: str,
 # --------------------------------------------------------------------------
 
 
+def archivable(host: str) -> bool:
+    """Is it worth asking web archives about this host?
+
+    Archives are keyed by name. For a private, reserved or link-local IP they
+    hold other people's snapshots of that address (junk), and the lookups
+    were the slowest step of a lab scan.
+    """
+    import ipaddress
+    h = (host or "").strip("[]").split("%")[0]
+    try:
+        return ipaddress.ip_address(h).is_global
+    except ValueError:
+        return bool(h)
+
+
 def historical(domain: str, limit: int) -> tuple[list[str], str]:
     """Query archive services for URLs this host has ever served."""
+    if not archivable(domain):
+        return [], ""
     if tools.have("gau"):
         return tools.gau_urls(domain, limit), "gau"
     if tools.have("waybackurls"):

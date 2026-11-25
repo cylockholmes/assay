@@ -37,6 +37,9 @@ class ArchivedSecretsModule(Module):
         if wt.host in cache:
             return []
         cache.add(wt.host)
+        from assay.urls import archivable
+        if not archivable(wt.host):
+            return []
 
         budget = {"quick": 15, "standard": 40, "deep": 120}.get(ctx.cfg.profile, 40)
         snaps = archive.cdx_index(wt.host, ctx.http, limit=budget * 6)

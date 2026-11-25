@@ -72,8 +72,13 @@ class Scope:
 
     _allow_nets: list[object] = field(default_factory=list, repr=False)
     _deny_nets: list[object] = field(default_factory=list, repr=False)
+    dropped_loopback: list[str] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
+        # Loopback can never be allowed, so an allow list that only named it
+        # allows nothing - callers must refuse that rather than go permissive.
+        self.dropped_loopback = [a for a in self.allow if is_loopback(a)]
+        self.allow = [a for a in self.allow if not is_loopback(a)]
         self.permissive = not self.allow
         self._allow_nets = [n for n in (_as_net(x) for x in self.allow) if n]
         self._deny_nets = [n for n in (_as_net(x) for x in self.deny) if n]
@@ -184,6 +189,8 @@ class Scope:
         if not host:
             return False
         host = host.strip().lower().rstrip(".")
+        if is_loopback(host):
+            return False
         if self._matches(host, self.deny, self._deny_nets):
             return False
         if self.permissive:
@@ -232,6 +239,30 @@ class Scope:
             elif host == pat or host.endswith("." + pat):
                 return True
         return False
+
+
+_LOOPBACK_NETS = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"))
+
+
+def is_loopback(value: str) -> bool:
+    """Does a scope entry or target name the scanning machine itself?
+
+    Loopback is never in scope: it is the tester's own box, and a page or
+    redirect that points there turns the scan on the operator.
+    """
+    v = (value or "").strip().lower().rstrip(".")
+    if "://" in v:
+        v = (urlsplit(v).hostname or "").rstrip(".")
+    v = v.lstrip("*.")
+    if v == "localhost" or v.endswith(".localhost"):
+        return True
+    if v.startswith("[") and v.endswith("]"):
+        v = v[1:-1]
+    try:
+        net = ipaddress.ip_network(v, strict=False)
+    except ValueError:
+        return False
+    return any(net.version == lo.version and net.overlaps(lo) for lo in _LOOPBACK_NETS)
 
 
 def _as_net(value: str):
